@@ -1,6 +1,3 @@
-//! Contact sheets: a grid of tip thumbnails with optional name and size
-//! labels, rendered as an 8-bit gray+alpha PNG.
-
 use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 
 use crate::GrayscaleBitmap;
@@ -187,8 +184,7 @@ pub fn generate_contact_sheet_png(
                 let out_l = if out_a == 0 {
                     0
                 } else {
-                    #[allow(clippy::erasing_op)]
-                    let num = 0 * sa + dst_l * dst_a * (255 - sa) / 255;
+                    let num = dst_l * dst_a * (255 - sa) / 255;
                     num / out_a
                 };
                 canvas.put_pixel(cx, cy, LumaA([out_l as u8, out_a as u8]));
@@ -436,7 +432,6 @@ mod contact_sheet_tests {
         }
     }
 
-    /// A `w` by `h` block of full ink at the top-left of a `cw` by `ch` canvas.
     fn block(cw: u32, ch: u32, w: u32, h: u32) -> GrayscaleBitmap {
         let mut data = vec![0u8; (cw * ch) as usize];
         for y in 0..h {
@@ -451,8 +446,6 @@ mod contact_sheet_tests {
         }
     }
 
-    /// Center `bitmap` on a square canvas of black. A test-local input
-    /// builder: `ink_bounds` must report the content, not the canvas.
     fn pad_to_square(bitmap: &mut GrayscaleBitmap) {
         let width = bitmap.width as usize;
         let height = bitmap.height as usize;
@@ -477,27 +470,22 @@ mod contact_sheet_tests {
 
     #[test]
     fn ink_bounds_measures_content_not_canvas() {
-        // Landscape content centered on a padded square canvas.
         let mut landscape = block(103, 80, 103, 80);
         pad_to_square(&mut landscape);
         assert_eq!((landscape.width, landscape.height), (103, 103));
         assert_eq!(ink_bounds(&landscape), Some((103, 80)));
 
-        // Portrait content on the same square canvas.
         let mut portrait = block(80, 103, 80, 103);
         pad_to_square(&mut portrait);
         assert_eq!(ink_bounds(&portrait), Some((80, 103)));
 
-        // Content that really fills a square canvas stays square.
         assert_eq!(ink_bounds(&block(64, 64, 64, 64)), Some((64, 64)));
     }
 
     #[test]
     fn ink_bounds_counts_faint_and_detached_pixels() {
-        // A single value-1 pixel in the corner is content.
         assert_eq!(ink_bounds(&bitmap(10, 10, &[(9, 9, 1)])), Some((1, 1)));
 
-        // Two detached specks: the bounds span both.
         assert_eq!(
             ink_bounds(&bitmap(10, 10, &[(1, 2, 1), (7, 5, 255)])),
             Some((7, 4))
@@ -531,7 +519,7 @@ mod contact_sheet_tests {
     fn longest_realistic_size_label_fits_every_published_cell() {
         let label = "2500×1667";
         for cell in [100u32, 120, 200] {
-            let available = cell - 16; // cell minus 2 * the default 8px padding
+            let available = cell - 2 * ContactSheetConfig::default().padding;
             let width = label_pixel_width(label, label_px_size(cell));
             assert!(
                 width <= available,
@@ -540,7 +528,6 @@ mod contact_sheet_tests {
         }
     }
 
-    /// Renders one brush in a 100px cell and counts label text row bands.
     fn label_band_count(bitmap: &GrayscaleBitmap, show_sizes: bool) -> usize {
         let brushes = [SheetBrush { name: "x", bitmap }];
         let config = ContactSheetConfig {

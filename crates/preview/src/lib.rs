@@ -74,6 +74,23 @@ fn check_max_cell(opts: PreviewOptions) -> Result<u32, PreviewError> {
     Ok(opts.max_cell)
 }
 
+/// Where an `.abr` preview row came from. Orders rows that share a preset
+/// ordinal: sampled first, then computed, then unsupported.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Source {
+    Sampled,
+    Computed,
+    Unsupported,
+}
+
+struct Row {
+    /// The preset ordinal from the descriptor, `usize::MAX` when unknown.
+    key: usize,
+    source: Source,
+    name: String,
+    tip: TipPreview,
+}
+
 /// Tips for a Photoshop `.abr` pack.
 ///
 /// Sampled tips are decoded one at a time and downsampled immediately, so the
@@ -85,9 +102,7 @@ pub fn preview_abr(bytes: &[u8], opts: PreviewOptions) -> Result<PreviewSet, Pre
 
     let deferred = parse_abr_deferred(bytes).map_err(|e| PreviewError(e.to_string()))?;
 
-    // (sort key, source rank, name, tip). The rank keeps sampled before
-    // computed before unsupported when two presets claim the same ordinal.
-    let mut rows: Vec<(usize, u8, String, TipPreview)> = Vec::new();
+    let mut rows: Vec<Row> = Vec::new();
 
     for i in 0..deferred.pack.brushes.len() {
         let brush = &deferred.pack.brushes[i];
@@ -98,12 +113,15 @@ pub fn preview_abr(bytes: &[u8], opts: PreviewOptions) -> Result<PreviewSet, Pre
             brush.name.clone()
         };
         let tip = match deferred.decode_tip(i) {
-            // The decoded tip and its grayscale copy both go out of scope here,
-            // before the next brush is decoded.
             Ok(tip) => TipPreview::Available(downsample(&to_grayscale(&tip), max_cell)),
             Err(e) => TipPreview::Unavailable(UnavailableReason::Corrupt(e.to_string())),
         };
-        rows.push((key, 0, name, tip));
+        rows.push(Row {
+            key,
+            source: Source::Sampled,
+            name,
+            tip,
+        });
     }
 
     for preset in &deferred.pack.computed_presets {
@@ -120,7 +138,12 @@ pub fn preview_abr(bytes: &[u8], opts: PreviewOptions) -> Result<PreviewSet, Pre
                 "computed".to_string(),
             )),
         };
-        rows.push((key, 1, preset.name.clone(), tip));
+        rows.push(Row {
+            key,
+            source: Source::Computed,
+            name: preset.name.clone(),
+            tip,
+        });
     }
 
     for preset in &deferred.pack.unsupported_tip_presets {
@@ -130,20 +153,24 @@ pub fn preview_abr(bytes: &[u8], opts: PreviewOptions) -> Result<PreviewSet, Pre
             (None, Some(ShapeTipFamily::Erodible)) => "erodible".to_string(),
             (None, None) => "shape tip".to_string(),
         };
-        rows.push((
-            preset.preset_index,
-            2,
-            preset.name.clone(),
-            TipPreview::Unavailable(UnavailableReason::UnsupportedTipKind(kind)),
-        ));
+        rows.push(Row {
+            key: preset.preset_index,
+            source: Source::Unsupported,
+            name: preset.name.clone(),
+            tip: TipPreview::Unavailable(UnavailableReason::UnsupportedTipKind(kind)),
+        });
     }
 
-    rows.sort_by_key(|(key, rank, _, _)| (*key, *rank));
+    rows.sort_by_key(|row| (row.key, row.source));
 
     let entries = rows
         .into_iter()
         .enumerate()
-        .map(|(index, (_, _, name, tip))| PreviewEntry { index, name, tip })
+        .map(|(index, row)| PreviewEntry {
+            index,
+            name: row.name,
+            tip: row.tip,
+        })
         .collect();
 
     Ok(PreviewSet {

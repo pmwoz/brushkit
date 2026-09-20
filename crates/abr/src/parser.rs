@@ -1,5 +1,3 @@
-//! Core ABR parser implementation.
-//!
 //! Two file layouts, selected by the header's major version (all big-endian):
 //!
 //! **Legacy v1/v2** (Photoshop 6 and older, Photoshop 7 to CS): the header's
@@ -21,11 +19,6 @@
 //!   u16: depth (8 or 16)
 //!   u8: compression (0=raw, 1=RLE)
 //!   followed by pixel data.
-//!
-//! Reference implementations studied (for format understanding, not code):
-//!   - GIMP: app/core/gimpbrush-load.c (GPL, not ported)
-//!   - abrMate (Python)
-//!   - photoshop-export-brushes (Python)
 
 use byteorder::{BigEndian, ReadBytesExt};
 use flate2::read::ZlibDecoder;
@@ -91,7 +84,7 @@ fn parse_abr_with(bytes: &[u8], mode: TipMode) -> Result<ParsedAbr, AbrError> {
                 TipMode::Eager => TipMode::Eager,
                 TipMode::Deferred { .. } => TipMode::Deferred { block: samp_index },
             };
-            let entries = parse_samp_block(&block.data, version, subversion, block_mode)?;
+            let entries = parse_samp_block(&block.data, version, subversion, block_mode);
             bitmaps.extend(entries);
             samp_index += 1;
         }
@@ -128,18 +121,11 @@ fn parse_abr_with(bytes: &[u8], mode: TipMode) -> Result<ParsedAbr, AbrError> {
     let mut patt_block_index = 0usize;
     for block in &blocks {
         if block.block_type == "patt" && !block.data.is_empty() {
-            let outcome = parse_patt_block(&block.data)?;
-            let records_in_block =
+            let outcome = parse_patt_block(&block.data, patt_block_index, records_seen);
+            records_seen +=
                 outcome.patterns.len() + outcome.dropped.len() + outcome.unreadable.len();
-            dropped_pattern_details.extend(outcome.dropped.into_iter().map(|mut d| {
-                d.record_index += records_seen;
-                d
-            }));
-            unreadable_patt_chunks.extend(outcome.unreadable.into_iter().map(|mut u| {
-                u.block_index = patt_block_index;
-                u
-            }));
-            records_seen += records_in_block;
+            dropped_pattern_details.extend(outcome.dropped);
+            unreadable_patt_chunks.extend(outcome.unreadable);
             patt_block_index += 1;
             patterns.extend(outcome.patterns);
         }
@@ -161,8 +147,6 @@ fn parse_abr_with(bytes: &[u8], mode: TipMode) -> Result<ParsedAbr, AbrError> {
         .filter_map(|info| info.dual_brush_uuid.clone())
         .collect();
 
-    // Deferred mode keeps the compressed samp payloads alive for `decode_tip`;
-    // eager mode drops every block with the rest of `blocks`.
     let samp_blocks: Vec<Vec<u8>> = match mode {
         TipMode::Eager => Vec::new(),
         TipMode::Deferred { .. } => blocks
@@ -298,16 +282,12 @@ pub fn parse_abr_deferred(bytes: &[u8]) -> Result<DeferredPack, AbrError> {
         dual_uuids,
     } = parse_abr_with(bytes, TipMode::Deferred { block: 0 })?;
 
-    // A dropped tip is read by `dual_tip_source` straight out of the detail,
-    // and there are only ever a handful of them, so decode them now.
     for (detail, deferred) in pack.dropped_tip_details.iter_mut().zip(&dropped_tips) {
         if let Some(tip) = deferred {
             detail.bitmap = decode_deferred_tip(&samp_blocks, tip)?;
         }
     }
 
-    // Same for a brush some preset names as its dual brush: `build_sub_brush`
-    // reads `brushes[j].tip` for a uuid it did not ask this pack to decode.
     for (i, brush) in pack.brushes.iter_mut().enumerate() {
         if !dual_uuids.contains(&brush.id) {
             continue;
@@ -487,8 +467,7 @@ fn pair_brushes(valid_bitmaps: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> 
 ///
 /// v1 and v2 share one entry layout; the only difference is that v2 carries
 /// a Unicode name between `spacing` and `anti_aliasing` and v1 has no name
-/// field at all. Measured on the four v1 packs in the corpus: every entry is
-/// type 2, depth 8, RLE.
+/// field at all.
 fn parse_legacy(
     cursor: &mut Cursor<&[u8]>,
     brush_count: u16,
@@ -794,21 +773,15 @@ struct BitmapHeader {
 /// The measured v6/subversion-1 entry layout counts offsets from the
 /// `u32 entry_length` prefix and puts `rect` at +51; both call sites
 /// below hand out a slice that starts at the `$` of the uuid, 4 bytes later.
-/// Cross-check against `decode_bitmap`: depth at 47+16 = 63, compression at
-/// 47+18 = 65, pixels at 47+19 = 66 — exactly the document's +67/+69/+70.
 const V6_SUB1_RECT_OFFSET: usize = 47;
 
 /// Uuid-relative offset of the bitmap `rect2` for the subversion-2 layout.
 ///
 /// The entry layout is selected by `subversion`, not by the major version
 /// so this one offset covers v6/sub-2,
-/// v7/sub-2, v9/sub-2 and v10/sub-2 alike. Measured over the corpus on
-/// 2026-07-27: 64 packs are v6/sub-2 against 2 v10/sub-2, and every
-/// uuid-anchored entry in both — 53/53 and 120/120 — puts `rect2` here.
+/// v7/sub-2, v9/sub-2 and v10/sub-2 alike.
 ///
-/// Same subtraction: the document puts `rect2` at +305. Cross-check:
-/// depth_u16 at 301+16 = 317, compression at 301+18 = 319, pixels at
-/// 301+19 = 320 — the document's +321/+323/+324.
+/// Same subtraction: the document puts `rect2` at +305.
 const SUB2_RECT_OFFSET: usize = 301;
 
 /// Frame a samp block by its `u32 entry_length` prefixes, each body padded to
@@ -838,22 +811,18 @@ fn frame_samp_entries_by_length(data: &[u8]) -> (Vec<(usize, usize)>, bool) {
 /// Split a samp block into entries. The declared lengths frame it whenever the
 /// chain walks the whole block and — for a block that contains `$uuid\0`
 /// anchors at all — every framed body starts with one. Otherwise the uuid
-/// anchor scan recovers what it can. A uuid-shaped byte sequence inside pixel
-/// data therefore no longer moves a record boundary, while a length that lands
-/// mid-entry still hands the block to the scan.
+/// anchor scan recovers what it can.
 fn parse_samp_block(
     data: &[u8],
     version: AbrVersion,
     subversion: u16,
     mode: TipMode,
-) -> Result<Vec<Option<SampEntry>>, AbrError> {
+) -> Vec<Option<SampEntry>> {
     let uuids = find_all_uuid_offsets(data);
     let documented = documented_rect_offset(version, subversion);
     let (frames, clean) = frame_samp_entries_by_length(data);
 
     if uuids.is_empty() {
-        // Anchor-less block: nothing to fall back to, so decode what the chain
-        // framed (all of it when clean, the entries before the break otherwise).
         if !clean {
             eprintln!(
                 "warning: samp entry lengths stop framing the block after {} entries",
@@ -879,14 +848,6 @@ fn parse_samp_block(
 fn documented_rect_offset(version: AbrVersion, subversion: u16) -> Option<usize> {
     match (version, subversion) {
         (AbrVersion::V6, 1) => Some(V6_SUB1_RECT_OFFSET),
-        // Subversion 2 is one entry layout across all three majors — see the
-        // const's comment. 64 of the 66 corpus packs
-        // are v6/sub-2 and every one of them puts rect2 at this offset; the two
-        // v9/sub-2 packs decode byte-identically with and without this offset,
-        // which is why v9 joins the pair rather than relying on the scan.
-        // v7/sub-2 joins on the same evidence: all 6 entries of the
-        // Fullmetal Alchemist witness put rect2 here and decode identically
-        // with and without the offset.
         (AbrVersion::V6, 2) | (AbrVersion::V7, 2) | (AbrVersion::V9, 2) | (AbrVersion::V10, 2) => {
             Some(SUB2_RECT_OFFSET)
         }
@@ -943,7 +904,7 @@ fn parse_samp_block_by_uuids(
     uuids: &[(usize, String)],
     documented: Option<usize>,
     mode: TipMode,
-) -> Result<Vec<Option<SampEntry>>, AbrError> {
+) -> Vec<Option<SampEntry>> {
     let mut entries = Vec::new();
 
     for (i, (uuid_offset, uuid_str)) in uuids.iter().enumerate() {
@@ -974,18 +935,15 @@ fn parse_samp_block_by_uuids(
         }
     }
 
-    Ok(entries)
+    entries
 }
 
-/// Decode the entries `frame_samp_entries_by_length` framed. A per-entry
-/// decode failure is a `None` entry plus a warning, never a pack error, which
-/// is why the `Result` only ever holds `Ok`.
 fn parse_samp_block_by_lengths(
     data: &[u8],
     frames: &[(usize, usize)],
     documented: Option<usize>,
     mode: TipMode,
-) -> Result<Vec<Option<SampEntry>>, AbrError> {
+) -> Vec<Option<SampEntry>> {
     let mut entries = Vec::new();
 
     for &(start, end) in frames {
@@ -1011,7 +969,7 @@ fn parse_samp_block_by_lengths(
         }
     }
 
-    Ok(entries)
+    entries
 }
 
 fn find_bitmap_header(data: &[u8]) -> Option<BitmapHeader> {
@@ -1052,9 +1010,6 @@ fn find_bitmap_header(data: &[u8]) -> Option<BitmapHeader> {
     None
 }
 
-/// Everything `decode_bitmap` establishes before it touches a pixel. Split out
-/// so `defer_bitmap` runs exactly the same checks in the same order — a
-/// deferred entry must fail at parse time wherever an eager one would.
 struct BitmapGeometry {
     width: u32,
     height: u32,
@@ -1537,8 +1492,6 @@ mod tests {
         d.extend_from_slice(b"samp");
         d.write_u32::<BigEndian>(samp.len() as u32).unwrap();
         d.extend_from_slice(&samp);
-        // 8BIM blocks are 4-byte aligned; this samp payload is 321 bytes, so
-        // pad before desc.
         d.resize(d.len().next_multiple_of(4), 0);
         d.extend_from_slice(b"8BIM");
         d.extend_from_slice(b"desc");
@@ -1700,8 +1653,6 @@ mod tests {
         d.extend_from_slice(b"samp");
         d.write_u32::<BigEndian>(samp.len() as u32).unwrap();
         d.extend_from_slice(&samp);
-        // 8BIM blocks are 4-byte aligned; this samp payload is 321 bytes, so
-        // pad before desc.
         d.resize(d.len().next_multiple_of(4), 0);
         d.extend_from_slice(b"8BIM");
         d.extend_from_slice(b"desc");
@@ -1843,8 +1794,6 @@ mod tests {
         d.extend_from_slice(b"samp");
         d.write_u32::<BigEndian>(samp.len() as u32).unwrap();
         d.extend_from_slice(&samp);
-        // 8BIM blocks are 4-byte aligned; this samp payload is 321 bytes, so
-        // pad before desc.
         d.resize(d.len().next_multiple_of(4), 0);
         d.extend_from_slice(b"8BIM");
         d.extend_from_slice(b"desc");
@@ -2074,8 +2023,6 @@ mod tests {
         assert_eq!(blocks[1].data, b"data");
     }
 
-    /// Trailing padding after the last block is optional, so the aligned
-    /// position must clamp to the file length instead of running past it.
     #[test]
     fn read_blocks_accepts_an_unaligned_final_block_without_padding() {
         let mut d = Vec::new();
@@ -2118,16 +2065,12 @@ mod tests {
         buf
     }
 
-    /// `$BRUSHKIT_CORPUS_DIR/<relative>`; `None` when the variable is unset or
-    /// the file is absent, so the test prints `skip:` and passes.
     fn corpus_file(relative: &str) -> Option<std::path::PathBuf> {
         let root = std::path::PathBuf::from(std::env::var_os("BRUSHKIT_CORPUS_DIR")?);
         let path = root.join(relative);
         path.is_file().then_some(path)
     }
 
-    /// AC#4: real Photoshop output pads an unaligned block, so the naive walk
-    /// stops at the padding and never reaches the trailing `phry`.
     #[test]
     fn corpus_e07_block_walk_reaches_the_trailing_phry() {
         let relative = "ps-27.8.0/e07-scatter.abr";
@@ -2150,8 +2093,6 @@ mod tests {
         );
     }
 
-    /// AC#5: on a real pack the declared lengths frame the whole samp block and
-    /// land on exactly the uuid anchors, including the unaligned entries.
     #[test]
     fn corpus_hero_samp_length_chain_frames_every_anchor() {
         let relative = "third-party/Hero-Artistic-Brushes-V3.abr";
@@ -2207,7 +2148,7 @@ mod tests {
         let mut block = Vec::new();
         block.write_u32::<BigEndian>(entry.len() as u32).unwrap();
         block.extend_from_slice(&entry);
-        let entries = parse_samp_block(&block, AbrVersion::V6, 1, TipMode::Eager).unwrap();
+        let entries = parse_samp_block(&block, AbrVersion::V6, 1, TipMode::Eager);
         assert_eq!(entries.len(), 1);
         let b = entries[0].as_ref().unwrap();
         assert_eq!(b.bitmap.width, 4);
@@ -2215,9 +2156,6 @@ mod tests {
         assert!(b.uuid.is_none());
     }
 
-    /// No length prefixes at all: the first four bytes of entry 1 read as a
-    /// huge length, so the chain walk returns no frames and `clean == false`
-    /// and this test exercises the uuid anchor fallback.
     #[test]
     fn test_parse_samp_v10_uuid() {
         let e1 = build_v10_entry(8, 8, 0xDD);
@@ -2230,7 +2168,7 @@ mod tests {
         e2_mod[1] = b'b';
         block.extend_from_slice(&e2_mod);
 
-        let entries = parse_samp_block(&block, AbrVersion::V10, 2, TipMode::Eager).unwrap();
+        let entries = parse_samp_block(&block, AbrVersion::V10, 2, TipMode::Eager);
         assert_eq!(entries.len(), 2);
         assert!(entries[0].is_some());
         assert!(entries[1].is_some());
@@ -2238,17 +2176,12 @@ mod tests {
         assert_eq!(entries[1].as_ref().unwrap().bitmap.width, 16);
     }
 
-    /// Append `u32 length + body` plus the 0-3 padding bytes that put the next
-    /// prefix on a 4-byte boundary.
     fn push_framed(block: &mut Vec<u8>, body: &[u8]) {
         block.write_u32::<BigEndian>(body.len() as u32).unwrap();
         block.extend_from_slice(body);
         block.resize(block.len().next_multiple_of(4), 0);
     }
 
-    /// AC#1: a `$uuid\0` sequence inside pixel data is a third anchor, so the
-    /// anchor scan would cut entry 1 short and misframe entry 2. The declared
-    /// lengths frame both correctly.
     #[test]
     fn samp_uuid_bytes_inside_pixels_do_not_move_the_record_boundary() {
         let fake = b"$11111111-1111-1111-1111-111111111111\0";
@@ -2263,7 +2196,7 @@ mod tests {
 
         assert_eq!(find_all_uuid_offsets(&block).len(), 3, "three anchors");
 
-        let entries = parse_samp_block(&block, AbrVersion::V10, 2, TipMode::Eager).unwrap();
+        let entries = parse_samp_block(&block, AbrVersion::V10, 2, TipMode::Eager);
         assert_eq!(entries.len(), 2);
 
         let first = entries[0].as_ref().unwrap();
@@ -2283,8 +2216,6 @@ mod tests {
         assert!(second.bitmap.data.iter().all(|&b| b == 0xEE));
     }
 
-    /// AC#3: a length that runs past the block end breaks the chain, so the
-    /// uuid anchor scan recovers both entries.
     #[test]
     fn samp_broken_length_chain_falls_back_to_anchor_scan() {
         let mut block = Vec::new();
@@ -2298,7 +2229,7 @@ mod tests {
         assert!(!clean);
         assert_eq!(frames.len(), 1);
 
-        let entries = parse_samp_block(&block, AbrVersion::V10, 2, TipMode::Eager).unwrap();
+        let entries = parse_samp_block(&block, AbrVersion::V10, 2, TipMode::Eager);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].as_ref().unwrap().bitmap.width, 8);
         assert_eq!(entries[1].as_ref().unwrap().bitmap.width, 4);
@@ -2354,7 +2285,6 @@ mod tests {
         assert_eq!(decode_rle(&d, 1, 3, 1, 3).unwrap(), vec![0xFF, 0xFF, 0xFF]);
     }
 
-    /// Build RLE input: the big-endian u16 row byte-count table, then the rows.
     fn rle(counts: &[u16], rows: &[u8]) -> Vec<u8> {
         let mut d = Vec::new();
         for c in counts {
@@ -2364,36 +2294,26 @@ mod tests {
         d
     }
 
-    /// AC#1: each row decodes from its own declared slice, so an unused byte
-    /// inside row 0's count (the `0x99`) never becomes row 1's run header.
     #[test]
     fn rle_rows_decode_from_their_declared_slices() {
         let d = rle(&[3, 2], &[0x00, 0xAA, 0x99, 0x00, 0xBB]);
         assert_eq!(decode_rle(&d, 2, 1, 1, 2).unwrap(), vec![0xAA, 0xBB]);
     }
 
-    /// AC#2: a run that would push the row past its width is an error, not a
-    /// spill into the next row. The old decoder returned `AA AA AA BB`.
     #[test]
     fn rle_overlong_run_is_an_error_not_a_spill() {
-        // Each 0xFE is a repeat of 3 bytes, but the rows are only 2 wide.
         let d = rle(&[2, 2], &[0xFE, 0xAA, 0xFE, 0xBB]);
         let err = decode_rle(&d, 2, 2, 1, 4).unwrap_err();
         assert!(format!("{err}").contains("overruns"), "got: {err}");
     }
 
-    /// AC#3: a row whose slice ends before the row is full is truncated, not
-    /// completed from the next row's bytes.
     #[test]
     fn rle_row_shorter_than_its_width_is_truncated() {
-        // 0x00 is a literal run of one byte, but no byte follows it.
         let d = rle(&[1], &[0x00]);
         let err = decode_rle(&d, 1, 2, 1, 2).unwrap_err();
         assert!(format!("{err}").contains("truncated"), "got: {err}");
     }
 
-    /// AC#3: a declared row count that runs past the end of the data is
-    /// truncated.
     #[test]
     fn rle_declared_count_past_data_end_is_truncated() {
         let d = rle(&[5], &[0x00, 0xAA]);
@@ -2401,8 +2321,6 @@ mod tests {
         assert!(format!("{err}").contains("truncated"), "got: {err}");
     }
 
-    /// AC#4: a 16-bit row is `width * 2` bytes wide and returns exactly the
-    /// expected byte count.
     #[test]
     fn rle_sixteen_bit_row_returns_exactly_expected_bytes() {
         let d = rle(&[5], &[0x03, 0x12, 0x34, 0xAB, 0xCD]);
@@ -2411,15 +2329,12 @@ mod tests {
         assert_eq!(out.len(), 4);
     }
 
-    /// The -128 no-op byte produces nothing and is consumed inside the row.
     #[test]
     fn rle_noop_byte_is_consumed_inside_the_row() {
         let d = rle(&[3], &[0x80, 0xFF, 0xAA]);
         assert_eq!(decode_rle(&d, 1, 2, 1, 2).unwrap(), vec![0xAA, 0xAA]);
     }
 
-    /// AC#2: anchor-less entries whose first body length is not a multiple of
-    /// 4, so the second prefix sits at a padded offset the chain has to honour.
     #[test]
     fn samp_anchorless_entries_with_unaligned_first_length_decode_all() {
         let e1 = build_simple_entry(4, 4, 8, 0xAA);
@@ -2427,12 +2342,10 @@ mod tests {
         let mut block = Vec::new();
         block.write_u32::<BigEndian>(e1.len() as u32).unwrap();
         block.extend_from_slice(&e1);
-        // e1 is 39 bytes, so its body ends at 43; the next prefix starts at 44
-        // per the 4-byte alignment between samp entries.
         block.extend_from_slice(&[0u8; 1]);
         block.write_u32::<BigEndian>(e2.len() as u32).unwrap();
         block.extend_from_slice(&e2);
-        let entries = parse_samp_block(&block, AbrVersion::V6, 1, TipMode::Eager).unwrap();
+        let entries = parse_samp_block(&block, AbrVersion::V6, 1, TipMode::Eager);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].as_ref().unwrap().bitmap.width, 4);
         assert_eq!(entries[1].as_ref().unwrap().bitmap.width, 8);

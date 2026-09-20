@@ -15,8 +15,6 @@ const SEEDS: [&str; 9] = [
 
 #[test]
 fn corpus_files_parse_without_panic() {
-    // Read at runtime, not `env!`: a compile-time path baked into a cached test
-    // binary goes stale when the tree it was built in (a worktree) is removed.
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR");
     let dir = Path::new(&manifest_dir).join("../../fuzz/corpus/abr_parse");
     let mut replayed = BTreeSet::new();

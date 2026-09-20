@@ -44,14 +44,11 @@ pub struct AbrPack {
     /// Empty for v2 files. A consumer synthesizes tips from this geometry.
     pub computed_presets: Vec<ComputedPreset>,
     /// Texture patterns embedded in the `patt` block (`AbrPattern`), keyed by
-    /// UUID. Empty when the block is absent or empty (10/10 real packs, 17/18
-    /// fixtures). A consumer matches these to a brush's `Txtr > Ptrn > Idnt` to
-    /// build a grain.
+    /// UUID. Empty when the block is absent or empty. A consumer matches these
+    /// to a brush's `Txtr > Ptrn > Idnt` to build a grain.
     pub patterns: Vec<AbrPattern>,
     /// `patt` records that failed to decode, so the textures they carry are
-    /// absent from `patterns` — a silent loss an earlier walker had. Zero across
-    /// the whole corpus today; a whole-corpus census is the tripwire that holds
-    /// it there.
+    /// absent from `patterns`.
     pub dropped_pattern_count: usize,
     /// Per-item detail for the dropped `patt` records. Invariant:
     /// `dropped_pattern_count == dropped_pattern_details.len()`. Empty when the
@@ -60,10 +57,7 @@ pub struct AbrPack {
     /// Chunks inside a `patt` block whose header did not parse. These are NOT
     /// counted as dropped patterns: an unreadable header carries no id and no
     /// mode, and on a file with trailing junk inside the block nothing was
-    /// lost. They are counted because invisibility is what let an earlier bug
-    /// hide — a walk misaligned by two bytes produced 27 of these corpus-wide
-    /// and no test could see them. Zero across the whole corpus today; a
-    /// whole-corpus census holds it there.
+    /// lost.
     pub unreadable_patt_chunk_count: usize,
     /// Per-item detail. Invariant:
     /// `unreadable_patt_chunk_count == unreadable_patt_chunks.len()`.
@@ -104,12 +98,6 @@ pub struct AbrPack {
 }
 
 /// An empty pack: no brushes, no presets, no diagnostics, version `V10`.
-///
-/// This exists for **test and fixture construction** — `..Default::default()`
-/// lets a test spell out only the fields it exercises, so adding a new
-/// diagnostic field does not ripple through every test module in the
-/// workspace. Production parse paths construct every field explicitly and
-/// deliberately do NOT use this: a new field should force a decision there.
 impl Default for AbrPack {
     fn default() -> Self {
         Self {
@@ -144,8 +132,6 @@ pub struct DroppedTipDetail {
     pub width: u32,
     pub height: u32,
     pub owner_preset_names: Vec<String>,
-    /// The decoded tip pixels, kept so the app can preview dropped content.
-    /// Small — only dropped tips carry it.
     pub bitmap: TipBitmap,
 }
 
@@ -157,10 +143,7 @@ pub struct SkippedPresetDetail {
 }
 
 /// Which Photoshop dynamic-tip family a `Shp `-carrying preset belongs to,
-/// read from the inner `Brsh` object's class id. Witnessed over the whole
-/// corpus: 114 `dBrush` + 103 `dTips` = the entire 217-preset `Shp `
-/// population, with no `Shp ` under any other class and no `dTips`/`dBrush`
-/// without one (whole-corpus census).
+/// read from the inner `Brsh` object's class id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShapeTipFamily {
     /// `dBrush` — bristle tips (Photoshop's Angle/Blunt/Fan × Flat/Round grid).
@@ -171,10 +154,7 @@ pub enum ShapeTipFamily {
 }
 
 /// The tip shape a `Shp `-carrying preset was authored with, read from the
-/// `Brsh > Shp ` integer *together with* the enclosing class id. Measured with
-/// a controlled Photoshop 27.9.1 fixture set — sixteen presets whose Shape was
-/// picked from the Brush Settings dropdown, exported and read back, all sixteen
-/// predictions holding.
+/// `Brsh > Shp ` integer *together with* the enclosing class id.
 ///
 /// The integer alone is ambiguous: `Shp `=5 is Flat Point under `dBrush` and
 /// the airbrush tip under `dTips`, so any lookup that drops the
@@ -213,47 +193,21 @@ pub enum TipShape {
     /// this same 4, so a preset the UI called `Custom` reads back as Triangle.
     ErodibleTriangle,
     /// `dTips` 5 — the **airbrush** tip type, NOT a sixth erodible shape.
-    /// Never describe it as an "erodible airbrush": the family says `dTips`,
-    /// the shape says airbrush.
-    ///
-    /// Its sitting witness is weaker than the rest of the table: Photoshop
-    /// shows no Shape dropdown for airbrush tips, so this row could not be
-    /// *set* the way 0–4 were; it was read back off an airbrush preset rather
-    /// than round-tripped through a control we chose. The corpus supplies the
-    /// witness the sitting could not: over all 103 real-pack `dTips` presets,
-    /// `dtipsType == 1` holds on exactly the 27 with `Shp ` == 5 and on no
-    /// other.
     AirbrushTip,
 }
 
 /// Why a `patt` record was dropped instead of decoded.
 ///
-/// Both variants presuppose a record whose HEADER parsed — that is the evidence
-/// `parse_patt_block` requires before it will call a chunk a record at all. A
-/// chunk with an unreadable header is not reported here; see that function's doc
-/// comment for why the corpus forces that line.
-///
-/// Deliberately COARSE. The record parser bails from ~28 distinct field reads,
-/// and threading a separate reason through each would be a large mechanical
-/// refactor whose extra granularity has, today, exactly one witness to justify
-/// it — and that witness is already an `UnsupportedImageMode`-adjacent case with
-/// its own follow-up task. Splitting `Undecodable` is a follow-up **with a real
-/// pack behind it**, per this repo's rule that claims about Photoshop bytes need
-/// a corpus witness. The coarseness is a decision, not an oversight.
+/// Both variants presuppose a record whose header parsed. A chunk with an
+/// unreadable header is not reported here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DroppedPatternReason {
     /// The header parsed and named a PSD image mode the pattern decoder does
-    /// not read. The silent class of loss: the bytes are fine, our mode
-    /// coverage is not.
+    /// not read.
     UnsupportedImageMode(u32),
     /// **The header parsed and the body did not** — a truncated field, a
     /// defensive cap exceeded, a channel that failed to decode, or a supported
     /// mode whose plane count `resolve_gray` refuses.
-    ///
-    /// Note the asymmetry this name might otherwise hide: a record damaged
-    /// badly enough that its own header will not parse is NOT reported as
-    /// `Undecodable`, because such bytes are indistinguishable from the
-    /// non-record trailing content real packs routinely carry.
     Undecodable,
 }
 
@@ -292,8 +246,7 @@ pub struct UnreadablePattChunk {
 
 /// A preset that yields no output at all: it declares neither a sampled tip
 /// (`sampledData` uuid) nor computed geometry, so it surfaces as neither a
-/// brush nor a computed preset. Witnessed population: bristle/erodible/
-/// airbrush presets carrying the `Shp ` tip descriptor.
+/// brush nor a computed preset.
 #[derive(Debug, Clone)]
 pub struct UnsupportedTipPresetDetail {
     pub name: String,
@@ -379,28 +332,21 @@ pub struct ComputedGeometry {
 }
 
 /// The `dualBrush` section of a preset: Photoshop's SECONDARY tip plus the
-/// dual-side scatter block that drives it. Surfaced whole so a consumer can
-/// carry it into Procreate as a nested `Sub01` sub-brush.
-///
-/// Field names mirror the [`BrushDescriptor`] fields they feed, because the
-/// converter assembles a synthetic `BrushDescriptor` from this struct and runs
-/// it through the SAME `map_params` path a main brush uses — there is no second
-/// mapper. Each field is `Option`/`false` when the file omits the key.
+/// dual-side scatter block that drives it. Each field is `Option`/`false` when
+/// the file omits the key.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DualBrush {
     /// `dualBrush/Brsh/sampledData` — the secondary tip's samp uuid. `None` for
-    /// a COMPUTED secondary tip (80 of the 806 enabled duals in the 2026-09-04
-    /// corpus scan); then `computed` carries the geometry instead.
+    /// a COMPUTED secondary tip; then `computed` carries the geometry instead.
     pub uuid: Option<String>,
-    /// `dualBrush/Brsh/Spcn` (`UntF #Prc`) — the secondary TIP's spacing, which
-    /// maps to `plotSpacing`. NOT `dualBrush/Spcn` (see `scatter_spacing_pct`).
+    /// `dualBrush/Brsh/Spcn` (`UntF #Prc`) — the secondary TIP's spacing.
+    /// NOT `dualBrush/Spcn` (see `scatter_spacing_pct`).
     pub spacing_pct: Option<f64>,
     /// `Some` iff the inner `Brsh` class id is `computedBrush` — the secondary
-    /// tip is procedural and the converter synthesizes its bitmap.
+    /// tip is procedural.
     pub computed: Option<ComputedGeometry>,
     /// `dualBrush/Brsh/Dmtr` (`UntF #Pxl`) — secondary tip diameter, read for
-    /// both sampled and computed inner classes. Drives the sub-brush's
-    /// `max_size`, normalized against the pack's MAIN tips only.
+    /// both sampled and computed inner classes.
     pub diameter_px: Option<f64>,
     /// `dualBrush/Brsh:sampledBrush/Angl` (`#Ang`) — sampled secondary rotation.
     pub shape_angle_deg: Option<f64>,
@@ -422,31 +368,23 @@ pub struct DualBrush {
     /// `dualBrush/countDynamics:brVr/jitter` (`#Prc`) — gated by `use_scatter`.
     pub count_jitter_pct: Option<f64>,
     /// `dualBrush/Spcn` (`UntF #Prc`) — the dual-side SCATTER-mode spacing, the
-    /// twin of the top-level `Spcn` trap (two distinct `Spcn` keys). Read so
-    /// the trap is visible in the data, and
-    /// deliberately NOT mapped — `spacing_pct` is the one that becomes
-    /// `plotSpacing`.
+    /// twin of the top-level `Spcn` trap (two distinct `Spcn` keys).
     pub scatter_spacing_pct: Option<f64>,
     /// `dualBrush/BlnM` (`enum`) — how PS composites the secondary tip over the
-    /// primary. Carried onto the parent's `dualBlendMode` through the
-    /// device-measured dictionary.
+    /// primary.
     pub blend_mode: Option<String>,
-    /// `dualBrush/Flip` (`bool`) — PS "Flip" for the secondary tip. Carried onto
-    /// the `Sub01` sub-brush's `shapeFlipXJitter`/`shapeFlipYJitter` pair, where
-    /// Procreate's own importer puts it.
+    /// `dualBrush/Flip` (`bool`) — PS "Flip" for the secondary tip.
     pub flip: Option<bool>,
 }
 
 /// Per-brush Photoshop dynamics extracted from the ABR descriptor.
 ///
 /// Each field is `Option`: `None` means the source `.abr` carried no value for
-/// that parameter, so a consumer's mapper leaves the corresponding output
-/// parameter at its own default — output changes only where source data
-/// exists.
+/// that parameter.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BrushDescriptor {
     /// Photoshop `Spcn` — spacing as a percentage of tip diameter (e.g. `25.0`
-    /// = 25 %). Maps to Procreate `plotSpacing`.
+    /// = 25 %).
     pub spacing_pct: Option<f64>,
     /// `Some` iff the inner `Brsh` object's class id is `computedBrush` — i.e.
     /// the preset is procedural, not sampled. Present even when all four
@@ -455,190 +393,147 @@ pub struct BrushDescriptor {
     pub computed: Option<ComputedGeometry>,
     /// Photoshop `Dmtr` (`UntF #Pxl`) — tip diameter in px (the tip INK EXTENT,
     /// not the selection bbox). Present for both sampled and computed presets.
-    /// Drives the within-pack relative `maxSize` normalization;
-    /// computed synthesis keeps reading `computed.diameter_px`.
     pub diameter_px: Option<f64>,
     /// Photoshop `scatterDynamics:brVr/jitter` (`#Prc`) — scatter amount, present
-    /// only when `useScatter` is true. Maps to Procreate `shapeScatter`.
+    /// only when `useScatter` is true.
     pub scatter_amount_pct: Option<f64>,
     /// Photoshop `szVr:brVr/jitter` (`#Prc`) — size-jitter amount, present only
-    /// when `useTipDynamics` is true. Maps to Procreate `dynamicsJitterSize`.
+    /// when `useTipDynamics` is true.
     pub size_jitter_pct: Option<f64>,
     /// Photoshop `angleDynamics:brVr/bVTy` (numeric `long` control selector),
-    /// present only when `useTipDynamics` is true. 6 = Direction drives
-    /// Procreate `shapeRotation`; 3 = Pen Tilt drives `shapeAzimuth` plus the
-    /// −π/2 convention offset.
+    /// present only when `useTipDynamics` is true. 6 = Direction, 3 = Pen Tilt.
     pub angle_control: Option<i32>,
     /// Photoshop `angleDynamics:brVr/jitter` (`#Prc`) — angle-jitter amount,
-    /// present only when `useTipDynamics` is true. Drives Procreate
-    /// `shapeScatter` (per-dab rotation, `2·jitter%/100` clamped to [0, 1]);
-    /// `shapeRandomise` randomises once per stroke and is
-    /// deliberately not written from this key.
+    /// present only when `useTipDynamics` is true.
     pub angle_jitter_pct: Option<f64>,
     /// Photoshop `szVr:brVr/bVTy` (numeric `long` control selector; 2 = Pen
-    /// Pressure), present only when `useTipDynamics` is true. Drives Procreate
-    /// `dynamicsPressureSize` (1.0 iff control == Pen Pressure).
+    /// Pressure), present only when `useTipDynamics` is true.
     pub pressure_size_control: Option<i32>,
     /// Photoshop `opVr:brVr/bVTy` (numeric `long` control selector; 2 = Pen
-    /// Pressure), present only when `usePaintDynamics` is true. Drives Procreate
-    /// `dynamicsPressureOpacityTransfer` (1.0 iff control == Pen Pressure).
+    /// Pressure), present only when `usePaintDynamics` is true.
     pub pressure_opacity_control: Option<i32>,
     /// Photoshop `opVr:brVr/jitter` (`#Prc`) — opacity-jitter amount, present only
-    /// when `usePaintDynamics` is true. Maps to Procreate `dynamicsJitterOpacity`.
+    /// when `usePaintDynamics` is true.
     pub opacity_jitter_pct: Option<f64>,
     /// Photoshop `prVr:brVr/jitter` (`#Prc`) — PS Transfer-panel Flow Jitter amount,
-    /// present only when `usePaintDynamics` is true. Disclosed, not mapped: Procreate
-    /// has no flow-jitter target.
+    /// present only when `usePaintDynamics` is true.
     pub flow_jitter_pct: Option<f64>,
     /// Photoshop `wtVr:brVr/jitter` (`#Prc`) — PS Transfer-panel Wetness Jitter
-    /// amount, present only when `usePaintDynamics` is true. Maps to Procreate
-    /// `dynamicsWetnessJitter` (via `pct / 100`).
+    /// amount, present only when `usePaintDynamics` is true.
     pub wetness_jitter_pct: Option<f64>,
     /// Photoshop `mxVr:brVr/jitter` (`#Prc`) — PS Transfer-panel Mix Jitter amount,
-    /// present only when `usePaintDynamics` is true. Disclosed, not mapped: Procreate
-    /// has no mix-jitter target.
+    /// present only when `usePaintDynamics` is true.
     pub mix_jitter_pct: Option<f64>,
     /// Photoshop `Brsh:sampledBrush/Angl` (`#Ang`, degrees) — sampled-tip rotation.
     /// Distinct from `ComputedGeometry::angle_deg` (which drives computed-tip
-    /// synthesis). Maps to Procreate `shapeAngle` (static tip angle;
-    /// `shapeRotation` is the follow-stroke fraction).
+    /// synthesis).
     pub shape_angle_deg: Option<f64>,
     /// Photoshop `Brsh:sampledBrush/Rndn` (`#Prc`) — sampled-tip roundness percent.
-    /// Distinct from `ComputedGeometry::roundness_pct`. Maps to Procreate
-    /// `shapeRoundness` via `Rndn / 100`.
+    /// Distinct from `ComputedGeometry::roundness_pct`.
     pub shape_roundness_pct: Option<f64>,
     /// Photoshop top-level `Cnt ` (`doub`) — scatter count (dabs per stamp),
-    /// present only when `useScatter` is true. Maps to Procreate `shapeCount`.
+    /// present only when `useScatter` is true.
     pub scatter_count: Option<f64>,
     /// Photoshop top-level `bothAxes` (`bool`) — scatter both-axes flag, present
-    /// only when `useScatter` is true. Extracted but intentionally NOT mapped:
-    /// no confirmed Procreate axis target.
+    /// only when `useScatter` is true.
     pub scatter_both_axes: Option<bool>,
     /// Photoshop `countDynamics:brVr/jitter` (`#Prc`) — scatter count-jitter
-    /// amount, present only when `useScatter` is true. Maps to Procreate
-    /// `shapeCountJitter`.
+    /// amount, present only when `useScatter` is true.
     pub count_jitter_pct: Option<f64>,
     /// Photoshop top-level `minimumDiameter` (`UntF` `#Prc`) — Shape Dynamics
     /// "Minimum Diameter", the floor a pressure-driven tip shrinks to at zero
-    /// pressure. Witnessed 1:1 with the UI percent (corpus e13-minimum40, UI 40%
-    /// → 40.0). Present only when `useTipDynamics` is true (the brVr `Mnm`
-    /// sub-key is vestigial in PS 27.8). Maps to Procreate `minSize`.
+    /// pressure. Present only when `useTipDynamics` is true (the brVr `Mnm`
+    /// sub-key is vestigial in PS 27.8).
     pub minimum_diameter_pct: Option<f64>,
     /// Photoshop `roundnessDynamics:brVr/jitter` (`#Prc`) — Shape Dynamics
-    /// Roundness Jitter. Present only when `useTipDynamics` is true; corpus
-    /// control (`bVTy`) is always 0 (pure jitter). Maps to Procreate
-    /// `jitterShapeRoundness`.
+    /// Roundness Jitter. Present only when `useTipDynamics` is true.
     pub roundness_jitter_pct: Option<f64>,
     /// Photoshop top-level `minimumRoundness` (`#Prc`) — floor of the roundness
-    /// jitter range. Present only when `useTipDynamics` is true. Extracted, not
-    /// mapped: Procreate's roundness floors are pressure/tilt-scoped.
+    /// jitter range. Present only when `useTipDynamics` is true.
     pub minimum_roundness_pct: Option<f64>,
     /// Photoshop top-level `flipX` (`bool`) — Shape Dynamics Flip X Jitter. Present
-    /// only when `useTipDynamics` is true. Maps to Procreate `shapeFlipXJitter`.
+    /// only when `useTipDynamics` is true.
     pub flip_x_jitter: Option<bool>,
     /// Photoshop top-level `flipY` (`bool`) — Shape Dynamics Flip Y Jitter. Present
-    /// only when `useTipDynamics` is true. Maps to Procreate `shapeFlipYJitter`.
+    /// only when `useTipDynamics` is true.
     pub flip_y_jitter: Option<bool>,
-    /// Photoshop `Brsh:sampledBrush/flipX` (`bool`) — static tip flip. No Procreate
-    /// parameter; baked into Shape.png by mirroring the tip bitmap in the converter.
+    /// Photoshop `Brsh:sampledBrush/flipX` (`bool`) — static tip flip.
     pub tip_flip_x: Option<bool>,
-    /// Photoshop `Brsh:sampledBrush/flipY` (`bool`) — static tip flip. No Procreate
-    /// parameter; baked into Shape.png by mirroring the tip bitmap in the converter.
+    /// Photoshop `Brsh:sampledBrush/flipY` (`bool`) — static tip flip.
     pub tip_flip_y: Option<bool>,
     /// Photoshop `Txtr:Ptrn/Idnt` (`TEXT`) — the texture pattern UUID, keyed to
-    /// a `patt` record. Present only when `useTexture` is true. Drives grain
-    /// resolution in a consumer.
+    /// a `patt` record. Present only when `useTexture` is true.
     pub texture_pattern_id: Option<String>,
     /// Photoshop `Txtr:Ptrn/Nm  ` (`TEXT`) — the texture pattern display name.
     /// Present only when `useTexture` is true. Diagnostic only.
     pub texture_pattern_name: Option<String>,
     /// Photoshop top-level `textureDepth` (`UntF` `#Prc`) — texture depth percent.
-    /// Present only when `useTexture` is true. Drives grain depth.
+    /// Present only when `useTexture` is true.
     pub texture_depth_pct: Option<f64>,
     /// Photoshop top-level `minimumDepth` (`UntF` `#Prc`) — minimum texture depth
-    /// percent. Present only when `useTexture` is true. Feeds grain resolution.
+    /// percent. Present only when `useTexture` is true.
     pub texture_minimum_depth_pct: Option<f64>,
     /// Photoshop top-level `textureScale` (`UntF` `#Prc`) — texture scale percent.
-    /// Present only when `useTexture` is true. Feeds grain resolution.
+    /// Present only when `useTexture` is true.
     pub texture_scale_pct: Option<f64>,
     /// Photoshop top-level `InvT` (`bool`) — invert-texture flag. Present only
-    /// when `useTexture` is true. Feeds grain resolution.
+    /// when `useTexture` is true.
     pub texture_invert: Option<bool>,
     /// Photoshop top-level `TxtC` (`bool`) — "Texture Each Tip". Present only
-    /// when `useTexture` is true. `Option` is load-bearing: `false` is the value
-    /// that selects Procreate's Texturised grain regime, so an absent key must
-    /// stay absent rather than collapse to `false`.
+    /// when `useTexture` is true.
     pub texture_each_tip: Option<bool>,
     /// Photoshop top-level `textureBlendMode` (`enum` `BlnM`) — the raw blend-mode
     /// value id (e.g. "height"). Present only when `useTexture` is true.
-    /// Extracted-but-unmapped: no confirmed Procreate target yet.
     pub texture_blend_mode: Option<String>,
     /// Photoshop `textureDepthDynamics:brVr/jitter` (`#Prc`) — texture depth-jitter
-    /// amount. Present only when `useTexture` is true. Feeds grain resolution.
+    /// amount. Present only when `useTexture` is true.
     pub texture_depth_jitter_pct: Option<f64>,
     /// Photoshop top-level `textureBrightness` (`long`) — texture brightness.
-    /// Present only when `useTexture` is true. Extracted-but-unmapped until a
-    /// calibration sitting measures it.
+    /// Present only when `useTexture` is true.
     pub texture_brightness: Option<i64>,
     /// Photoshop top-level `textureContrast` (`long`) — texture contrast. Present
-    /// only when `useTexture` is true. Extracted-but-unmapped until a
-    /// calibration sitting measures it.
+    /// only when `useTexture` is true.
     pub texture_contrast: Option<i64>,
     /// Photoshop `dualBrush > useDualBrush` (`bool`) — true iff the preset carries
     /// an enabled dual-brush (secondary tip) section, even when the tip is COMPUTED
-    /// (no sampledData uuid). Drops with no Procreate equivalent; surfaced only for
-    /// the per-brush "notConverted" disclosure.
+    /// (no sampledData uuid).
     pub use_dual_brush: bool,
-    /// The whole `dualBrush` section, `Some` iff `use_dual_brush` is true — the
-    /// data a consumer turns into a nested `Sub01` sub-brush.
+    /// The whole `dualBrush` section, `Some` iff `use_dual_brush` is true.
     /// A dual whose secondary tip cannot be resolved (dangling samp uuid, or
-    /// geometry too degenerate to synthesize) still lands here; the converter
-    /// then emits no `Sub01` and the old "secondary tip dropped" disclosure
-    /// stands.
+    /// geometry too degenerate to synthesize) still lands here.
     pub dual: Option<DualBrush>,
-    /// Photoshop `Wtdg` (`bool`) — Wet Edges flag. Disclose-only, not
-    /// converted.
+    /// Photoshop `Wtdg` (`bool`) — Wet Edges flag.
     pub wet_edges: bool,
-    /// Photoshop `Nose` (`bool`) — Noise flag. Disclose-only, not converted.
+    /// Photoshop `Nose` (`bool`) — Noise flag.
     pub noise: bool,
     /// Photoshop `Rpt ` (`bool`, note trailing space) — Build-up flag.
-    /// Disclose-only, not converted.
     pub buildup: bool,
-    /// Photoshop `useColorDynamics` (`bool`) — Color Dynamics panel enable.
-    /// Surfaced for the per-brush "notConverted" disclosure and as the gate for
-    /// the six `color_*` sub-values below.
+    /// Photoshop `useColorDynamics` (`bool`) — Color Dynamics panel enable, the
+    /// gate for the six `color_*` sub-values below.
     pub use_color_dynamics: bool,
     /// Photoshop `H   ` (`UntF` `#Prc`, key = "H" + three spaces) — Color Dynamics
-    /// Hue Jitter percent. Present only when `useColorDynamics` is true. Maps to
-    /// Procreate `dynamicsJitterHue`/`dynamicsJitterStrokeHue` (e22 witness).
+    /// Hue Jitter percent. Present only when `useColorDynamics` is true.
     pub color_hue_jitter_pct: Option<f64>,
     /// Photoshop `Strt` (`UntF` `#Prc`) — Color Dynamics Saturation Jitter percent.
-    /// Present only when `useColorDynamics` is true. Maps to Procreate
-    /// `dynamicsJitterSaturation`/`...StrokeSaturation` (e22 witness).
+    /// Present only when `useColorDynamics` is true.
     pub color_saturation_jitter_pct: Option<f64>,
     /// Photoshop `Brgh` (`UntF` `#Prc`) — Color Dynamics Brightness Jitter percent.
-    /// Present only when `useColorDynamics` is true. Maps to Procreate
-    /// `dynamicsJitterLightness`/`...StrokeLightness` (e22 witness).
+    /// Present only when `useColorDynamics` is true.
     pub color_brightness_jitter_pct: Option<f64>,
     /// Photoshop `purity` (`UntF` `#Prc`) — Color Dynamics Purity. Present only
-    /// when `useColorDynamics` is true. NO Procreate counterpart; surfaced for the
-    /// notConverted residue disclosure only.
+    /// when `useColorDynamics` is true.
     pub color_purity_pct: Option<f64>,
     /// Photoshop `clVr` (`Objc` class `brVr`, `jitter` `#Prc`) — Color Dynamics
     /// Foreground/Background Jitter percent. Present only when `useColorDynamics`
-    /// is true. NO Procreate counterpart; surfaced for the notConverted residue
-    /// disclosure only.
+    /// is true.
     pub color_fg_bg_jitter_pct: Option<f64>,
     /// Photoshop `colorDynamicsPerTip` (`bool`) — "Apply Per Tip". Present only
-    /// when `useColorDynamics` is true. Routes the three color jitters to the
-    /// per-tip (`true`, e22-witnessed) vs per-stroke (`false`, e23-witnessed)
-    /// Procreate keys.
+    /// when `useColorDynamics` is true.
     pub color_dynamics_per_tip: Option<bool>,
-    /// Photoshop `useBrushPose` (`bool`) — Brush Pose flag. Disclose-only, not
-    /// converted.
+    /// Photoshop `useBrushPose` (`bool`) — Brush Pose flag.
     pub use_brush_pose: bool,
     /// Photoshop top-level `brushProjection` (`bool`) — tip projection follows
-    /// stylus tilt/rotation. No Procreate equivalent; surfaced via `not_converted`.
+    /// stylus tilt/rotation.
     pub brush_projection: bool,
 }
 
@@ -681,10 +576,6 @@ pub struct TipBitmap {
 pub enum AbrError {
     /// Carries the raw major version read from the header, so a version this
     /// crate has no `AbrVersion` variant for can still be named in the message.
-    ///
-    /// The message claims only what the parser has actually seen — a header
-    /// that read cleanly and a plausible version number — and not that the
-    /// rest of the file is sound.
     #[error("unsupported ABR version {0}: the header reads fine, this version is not supported")]
     UnsupportedVersion(u16),
 

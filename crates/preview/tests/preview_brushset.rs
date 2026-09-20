@@ -1,6 +1,3 @@
-//! `preview_brushset` and `preview_brush` over synthetic Procreate archives:
-//! member order, per-member availability and the max-cell fit.
-
 mod common;
 
 use brushkit_preview::{

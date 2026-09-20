@@ -98,8 +98,6 @@ pub fn decode_tip_png(bytes: &[u8]) -> Result<GrayscaleBitmap, ShapePngError> {
     let luma = reader
         .decode()
         .map_err(|e| match &e {
-            // Only the dimension kind takes this branch: an
-            // `InsufficientMemory` trip is the MAX_ENTRY_BYTES alloc ceiling.
             image::ImageError::Limits(l)
                 if matches!(l.kind(), image::error::LimitErrorKind::DimensionError) =>
             {

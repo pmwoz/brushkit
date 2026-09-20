@@ -1,7 +1,3 @@
-//! Corpus-gated smoke test: every real `.abr` under `$BRUSHKIT_CORPUS_DIR`
-//! parses. Real brush packs are copyrighted and are not committed, so the test
-//! prints `skip:` and passes when the variable is unset.
-
 use std::path::{Path, PathBuf};
 
 fn abr_files(dir: &Path, out: &mut Vec<PathBuf>) {

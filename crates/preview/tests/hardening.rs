@@ -1,6 +1,3 @@
-//! Malformed archives must be rejected by a declared ceiling, never by an
-//! allocation or a recursive drop. Each input is a bomb built in the test.
-
 mod common;
 
 use brushkit_preview::{preview_brush, preview_brushset, PreviewOptions, TipPreview};

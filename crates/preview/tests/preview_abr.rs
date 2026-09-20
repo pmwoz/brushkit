@@ -1,14 +1,9 @@
-//! `preview_abr` over the committed fuzz seeds: every preset the pack declares
-//! becomes exactly one entry, and every rendered tip fits the requested cell.
-
 use brushkit_preview::{preview_abr, PreviewOptions, TipPreview};
 use std::path::Path;
 
 const SEEDS: [&str; 2] = ["wellformed_v6_min", "wellformed_v6_patt"];
 
 fn seed(name: &str) -> Vec<u8> {
-    // Read at runtime, not `env!`: a compile-time path baked into a cached test
-    // binary goes stale when the tree it was built in (a worktree) is removed.
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR");
     let path = Path::new(&manifest_dir)
         .join("../../fuzz/corpus/abr_parse")

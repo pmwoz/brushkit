@@ -1,6 +1,3 @@
-//! Grayscale tip bitmaps: the common currency between a parsed `.abr` tip, a
-//! Procreate `Shape.png` and anything this crate renders.
-
 use brushkit_abr::TipBitmap;
 use image::{ImageBuffer, Rgba, RgbaImage};
 
@@ -77,9 +74,6 @@ impl std::error::Error for TipImageError {}
 /// buffer. Alpha becomes intensity when the image has an alpha channel;
 /// otherwise luminance is inverted (dark = opaque), matching Photoshop's
 /// convention.
-///
-/// Takes bytes rather than a path because this crate also compiles to wasm32,
-/// where `std::fs` is not usable.
 pub fn decode_tip_image(bytes: &[u8]) -> Result<GrayscaleBitmap, TipImageError> {
     use image::GenericImageView;
 

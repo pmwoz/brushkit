@@ -1,26 +1,19 @@
 //! Parser for the ABR `patt` (pattern) block — the embedded texture pixels a
 //! Photoshop brush references via `Txtr > Ptrn > Idnt`.
 //!
-//! The layout below was byte-verified on `e12-texturedual.abr` (mode 2
-//! indexed, one record). All fields big-endian;
-//! offsets in this module are relative to each record's DATA start (i.e. after
-//! its `u32 pattern_length` prefix).
+//! All fields big-endian; offsets in this module are relative to each record's
+//! DATA start (i.e. after its `u32 pattern_length` prefix).
 //!
 //! Image modes read: 1 (Grayscale, channel 0 taken as-is), 2 (Indexed, via the
-//! record's palette) and 3 (RGB, Rec.601 luma) — the only three witnessed in
-//! the corpus.
+//! record's palette) and 3 (RGB, Rec.601 luma).
 
 use byteorder::{BigEndian, ReadBytesExt};
 use std::io::{Cursor, Read};
 
-use super::{AbrError, DroppedPatternDetail, DroppedPatternReason, UnreadablePattChunk};
+use super::{DroppedPatternDetail, DroppedPatternReason, UnreadablePattChunk};
 use crate::limits::{MAX_DIMENSION, MAX_NAME_CODE_UNITS};
 
 /// One decoded texture pattern from the ABR `patt` block.
-///
-/// Photoshop writes the source pixels (grayscale, indexed or RGB); Procreate
-/// consumes an 8-bit grayscale grain, so this struct exposes a resolved
-/// luminance plane.
 #[derive(Debug, Clone)]
 pub struct AbrPattern {
     /// Pattern UUID (`pattern_id`, ASCII Pascal string). Matches the brush
@@ -34,7 +27,7 @@ pub struct AbrPattern {
     /// Pattern height in pixels (from the written channel rectangle).
     pub height: u32,
     /// PSD image mode of the source record: 1 = Grayscale, 2 = Indexed,
-    /// 3 = RGB (the only three the corpus contains).
+    /// 3 = RGB.
     pub mode: u32,
     /// 8-bit luminance, row-major, `width * height` long. Grayscale records
     /// contribute channel 0 as-is; indexed pixels are resolved through the
@@ -45,14 +38,7 @@ pub struct AbrPattern {
 
 pub(crate) struct PattBlockOutcome {
     pub patterns: Vec<AbrPattern>,
-    /// `record_index` is the ordinal WITHIN THIS BLOCK; a caller walking
-    /// several blocks offsets them (see `parse_abr`).
     pub dropped: Vec<DroppedPatternDetail>,
-    /// Chunks whose header did not parse. Not drops — see the doc comment on
-    /// `parse_patt_block`. `block_index` is left 0 here because this function
-    /// does not know its own block ordinal; a caller walking several blocks
-    /// stamps the real one (see `parse_abr`), exactly as it offsets
-    /// `record_index` above.
     pub unreadable: Vec<UnreadablePattChunk>,
 }
 
@@ -60,23 +46,26 @@ pub(crate) struct PattBlockOutcome {
 /// each record that was dropped.
 ///
 /// Records are concatenated; each is `4 + pattern_length` bytes, padded to the
-/// next **4-byte** boundary. An earlier walker aligned to the next EVEN offset
+/// next **4-byte** boundary.
 ///
-/// A record whose channels or luminance cannot be resolved is skipped — remaining
-/// records still decode (mirrors the parser's tolerance for malformed presets) —
-/// and reported in `dropped`. `Err` is reserved for data so broken no record
-/// boundary is trustworthy; an empty/absent block yields empty vecs.
+/// A record whose channels or luminance cannot be resolved is skipped and
+/// reported in `dropped`; remaining records still decode. A chunk whose header
+/// does not parse is reported in `unreadable` and the walk continues past it.
+/// An empty block yields empty vecs.
 ///
-/// **A chunk whose HEADER does not parse is skipped silently, not reported.**
-///
-/// The walk does NOT stop at an unreadable header either: a bad chunk in the
-/// middle must not hide the records after it.
-pub(crate) fn parse_patt_block(data: &[u8]) -> Result<PattBlockOutcome, AbrError> {
+/// `block_index` is this block's ordinal among the file's `patt` blocks and
+/// `first_record_index` the number of records the earlier blocks held, so the
+/// diagnostics index into the whole file.
+pub(crate) fn parse_patt_block(
+    data: &[u8],
+    block_index: usize,
+    first_record_index: usize,
+) -> PattBlockOutcome {
     let mut patterns = Vec::new();
     let mut dropped = Vec::new();
     let mut unreadable = Vec::new();
     let mut offset = 0usize;
-    let mut record_index = 0usize;
+    let mut record_index = first_record_index;
 
     while offset + 4 <= data.len() {
         let pattern_length = u32::from_be_bytes([
@@ -103,7 +92,7 @@ pub(crate) fn parse_patt_block(data: &[u8]) -> Result<PattBlockOutcome, AbrError
             }
         } else {
             unreadable.push(UnreadablePattChunk {
-                block_index: 0,
+                block_index,
                 offset,
                 declared_length: pattern_length,
             });
@@ -113,15 +102,14 @@ pub(crate) fn parse_patt_block(data: &[u8]) -> Result<PattBlockOutcome, AbrError
         offset = record_end.next_multiple_of(4);
     }
 
-    Ok(PattBlockOutcome {
+    PattBlockOutcome {
         patterns,
         dropped,
         unreadable,
-    })
+    }
 }
 
 /// Classify a record whose header parsed but whose body did not decode.
-///
 pub(crate) fn drop_detail(record_index: usize, header: RecordHeader) -> DroppedPatternDetail {
     let reason = if is_supported_mode(header.mode) {
         DroppedPatternReason::Undecodable
@@ -149,8 +137,7 @@ pub(crate) struct RecordHeader {
 /// The header's height/width pair is deliberately NOT returned: it is
 /// transposed relative to the channel rectangle on at least one corpus record
 /// (`kloir-basic-landscape-brushes.abr`), so the pattern's dimensions come from
-/// the channel rect further down. Reading it here only keeps the offset
-/// arithmetic in one place.
+/// the channel rect further down.
 pub(crate) fn read_record_header(c: &mut Cursor<&[u8]>) -> Option<RecordHeader> {
     let _version = c.read_u32::<BigEndian>().ok()?;
     let mode = c.read_u32::<BigEndian>().ok()?;
@@ -183,8 +170,6 @@ pub(crate) fn parse_record_body(
     // Palette + color-table trailer (indexed mode only): 256 RGB triplets,
     // then two u16 (color count / transparency index — meaning inferred, values
     // unused here) that close the mode-2 color-table section before the VM list.
-    // Byte-verified absent on mode-3 (RGB) records: the 3431 pack goes straight
-    // from the UUID to the VM list, so this trailer must not be read there.
     let palette = if mode == 2 {
         let mut p = [0u8; 768];
         c.read_exact(&mut p).ok()?;
@@ -281,8 +266,7 @@ fn decode_channel(compression: u8, data: &[u8], width: u32, height: u32) -> Opti
 }
 
 /// The PSD image modes [`resolve_gray`] decodes: 1 (Grayscale), 2 (Indexed) and
-/// 3 (RGB) — the only three witnessed in the corpus.
-///
+/// 3 (RGB).
 const SUPPORTED_MODES: &[u32] = &[1, 2, 3];
 
 fn is_supported_mode(mode: u32) -> bool {
@@ -333,8 +317,7 @@ fn resolve_gray(
         // RGB: the first three planes are R, G, B → luma. A record may carry
         // MORE than three (the granite tile in `Rocks and Water Brushes.abr`
         // has R/G/B raw plus a fourth PackBits plane), so take the first three
-        // rather than requiring exactly three — Photoshop writes extra planes,
-        // and a decoder that demands an exact count will eventually meet one.
+        // rather than requiring exactly three.
         3 => match planes.len() {
             1 => {
                 if planes[0].len() < n {
@@ -496,7 +479,7 @@ mod tests {
         );
         let block = record_block(&[body]);
 
-        let patterns = parse_patt_block(&block).unwrap().patterns;
+        let patterns = parse_patt_block(&block, 0, 0).patterns;
         assert_eq!(patterns.len(), 1);
         let p = &patterns[0];
         assert_eq!(p.mode, 2);
@@ -514,7 +497,7 @@ mod tests {
         let body = record_body(3, (2, 2), "rgb", "uuid-rgb", None, &[r, g, b], 21);
         let block = record_block(&[body]);
 
-        let patterns = parse_patt_block(&block).unwrap().patterns;
+        let patterns = parse_patt_block(&block, 0, 0).patterns;
         assert_eq!(patterns.len(), 1);
         let p = &patterns[0];
         assert_eq!(p.mode, 3);
@@ -530,7 +513,7 @@ mod tests {
         let body = record_body(3, (2, 2), "rgb4", "uuid-rgb4", None, &[r, g, b, extra], 20);
         let block = record_block(&[body]);
 
-        let patterns = parse_patt_block(&block).unwrap().patterns;
+        let patterns = parse_patt_block(&block, 0, 0).patterns;
         assert_eq!(patterns.len(), 1);
         let p = &patterns[0];
         assert_eq!(p.mode, 3);
@@ -545,7 +528,7 @@ mod tests {
         let body = record_body(3, (2, 2), "rgb2", "uuid-rgb2", None, &[r, g], 22);
         let block = record_block(&[body]);
 
-        let parsed = parse_patt_block(&block).unwrap();
+        let parsed = parse_patt_block(&block, 0, 0);
         assert!(parsed.patterns.is_empty());
         assert_eq!(parsed.dropped.len(), 1);
     }
@@ -556,7 +539,7 @@ mod tests {
         let body = record_body(1, (2, 2), "gray", "uuid-gray", None, &[channel], 23);
         let block = record_block(&[body]);
 
-        let patterns = parse_patt_block(&block).unwrap().patterns;
+        let patterns = parse_patt_block(&block, 0, 0).patterns;
         assert_eq!(patterns.len(), 1);
         let p = &patterns[0];
         assert_eq!(p.mode, 1);
@@ -572,7 +555,7 @@ mod tests {
         let body = record_body(1, (2, 2), "gray", "uuid-gray-a", None, &[gray, alpha], 22);
         let block = record_block(&[body]);
 
-        let patterns = parse_patt_block(&block).unwrap().patterns;
+        let patterns = parse_patt_block(&block, 0, 0).patterns;
         assert_eq!(patterns.len(), 1);
         let p = &patterns[0];
         assert_eq!(p.mode, 1);
@@ -588,7 +571,7 @@ mod tests {
         let body_b = record_body(2, (2, 2), "b", "uuid-bbbb", Some(&palette), &[ch_b], 2);
         let block = record_block(&[body_a, body_b]);
 
-        let patterns = parse_patt_block(&block).unwrap().patterns;
+        let patterns = parse_patt_block(&block, 0, 0).patterns;
         assert_eq!(patterns.len(), 2);
         assert_eq!(patterns[0].id, "uuid-aaaa");
         assert_eq!(patterns[0].gray, vec![1, 2, 3, 4]);
@@ -612,7 +595,7 @@ mod tests {
         assert_eq!(gaps[1], 3, "second gap must be the 3-byte case");
 
         let block = record_block(&bodies);
-        let outcome = parse_patt_block(&block).unwrap();
+        let outcome = parse_patt_block(&block, 0, 0);
 
         assert!(outcome.dropped.is_empty(), "no record should be dropped");
         let ids: Vec<&str> = outcome.patterns.iter().map(|p| p.id.as_str()).collect();
@@ -622,7 +605,7 @@ mod tests {
 
     #[test]
     fn empty_block_yields_no_patterns() {
-        assert_eq!(parse_patt_block(&[]).unwrap().patterns.len(), 0);
+        assert_eq!(parse_patt_block(&[], 0, 0).patterns.len(), 0);
     }
 
     #[test]
@@ -633,7 +616,7 @@ mod tests {
         let good = record_body(1, (2, 2), "fine", "uuid-good", None, &[good_ch], 23);
         let block = record_block(&[bad, good]);
 
-        let outcome = parse_patt_block(&block).unwrap();
+        let outcome = parse_patt_block(&block, 0, 0);
         assert_eq!(outcome.patterns.len(), 1);
         assert_eq!(outcome.patterns[0].id, "uuid-good");
         assert_eq!(outcome.dropped.len(), 1);
@@ -651,7 +634,7 @@ mod tests {
         body.truncate(body.len() - 5);
         let block = record_block(&[body]);
 
-        let outcome = parse_patt_block(&block).unwrap();
+        let outcome = parse_patt_block(&block, 0, 0);
         assert!(outcome.patterns.is_empty());
         assert_eq!(outcome.dropped.len(), 1);
         let d = &outcome.dropped[0];
@@ -677,7 +660,7 @@ mod tests {
         let junk = unreadable_chunk();
         let block = record_block(&[good.clone(), junk.clone(), good.clone()]);
 
-        let outcome = parse_patt_block(&block).unwrap();
+        let outcome = parse_patt_block(&block, 0, 0);
         assert_eq!(outcome.dropped.len(), 0);
         assert_eq!(outcome.patterns.len(), 2);
         assert_eq!(outcome.patterns[0].gray, vec![1, 2, 3, 4]);
@@ -733,7 +716,7 @@ mod tests {
         let body = record_body(2, (2, 2), "bad", "uuid-bad", Some(&palette), &[bad_slot], 0);
         let block = record_block(&[body]);
 
-        let out = parse_patt_block(&block).unwrap();
+        let out = parse_patt_block(&block, 0, 0);
         assert!(out.patterns.is_empty());
         assert_eq!(out.dropped.len(), 1, "the record must surface as a drop");
         assert_eq!(out.dropped[0].id, "uuid-bad");
@@ -762,7 +745,7 @@ mod tests {
         let mut block = record_block(&[good, body]);
         block.truncate(block.len() - 20);
 
-        let out = parse_patt_block(&block).unwrap();
+        let out = parse_patt_block(&block, 0, 0);
         assert_eq!(out.patterns.len(), 1, "the intact record must still decode");
         assert_eq!(out.patterns[0].id, "uuid-good");
         assert!(
@@ -787,7 +770,7 @@ mod tests {
         body.write_u32::<BigEndian>(u32::MAX).unwrap();
         let block = record_block(&[body]);
 
-        let patterns = parse_patt_block(&block).unwrap().patterns;
+        let patterns = parse_patt_block(&block, 0, 0).patterns;
         assert!(patterns.is_empty());
     }
 
@@ -799,7 +782,7 @@ mod tests {
         let body = record_body(2, (20000, 1), "big", "uuid-big", Some(&palette), &[big], 0);
         let block = record_block(&[body]);
 
-        let patterns = parse_patt_block(&block).unwrap().patterns;
+        let patterns = parse_patt_block(&block, 0, 0).patterns;
         assert!(patterns.is_empty());
     }
 
@@ -819,7 +802,7 @@ mod tests {
         );
         let block = record_block(&[body]);
 
-        let patterns = parse_patt_block(&block).unwrap().patterns;
+        let patterns = parse_patt_block(&block, 0, 0).patterns;
         assert!(patterns
             .iter()
             .all(|p| p.gray.len() == (p.width * p.height) as usize));
@@ -841,7 +824,7 @@ mod tests {
         );
         let block = record_block(&[body]);
 
-        let patterns = parse_patt_block(&block).unwrap().patterns;
+        let patterns = parse_patt_block(&block, 0, 0).patterns;
         assert!(patterns
             .iter()
             .all(|p| p.gray.len() == (p.width * p.height) as usize));

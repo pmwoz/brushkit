@@ -1,5 +1,3 @@
-//! Descriptor parsing for brush names and UUIDs.
-//!
 //! ABR descriptors use Photoshop's "Object Descriptor" binary format.
 //!
 //! Descriptor structure (big-endian throughout):
@@ -259,15 +257,10 @@ fn parse_brush_preset_objc(cursor: &mut Cursor<&[u8]>) -> io::Result<BrushDescIn
         } else if key == "countDynamics" && type_tag == "Objc" {
             count_jitter = parse_brvr(cursor)?.jitter_pct;
         } else if key == "Cnt " && type_tag == "doub" {
-            // `Cnt ` is the Photoshop OSType charID for Count — a bare
-            // big-endian f64 (`doub`), no unit tag (unlike `UntF`).
             scatter_count = Some(cursor.read_f64::<BigEndian>()?);
         } else if key == "bothAxes" && type_tag == "bool" {
             scatter_both_axes = Some(cursor.read_u8()? != 0);
         } else if key == "minimumDiameter" && type_tag == "UntF" {
-            // Top-level Shape Dynamics "Minimum Diameter" (#Prc). The brVr `Mnm`
-            // sub-key is vestigial in PS 27.8 — it stays 0.0 even when the UI
-            // slider is nonzero (corpus e13-minimum40, 2026-07-10).
             minimum_diameter = Some(read_unit_float(cursor)?);
         } else if key == "roundnessDynamics" && type_tag == "Objc" {
             roundness_jitter = parse_brvr(cursor)?.jitter_pct;
@@ -525,8 +518,7 @@ struct InnerBrush {
     /// procedural-tip geometry keys (Dmtr/Hrdn/Angl/Rndn), each optional.
     computed: Option<crate::ComputedGeometry>,
     /// `Dmtr` (`UntF #Pxl`) — tip diameter, read for BOTH sampled and computed
-    /// inner classes (mirrors `computed.diameter_px` when computed). Drives the
-    /// within-pack relative `maxSize` normalization.
+    /// inner classes (mirrors `computed.diameter_px` when computed).
     diameter_px: Option<f64>,
     /// `Brsh:sampledBrush/Angl` (`#Ang`) — sampled-tip rotation, read only when
     /// the inner class id is NOT `computedBrush`.
@@ -539,9 +531,7 @@ struct InnerBrush {
     /// `Brsh:sampledBrush/flipY` (`bool`) — static vertical tip flip.
     sampled_flip_y: Option<bool>,
     /// `Brsh > Shp ` (`long`) — presence of the bristle/erodible/airbrush
-    /// dynamic-tip descriptor. Witnessed at depth 2 inside the inner
-    /// `Brsh` object on 217 presets across 9 corpus packs, whose class ids
-    /// are `dTips`/`dBrush` — never `sampledBrush` or `computedBrush`.
+    /// dynamic-tip descriptor.
     has_shape_tip: bool,
     /// The class id above read as a tip family, recorded only when `Shp ` is
     /// actually present (`dBrush` → bristle, `dTips` → erodible/airbrush).
@@ -551,14 +541,6 @@ struct InnerBrush {
     tip_shape: Option<crate::TipShape>,
 }
 
-/// The measured `(family, `Shp ` index) -> shape` table. The single place to
-/// correct if Photoshop ever renumbers — a corpus-gated test over real presets
-/// is what fails first if it does.
-///
-/// The family is part of the key, not decoration: index 5 is Flat Point under
-/// `dBrush` and the airbrush tip under `dTips`. Pairs outside the table (and
-/// an unrecognised class id, which arrives as `None`) map to `None`, so the
-/// disclosure degrades to the family wording rather than guessing a shape.
 fn tip_shape_for(family: Option<crate::ShapeTipFamily>, index: i32) -> Option<crate::TipShape> {
     use crate::ShapeTipFamily as F;
     use crate::TipShape as S;

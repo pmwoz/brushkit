@@ -1,12 +1,7 @@
-//! Input builders for the preview integration tests. Every input is built
-//! here; nothing reads a real brush file.
-
 #![allow(dead_code)]
 
 use std::io::{Cursor, Write};
 
-/// A minimal NSKeyedArchiver `Brush.archive` whose settings dictionary
-/// (`$objects[1]`) names the brush. Binary plist, like Procreate writes.
 pub fn brush_archive(name: &str) -> Vec<u8> {
     use plist::{Dictionary, Uid, Value};
     let mut settings = Dictionary::new();
@@ -32,7 +27,6 @@ pub fn brush_archive(name: &str) -> Vec<u8> {
     out
 }
 
-/// A `brushset.plist` naming the set and listing its members in order.
 pub fn brushset_plist(name: &str, uuids: &[&str]) -> Vec<u8> {
     use plist::{Dictionary, Value};
     let mut dict = Dictionary::new();
@@ -60,7 +54,6 @@ pub fn crc32(data: &[u8]) -> u32 {
     !crc
 }
 
-/// An 8-bit grayscale PNG of `fill`.
 pub fn gray_png(width: u32, height: u32, fill: u8) -> Vec<u8> {
     let mut out = Vec::new();
     let mut enc = png::Encoder::new(&mut out, width, height);
@@ -77,8 +70,6 @@ pub fn real_4x4_png() -> Vec<u8> {
     gray_png(4, 4, 128)
 }
 
-/// A real 4x4 PNG whose IHDR claims `w` by `h`, so a reader that trusts the
-/// header would allocate before it decodes.
 pub fn dimension_bomb_png(w: u32, h: u32) -> Vec<u8> {
     let mut png = real_4x4_png();
     // IHDR is always the first chunk: 8-byte signature, 4-byte length, 4-byte
@@ -95,8 +86,6 @@ pub fn dimension_bomb_png(w: u32, h: u32) -> Vec<u8> {
     png
 }
 
-/// An XML plist of 10 000 nested `<array>` opens: a reader that builds the
-/// tree before checking depth overflows its stack on the recursive `Drop`.
 pub fn depth_bomb_plist_xml() -> Vec<u8> {
     let mut s = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
@@ -108,7 +97,6 @@ pub fn depth_bomb_plist_xml() -> Vec<u8> {
     s.into_bytes()
 }
 
-/// A zip holding `entries` in the given order.
 pub fn zip_with(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let mut zw = zip::write::ZipWriter::new(Cursor::new(Vec::new()));
     let opts = zip::write::SimpleFileOptions::default();

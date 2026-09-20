@@ -3,7 +3,6 @@
 //! fields a mapper needs, this walker records *every* `(key, tag,
 //! value)` it encounters so an operator can witness the full descriptor tree of
 //! a real brush corpus and rewrite the mapping table from observed values.
-//!
 
 use crate::descriptor::{read_id, read_type_tag, read_unicode_string, MAX_DESCRIPTOR_DEPTH};
 use byteorder::{BigEndian, ReadBytesExt};

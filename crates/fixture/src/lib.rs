@@ -1,10 +1,5 @@
 //! Descriptor byte writers for building `.abr` test fixtures.
 //!
-//! This crate MUST NOT depend on `brushkit-abr`. It is a second, independent
-//! reading of the `.abr` format, and a fixture built from a reader's own
-//! encoder could not catch a builder and a parser that drifted together. CI
-//! asserts the missing dependency edge.
-//!
 //! Two key encodings appear on the wire and both are reachable here. A
 //! length-prefixed key takes `&[u8]`; an OSType key writes a zero length
 //! followed by exactly four bytes and takes `&[u8; 4]`.
@@ -80,9 +75,6 @@ pub fn write_brvr(buf: &mut Vec<u8>, key: &[u8], control: i32, jitter_pct: f64) 
 mod tests {
     use super::*;
 
-    /// Byte pins. Nothing else in the workspace can catch a "tidy" of these
-    /// writers, because every fixture built from them would move together with
-    /// the change.
     #[test]
     fn primitives_emit_the_documented_bytes() {
         let mut b = Vec::new();
@@ -119,10 +111,6 @@ mod tests {
         );
     }
 
-    /// The two key encodings are chosen by the caller here, never inferred from
-    /// the key's length the way `abr::writer::write_id` infers it. A four-byte
-    /// key therefore has two legal encodings and the fixture picks one on
-    /// purpose.
     #[test]
     fn a_four_byte_key_has_two_encodings() {
         let mut named = Vec::new();

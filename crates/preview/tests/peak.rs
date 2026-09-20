@@ -1,7 +1,3 @@
-//! The preview pipeline's peak allocation must follow the LARGEST tip, not the
-//! pack, while the eager parse's grows with the pack. One counting allocator
-//! measures both.
-//!
 //! EXACTLY ONE `#[test]` lives in this file. The allocator is global and cargo
 //! runs a binary's tests on parallel threads, so a second test here would
 //! allocate underneath the measurement and corrupt every peak.
@@ -70,8 +66,6 @@ const MIB: usize = 1 << 20;
 const TIP_SIDE: u32 = 1024;
 const TIPS: usize = 6;
 
-/// One uncompressed v6 samp entry: `u32 0`, the rect, depth, compression 0 and
-/// `w * h` bytes of `val`.
 fn build_simple_entry(w: u32, h: u32, depth: u16, val: u8) -> Vec<u8> {
     let mut buf = Vec::with_capacity(23 + (w as usize) * (h as usize));
     buf.extend_from_slice(&0u32.to_be_bytes());
@@ -85,7 +79,6 @@ fn build_simple_entry(w: u32, h: u32, depth: u16, val: u8) -> Vec<u8> {
     buf
 }
 
-/// A v6/sub-2 pack of `TIPS` uncompressed 1 MiB tips in one `samp` block.
 fn fixture() -> Vec<u8> {
     let mut payload = Vec::new();
     for _ in 0..TIPS {
