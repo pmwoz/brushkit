@@ -7,8 +7,6 @@ Rust crates for reading brush files and rendering their tip shapes.
 - Procreate `.brush` and `.brushset`: brush names, set order, tip shapes.
 - Tip rendering: grayscale bitmaps, thumbnails and contact-sheet grids.
 
-Status: workspace bootstrapped, crates not yet imported. See the open issues.
-
 ## Crates
 
 | Crate | Purpose |
@@ -19,15 +17,33 @@ Status: workspace bootstrapped, crates not yet imported. See the open issues.
 
 The public contract of `brushkit-preview`:
 
-```
-PreviewSet   { set_name, entries: [PreviewEntry] }
-PreviewEntry { index, name, tip: TipPreview }
-TipPreview   = Available { width, height, gray: bytes }
-             | Unavailable { reason }
-reason       = NoShapePng | UnsupportedTipKind(kind) | Corrupt(message) | TooLarge { width, height }
+```rust
+pub struct PreviewOptions { pub max_cell: u32 }
+
+pub struct PreviewSet { pub set_name: Option<String>, pub entries: Vec<PreviewEntry> }
+pub struct PreviewEntry { pub index: usize, pub name: String, pub tip: TipPreview }
+
+pub enum TipPreview {
+    Available(GrayscaleBitmap),   // { width: u32, height: u32, data: Vec<u8> }
+    Unavailable(UnavailableReason),
+}
+
+pub enum UnavailableReason {
+    NoShapePng,
+    UnsupportedTipKind(String),
+    Corrupt(String),
+    TooLarge { width: u32, height: u32 },
+}
+
+pub fn preview_abr(bytes: &[u8], opts: PreviewOptions) -> Result<PreviewSet, PreviewError>;
+pub fn preview_brush(bytes: &[u8], opts: PreviewOptions) -> Result<PreviewSet, PreviewError>;
+pub fn preview_brushset(bytes: &[u8], opts: PreviewOptions) -> Result<PreviewSet, PreviewError>;
 ```
 
-Every brush in file order appears exactly once, available or not.
+Every brush in file order appears exactly once, available or not. `max_cell`
+is the largest side of every returned tip, so a caller gets thumbnails sized
+for its grid without decoding a whole pack at full size. A `.brushset` without
+`brushset.plist` is read in zip order and has no set name.
 
 ## Building
 

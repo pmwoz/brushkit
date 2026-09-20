@@ -1,0 +1,13 @@
+Inter-Regular.ttf is part of the Inter font family by Rasmus Andersson,
+licensed under the SIL Open Font License, Version 1.1.
+
+Copyright (c) 2016-present The Inter Project Authors
+https://github.com/rsms/inter
+
+This software is provided "as is", without warranty of any kind, express
+or implied, including but not limited to the warranties of merchantability,
+fitness for a particular purpose and noninfringement of copyright,
+patent, trademark, or other right.
+
+See the full SIL Open Font License 1.1:
+https://openfontlicense.org

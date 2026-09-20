@@ -1,0 +1,26 @@
+[package]
+name = "brushkit-preview"
+description = "Tip bitmaps for .abr, .brush and .brushset files: sampled tips, synthesized computed tips, Procreate Shape.png and contact sheets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+brushkit-abr = { path = "../abr" }
+zip.workspace = true
+plist.workspace = true
+image.workspace = true
+ab_glyph = { workspace = true, optional = true }
+
+[dev-dependencies]
+brushkit-fixture = { path = "../fixture" }
+png.workspace = true
+# Integration tests are their own crates, so the zip and plist builders they
+# use to construct inputs need their own dependency edges.
+plist.workspace = true
+zip.workspace = true
+
+[features]
+default = ["text"]
+text = ["dep:ab_glyph"]   # contact-sheet labels
