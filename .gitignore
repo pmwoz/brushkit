@@ -1,3 +1,7 @@
 target/
+.worktrees/
+fuzz/Cargo.lock
+fuzz/artifacts/
+fuzz/coverage/
 Cargo.lock.bak
 .DS_Store

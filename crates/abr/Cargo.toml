@@ -1,0 +1,19 @@
+[package]
+name = "brushkit-abr"
+description = "Reader for Adobe Photoshop .abr brush files: brushes, tip bitmaps, computed tips and patterns"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+byteorder.workspace = true
+flate2.workspace = true
+serde = { version = "1", features = ["derive"], optional = true }
+
+[dev-dependencies]
+brushkit-fixture = { path = "../fixture" }
+
+[features]
+serde = ["dep:serde"]

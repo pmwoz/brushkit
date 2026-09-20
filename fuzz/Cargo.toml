@@ -1,0 +1,23 @@
+# Own workspace root: this crate is excluded from the repo workspace so that
+# `cargo fuzz` can point at this manifest directly.
+[workspace]
+
+[package]
+name = "brushkit-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+brushkit-abr = { path = "../crates/abr" }
+
+[[bin]]
+name = "abr_parse"
+path = "fuzz_targets/abr_parse.rs"
+test = false
+doc = false
+bench = false

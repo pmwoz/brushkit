@@ -1,0 +1,10 @@
+[package]
+name = "brushkit-fixture"
+description = "Descriptor byte builders for synthetic .abr test files, independent of any reader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+byteorder.workspace = true
