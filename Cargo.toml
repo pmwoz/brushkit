@@ -4,10 +4,11 @@ members = ["crates/abr", "crates/preview", "crates/fixture"]
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/pmwoz/brushkit"
+readme = "README.md"
 
 [workspace.dependencies]
 thiserror = "2"
