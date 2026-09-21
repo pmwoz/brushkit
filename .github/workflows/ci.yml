@@ -16,3 +16,28 @@ jobs:
       - run: cargo build --workspace --target wasm32-unknown-unknown
       - name: Fixture crate stays independent of the crates under test
         run: '! grep -nE "^\s*brushkit-(abr|preview)\s*=" crates/fixture/Cargo.toml'
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [abr_parse, preview_abr, preview_brush, preview_brushset]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+          key: fuzz-${{ matrix.target }}
+      - run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Replay committed corpus
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -runs=0 -timeout=10 -rss_limit_mb=2048 -max_len=1048576
+      - name: Fuzz for 30 seconds
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=30 -timeout=10 -rss_limit_mb=2048 -max_len=1048576
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
