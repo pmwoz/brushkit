@@ -12,7 +12,9 @@ mod limits;
 mod parser;
 mod pattern;
 
-pub use parser::{parse_abr, parse_abr_deferred, DeferredPack, DeferredTip};
+pub use parser::{
+    parse_abr, parse_abr_deferred, parse_abr_deferred_without_patterns, DeferredPack, DeferredTip,
+};
 pub use pattern::AbrPattern;
 
 /// A parsed ABR brush pack.

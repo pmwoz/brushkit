@@ -358,7 +358,7 @@ fn utf16be_to_string(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use byteorder::WriteBytesExt;
 
@@ -377,7 +377,7 @@ mod tests {
         out
     }
 
-    fn channel_slot(w: u32, h: u32, compression: u8, pixel_data: &[u8]) -> Vec<u8> {
+    pub(crate) fn channel_slot(w: u32, h: u32, compression: u8, pixel_data: &[u8]) -> Vec<u8> {
         let mut header = Vec::new();
         header.write_u32::<BigEndian>(8).unwrap();
         for v in [0u32, 0, h, w] {
@@ -394,7 +394,7 @@ mod tests {
         slot
     }
 
-    fn record_body(
+    pub(crate) fn record_body(
         mode: u32,
         dims: (u32, u32),
         name: &str,
@@ -441,7 +441,7 @@ mod tests {
         r
     }
 
-    fn record_block(bodies: &[Vec<u8>]) -> Vec<u8> {
+    pub(crate) fn record_block(bodies: &[Vec<u8>]) -> Vec<u8> {
         let mut out = Vec::new();
         for body in bodies {
             out.write_u32::<BigEndian>(body.len() as u32).unwrap();
@@ -643,7 +643,7 @@ mod tests {
         assert_eq!(d.mode, 1);
     }
 
-    fn unreadable_chunk() -> Vec<u8> {
+    pub(crate) fn unreadable_chunk() -> Vec<u8> {
         let mut junk = Vec::new();
         junk.write_u32::<BigEndian>(1).unwrap();
         junk.write_u32::<BigEndian>(1).unwrap();
