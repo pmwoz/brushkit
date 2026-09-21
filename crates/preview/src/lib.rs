@@ -20,7 +20,7 @@ pub use bitmap::*;
 pub use sheet::*;
 pub use synth::*;
 
-use brushkit_abr::{parse_abr_deferred, ShapeTipFamily};
+use brushkit_abr::{parse_abr_deferred_without_patterns, ShapeTipFamily};
 use std::io::Cursor;
 
 #[derive(Debug, Clone, Copy)]
@@ -97,10 +97,13 @@ struct Row {
 /// peak footprint holds one full-size tip rather than the whole pack. Computed
 /// presets are synthesized from their geometry; a preset that declares neither
 /// is reported as an unsupported tip kind.
+///
+/// Embedded pattern payloads are neither copied nor decoded.
 pub fn preview_abr(bytes: &[u8], opts: PreviewOptions) -> Result<PreviewSet, PreviewError> {
     let max_cell = check_max_cell(opts)?;
 
-    let deferred = parse_abr_deferred(bytes).map_err(|e| PreviewError(e.to_string()))?;
+    let deferred =
+        parse_abr_deferred_without_patterns(bytes).map_err(|e| PreviewError(e.to_string()))?;
 
     let mut rows: Vec<Row> = Vec::new();
 

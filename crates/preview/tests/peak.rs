@@ -98,6 +98,50 @@ fn fixture() -> Vec<u8> {
     file
 }
 
+fn with_patterns(mut bytes: Vec<u8>, count: usize) -> Vec<u8> {
+    let side = 2048u32;
+    let mut record = Vec::new();
+    for value in [1u32, 1] {
+        record.extend_from_slice(&value.to_be_bytes());
+    }
+    record.extend_from_slice(&(side as u16).to_be_bytes());
+    record.extend_from_slice(&(side as u16).to_be_bytes());
+    record.extend_from_slice(&0u32.to_be_bytes());
+    record.push(1);
+    record.push(b'p');
+    for value in [
+        3u32,
+        0,
+        0,
+        0,
+        side,
+        side,
+        1,
+        1,
+        23 + side * side,
+        8,
+        0,
+        0,
+        side,
+        side,
+    ] {
+        record.extend_from_slice(&value.to_be_bytes());
+    }
+    record.extend_from_slice(&8u16.to_be_bytes());
+    record.push(0);
+    record.resize(record.len() + (side * side) as usize, 128);
+
+    let record_len = (4 + record.len()).next_multiple_of(4);
+    bytes.extend_from_slice(b"8BIMpatt");
+    bytes.extend_from_slice(&((record_len * count) as u32).to_be_bytes());
+    for _ in 0..count {
+        bytes.extend_from_slice(&(record.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(&record);
+        bytes.resize(bytes.len().next_multiple_of(4), 0);
+    }
+    bytes
+}
+
 #[test]
 fn preview_peak_follows_one_tip_not_the_pack() {
     let bytes = fixture();
@@ -151,4 +195,28 @@ fn preview_peak_follows_one_tip_not_the_pack() {
         p_eager >= TIPS * MIB,
         "the eager parse materializes every tip: {p_eager} bytes"
     );
+
+    for count in [1, 8] {
+        let patterned = with_patterns(bytes.clone(), count);
+        let pack = parse_abr(&patterned).expect("pattern fixture parses");
+        assert_eq!(pack.patterns.len(), count);
+        assert!(pack.patterns.iter().all(|p| p.gray.len() == 4 * MIB));
+        drop(pack);
+
+        let before = live();
+        reset_peak();
+        let set = preview_abr(&patterned, PreviewOptions { max_cell: 64 }).expect("preview");
+        let pattern_peak = peak() - before;
+        assert_eq!(set.entries.len(), TIPS);
+        drop(set);
+        println!(
+            "preview with {} MiB of patterns: {:.2} MiB",
+            count * 4,
+            pattern_peak as f64 / MIB as f64
+        );
+        assert!(
+            pattern_peak <= p_prev + MIB,
+            "patterns must not increase preview allocations: without {p_prev}, with {pattern_peak} bytes"
+        );
+    }
 }

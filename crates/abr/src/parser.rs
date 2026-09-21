@@ -37,7 +37,13 @@ use crate::limits::{MAX_DIMENSION, MAX_NAME_CODE_UNITS};
 const MAX_TIP_DECODED_BYTES: usize = 256 * 1024 * 1024;
 
 pub fn parse_abr(bytes: &[u8]) -> Result<AbrPack, AbrError> {
-    parse_abr_with(bytes, TipMode::Eager).map(|parsed| parsed.pack)
+    parse_abr_with(bytes, TipMode::Eager, PatternMode::Read).map(|parsed| parsed.pack)
+}
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum PatternMode {
+    Read,
+    Skip,
 }
 
 /// Everything `parse_abr_with` produces: the pack itself plus the bookkeeping
@@ -55,7 +61,11 @@ struct ParsedAbr {
     dual_uuids: HashSet<String>,
 }
 
-fn parse_abr_with(bytes: &[u8], mode: TipMode) -> Result<ParsedAbr, AbrError> {
+fn parse_abr_with(
+    bytes: &[u8],
+    mode: TipMode,
+    patterns: PatternMode,
+) -> Result<ParsedAbr, AbrError> {
     let mut cursor = Cursor::new(bytes);
     let (version, subversion) = read_header(&mut cursor)?;
 
@@ -74,7 +84,7 @@ fn parse_abr_with(bytes: &[u8], mode: TipMode) -> Result<ParsedAbr, AbrError> {
         AbrVersion::V6 | AbrVersion::V7 | AbrVersion::V9 | AbrVersion::V10 => {}
     }
 
-    let blocks = read_blocks(&mut cursor, bytes.len() as u64)?;
+    let blocks = read_blocks(&mut cursor, bytes.len() as u64, patterns)?;
 
     let mut bitmaps: Vec<Option<SampEntry>> = Vec::new();
     let mut samp_index = 0usize;
@@ -274,13 +284,28 @@ fn decode_deferred_tip(samp_blocks: &[Vec<u8>], tip: &DeferredTip) -> Result<Tip
 /// See [`DeferredPack`] for the empty-`tip.data` invariant and for the two
 /// kinds of tip this still decodes eagerly.
 pub fn parse_abr_deferred(bytes: &[u8]) -> Result<DeferredPack, AbrError> {
+    parse_abr_deferred_with(bytes, PatternMode::Read)
+}
+
+/// Like [`parse_abr_deferred`], but embedded pattern payloads are neither
+/// copied nor decoded.
+///
+/// `patterns`, `dropped_pattern_details`, and `unreadable_patt_chunks` are
+/// empty, and both pattern diagnostic counts are zero because patterns were
+/// not inspected. All other fields and decoded tips are unchanged.
+/// Declared block lengths are still checked against the input length.
+pub fn parse_abr_deferred_without_patterns(bytes: &[u8]) -> Result<DeferredPack, AbrError> {
+    parse_abr_deferred_with(bytes, PatternMode::Skip)
+}
+
+fn parse_abr_deferred_with(bytes: &[u8], patterns: PatternMode) -> Result<DeferredPack, AbrError> {
     let ParsedAbr {
         mut pack,
         mut tips,
         dropped_tips,
         samp_blocks,
         dual_uuids,
-    } = parse_abr_with(bytes, TipMode::Deferred { block: 0 })?;
+    } = parse_abr_with(bytes, TipMode::Deferred { block: 0 }, patterns)?;
 
     for (detail, deferred) in pack.dropped_tip_details.iter_mut().zip(&dropped_tips) {
         if let Some(tip) = deferred {
@@ -684,7 +709,11 @@ struct Block {
     data: Vec<u8>,
 }
 
-fn read_blocks(cursor: &mut Cursor<&[u8]>, file_len: u64) -> Result<Vec<Block>, AbrError> {
+fn read_blocks(
+    cursor: &mut Cursor<&[u8]>,
+    file_len: u64,
+    patterns: PatternMode,
+) -> Result<Vec<Block>, AbrError> {
     let mut blocks = Vec::new();
 
     loop {
@@ -728,15 +757,18 @@ fn read_blocks(cursor: &mut Cursor<&[u8]>, file_len: u64) -> Result<Vec<Block>, 
             });
         }
 
-        let mut data = vec![0u8; data_len as usize];
-        cursor
-            .read_exact(&mut data)
-            .map_err(|_| AbrError::MalformedBlock {
-                offset: pos,
-                reason: "truncated block data".into(),
-            })?;
+        let omit = patterns == PatternMode::Skip && block_type == "patt";
+        if !omit {
+            let mut data = vec![0u8; data_len as usize];
+            cursor
+                .read_exact(&mut data)
+                .map_err(|_| AbrError::MalformedBlock {
+                    offset: pos,
+                    reason: "truncated block data".into(),
+                })?;
 
-        blocks.push(Block { block_type, data });
+            blocks.push(Block { block_type, data });
+        }
 
         // 8BIM blocks are 4-byte aligned: Photoshop writes 0-3 zero padding
         // bytes after an unaligned payload. The clamp only matters for a file
@@ -1323,6 +1355,8 @@ fn entry_err(offset: u64, reason: &str) -> AbrError {
 mod tests {
     use super::*;
     use byteorder::WriteBytesExt;
+
+    use crate::pattern::tests::{channel_slot, record_block, record_body, unreadable_chunk};
 
     fn tiny_bitmap() -> TipBitmap {
         TipBitmap {
@@ -1999,7 +2033,7 @@ mod tests {
         d.write_u32::<BigEndian>(5).unwrap();
         d.extend_from_slice(b"hello");
         let mut c = Cursor::new(d.as_slice());
-        let blocks = read_blocks(&mut c, d.len() as u64).unwrap();
+        let blocks = read_blocks(&mut c, d.len() as u64, PatternMode::Read).unwrap();
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].block_type, "test");
     }
@@ -2017,7 +2051,7 @@ mod tests {
         d.write_u32::<BigEndian>(4).unwrap();
         d.extend_from_slice(b"data");
         let mut c = Cursor::new(d.as_slice());
-        let blocks = read_blocks(&mut c, d.len() as u64).unwrap();
+        let blocks = read_blocks(&mut c, d.len() as u64, PatternMode::Read).unwrap();
         let types: Vec<&str> = blocks.iter().map(|b| b.block_type.as_str()).collect();
         assert_eq!(types, ["desc", "samp"]);
         assert_eq!(blocks[1].data, b"data");
@@ -2031,10 +2065,177 @@ mod tests {
         d.write_u32::<BigEndian>(5).unwrap();
         d.extend_from_slice(b"hello");
         let mut c = Cursor::new(d.as_slice());
-        let blocks = read_blocks(&mut c, d.len() as u64).unwrap();
+        let blocks = read_blocks(&mut c, d.len() as u64, PatternMode::Read).unwrap();
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].block_type, "desc");
         assert_eq!(blocks[0].data, b"hello");
+    }
+
+    fn push_block(file: &mut Vec<u8>, kind: &[u8; 4], payload: &[u8]) {
+        file.extend_from_slice(b"8BIM");
+        file.extend_from_slice(kind);
+        file.write_u32::<BigEndian>(payload.len() as u32).unwrap();
+        file.extend_from_slice(payload);
+        file.resize(file.len().next_multiple_of(4), 0);
+    }
+
+    #[test]
+    fn read_blocks_in_skip_mode_omits_patt_and_keeps_the_walk() {
+        let mut d = Vec::new();
+        push_block(&mut d, b"patt", b"hello");
+        push_block(&mut d, b"samp", b"data");
+        d.extend_from_slice(b"8BIM");
+        d.extend_from_slice(b"patt");
+        d.write_u32::<BigEndian>(3).unwrap();
+        d.extend_from_slice(b"end");
+
+        let mut c = Cursor::new(d.as_slice());
+        let read = read_blocks(&mut c, d.len() as u64, PatternMode::Read).unwrap();
+        let types: Vec<&str> = read.iter().map(|b| b.block_type.as_str()).collect();
+        assert_eq!(types, ["patt", "samp", "patt"]);
+
+        let mut c = Cursor::new(d.as_slice());
+        let skipped = read_blocks(&mut c, d.len() as u64, PatternMode::Skip).unwrap();
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].block_type, "samp");
+        assert_eq!(skipped[0].data, b"data");
+    }
+
+    fn gray_record(uuid: &str, pixels: [u8; 4]) -> Vec<u8> {
+        let channel = channel_slot(2, 2, 0, &pixels);
+        record_body(1, (2, 2), "gray", uuid, None, &[channel], 23)
+    }
+
+    fn v10_header() -> Vec<u8> {
+        let mut d = Vec::new();
+        d.write_u16::<BigEndian>(10).unwrap();
+        d.write_u16::<BigEndian>(2).unwrap();
+        d
+    }
+
+    fn pack_with_every_pattern_outcome() -> Vec<u8> {
+        let bad_ch = channel_slot(2, 2, 0, &[10, 20, 30, 40]);
+        let bad = record_body(4, (2, 2), "unsupported", "uuid-mode4", None, &[bad_ch], 23);
+        let patt = record_block(&[
+            gray_record("uuid-good", [1, 2, 3, 4]),
+            unreadable_chunk(),
+            bad,
+        ]);
+
+        let mut d = v10_header();
+        push_block(&mut d, b"samp", &build_v10_entry(8, 8, 0xDD));
+        push_block(&mut d, b"patt", &patt);
+        push_block(&mut d, b"desc", &build_mixed_desc_block());
+        d
+    }
+
+    #[test]
+    fn without_patterns_leaves_every_pattern_field_empty_and_the_rest_intact() {
+        let d = pack_with_every_pattern_outcome();
+
+        let full = parse_abr(&d).unwrap();
+        assert_eq!(full.patterns.len(), 1);
+        assert_eq!(full.patterns[0].id, "uuid-good");
+        assert_eq!(full.dropped_pattern_count, 1);
+        assert_eq!(full.dropped_pattern_details.len(), 1);
+        assert_eq!(full.unreadable_patt_chunk_count, 1);
+        assert_eq!(full.unreadable_patt_chunks.len(), 1);
+
+        let deferred = parse_abr_deferred(&d).unwrap();
+        assert_eq!(deferred.pack.patterns.len(), 1);
+        assert_eq!(deferred.pack.dropped_pattern_count, 1);
+        assert_eq!(deferred.pack.unreadable_patt_chunk_count, 1);
+
+        let skipped = parse_abr_deferred_without_patterns(&d).unwrap();
+        let pack = &skipped.pack;
+        assert!(pack.patterns.is_empty());
+        assert_eq!(pack.dropped_pattern_count, 0);
+        assert!(pack.dropped_pattern_details.is_empty());
+        assert_eq!(pack.unreadable_patt_chunk_count, 0);
+        assert!(pack.unreadable_patt_chunks.is_empty());
+
+        assert_eq!(pack.version, full.version);
+        assert_eq!(pack.preset_count, full.preset_count);
+        assert_eq!(pack.raw_desc_block, full.raw_desc_block);
+        assert_eq!(pack.computed_presets.len(), full.computed_presets.len());
+        assert_eq!(pack.desc_parse_error, full.desc_parse_error);
+        assert_eq!(pack.brushes.len(), 1);
+        assert_eq!(pack.brushes.len(), full.brushes.len());
+        for (i, brush) in full.brushes.iter().enumerate() {
+            assert_eq!(pack.brushes[i].id, brush.id);
+            assert_eq!(pack.brushes[i].name, brush.name);
+            assert!(skipped.is_deferred(i));
+            let tip = skipped.decode_tip(i).unwrap();
+            assert_eq!(
+                (tip.width, tip.height, tip.depth),
+                (brush.tip.width, brush.tip.height, brush.tip.depth)
+            );
+            assert_eq!(tip.data, brush.tip.data);
+            assert_eq!(tip.data, deferred.decode_tip(i).unwrap().data);
+        }
+    }
+
+    #[test]
+    fn without_patterns_still_rejects_a_patt_block_that_overruns_the_file() {
+        for declared in [u32::MAX, 5] {
+            let mut d = v10_header();
+            d.extend_from_slice(b"8BIMpatt");
+            d.write_u32::<BigEndian>(declared).unwrap();
+            d.extend_from_slice(b"1234");
+
+            assert!(
+                matches!(parse_abr(&d), Err(AbrError::MalformedBlock { .. })),
+                "full parse must reject a patt block claiming {declared} bytes"
+            );
+            assert!(
+                matches!(
+                    parse_abr_deferred_without_patterns(&d),
+                    Err(AbrError::MalformedBlock { .. })
+                ),
+                "skipping parse must reject a patt block claiming {declared} bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn without_patterns_walks_unaligned_patt_blocks_to_the_samp_and_desc_behind_them() {
+        let mut d = v10_header();
+        let mut first = record_block(&[gray_record("uuid-first", [1, 2, 3, 4])]);
+        first.push(0);
+        assert_eq!(first.len() % 4, 1);
+        push_block(&mut d, b"patt", &first);
+        let mut second = record_block(&[gray_record("uuid-second", [5, 6, 7, 8])]);
+        second.extend_from_slice(&[0, 0, 0]);
+        assert_eq!(second.len() % 4, 3);
+        push_block(&mut d, b"patt", &second);
+        push_block(&mut d, b"samp", &build_v10_entry(8, 8, 0xDD));
+        push_block(&mut d, b"desc", &build_mixed_desc_block());
+        let mut last = record_block(&[gray_record("uuid-last", [9, 10, 11, 12])]);
+        last.extend_from_slice(&[0, 0]);
+        d.extend_from_slice(b"8BIMpatt");
+        d.write_u32::<BigEndian>(last.len() as u32).unwrap();
+        d.extend_from_slice(&last);
+        assert_eq!(
+            d.len() % 4,
+            2,
+            "the final block ends unaligned and unpadded"
+        );
+
+        let full = parse_abr(&d).unwrap();
+        let ids: Vec<&str> = full.patterns.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["uuid-first", "uuid-second", "uuid-last"]);
+        assert_eq!(full.brushes.len(), 1);
+
+        let skipped = parse_abr_deferred_without_patterns(&d).unwrap();
+        assert!(skipped.pack.patterns.is_empty());
+        assert_eq!(skipped.pack.preset_count, 2);
+        assert_eq!(skipped.pack.computed_presets.len(), 1);
+        assert_eq!(skipped.pack.brushes.len(), 1);
+        assert_eq!(skipped.pack.brushes[0].name, "Sampled");
+        assert_eq!(
+            skipped.decode_tip(0).unwrap().data,
+            full.brushes[0].tip.data
+        );
     }
 
     fn build_simple_entry(w: u32, h: u32, depth: u8, val: u8) -> Vec<u8> {
@@ -2080,7 +2281,7 @@ mod tests {
         };
         let bytes = std::fs::read(&path).unwrap();
         let mut cursor = Cursor::new(&bytes[4..]);
-        let blocks = read_blocks(&mut cursor, bytes.len() as u64 - 4).unwrap();
+        let blocks = read_blocks(&mut cursor, bytes.len() as u64 - 4, PatternMode::Read).unwrap();
 
         let types: Vec<&str> = blocks.iter().map(|b| b.block_type.as_str()).collect();
         assert_eq!(types, ["samp", "patt", "desc", "phry"]);
@@ -2102,7 +2303,7 @@ mod tests {
         };
         let bytes = std::fs::read(&path).unwrap();
         let mut cursor = Cursor::new(&bytes[4..]);
-        let blocks = read_blocks(&mut cursor, bytes.len() as u64 - 4).unwrap();
+        let blocks = read_blocks(&mut cursor, bytes.len() as u64 - 4, PatternMode::Read).unwrap();
         let samp = blocks.iter().find(|b| b.block_type == "samp").unwrap();
 
         let (frames, clean) = frame_samp_entries_by_length(&samp.data);
