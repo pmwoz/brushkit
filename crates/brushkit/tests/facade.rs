@@ -11,7 +11,8 @@ fn abr_and_preview_are_reachable_through_the_facade() {
     let pack = brushkit::abr::parse_abr(V6_MIN).expect("minimal v6 pack parses");
     assert!(pack.brushes.is_empty());
 
-    let set = preview_abr(V6_MIN, PreviewOptions { max_cell: 64 }).expect("minimal v6 pack previews");
+    let set =
+        preview_abr(V6_MIN, PreviewOptions { max_cell: 64 }).expect("minimal v6 pack previews");
     assert!(set.entries.is_empty());
 }
 
