@@ -5,9 +5,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
 
 [dependencies]
-brushkit-abr = { path = "../abr", version = "0.1.1" }
+brushkit-abr = { path = "../abr", version = "0.1.2" }
 zip.workspace = true
 plist.workspace = true
 image.workspace = true
