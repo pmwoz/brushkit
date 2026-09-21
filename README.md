@@ -11,6 +11,7 @@ Rust crates for reading brush files and rendering their tip shapes.
 
 | Crate | Purpose |
 |---|---|
+| `brushkit` | One dependency over the two below, as `brushkit::abr` and `brushkit::preview`. |
 | `brushkit-abr` | Reader for `.abr` files. Parses the pack into brushes with names, tip bitmaps or computed geometry, and patterns. |
 | `brushkit-preview` | Tip bitmaps for any supported file: decodes sampled tips, synthesizes computed tips, reads Procreate `Shape.png`, and lays out contact sheets. |
 | `brushkit-fixture` | Generates synthetic `.abr` files for tests and fuzzing. |
