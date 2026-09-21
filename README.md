@@ -53,6 +53,8 @@ cargo test
 cargo +nightly fuzz run abr_parse   # optional, needs cargo-fuzz
 ```
 
+See [fuzzing instructions](fuzz/README.md) for all targets and seed regeneration.
+
 The crates compile for `wasm32-unknown-unknown` as well as native targets.
 
 ## Real-file tests
