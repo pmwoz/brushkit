@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-brushkit-abr = { path = "../abr" }
+brushkit-abr = { path = "../abr", version = "0.1.1" }
 zip.workspace = true
 plist.workspace = true
 image.workspace = true
