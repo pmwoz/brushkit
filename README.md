@@ -24,7 +24,7 @@ only. Nothing here writes or converts a brush file.
 
 ```toml
 [dependencies]
-brushkit = "0.1"
+brushkit = "0.2"
 ```
 
 ```rust
@@ -61,8 +61,10 @@ are identical, so the block compiles whenever the test suite does.
 file order exactly once, available or not. A brush whose tip cannot be
 rendered carries a reason (`NoShapePng`, `UnsupportedTipKind`, `Corrupt`,
 `TooLarge`) rather than being dropped, so a caller can lay out a complete
-grid. No returned bitmap has a side larger than `max_cell`, and a tip that
-already fits keeps its size. A `.brushset`
+grid. Each entry also carries optional `source_dimensions` for the original
+raster, independent of the preview size and retained if pixel decoding fails.
+Computed tips have no source raster dimensions. No returned bitmap has a side
+larger than `max_cell`, and a tip that already fits keeps its size. A `.brushset`
 without `brushset.plist` is read in zip order and has no set name.
 
 `parse_abr` decodes every tip up front. `parse_abr_deferred` and

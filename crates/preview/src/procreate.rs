@@ -116,9 +116,8 @@ pub fn decode_tip_png(bytes: &[u8]) -> Result<GrayscaleBitmap, ShapePngError> {
     })
 }
 
-/// Dimensions straight off the PNG header, read on a second, unlimited reader
-/// that allocates no pixels. Used only to report what tripped the ceiling.
-fn header_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+/// Reads header dimensions without allocating pixels or applying decode limits.
+pub(crate) fn header_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .ok()?

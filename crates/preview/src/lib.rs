@@ -22,6 +22,7 @@ pub use synth::*;
 
 use brushkit_abr::{parse_abr_deferred_without_patterns, ShapeTipFamily};
 use std::io::Cursor;
+use std::num::NonZeroU32;
 
 #[derive(Debug, Clone, Copy)]
 pub struct PreviewOptions {
@@ -35,11 +36,37 @@ pub struct PreviewSet {
     pub entries: Vec<PreviewEntry>,
 }
 
+/// File-declared raster dimensions, independent of the returned preview size.
+/// A readable header does not guarantee valid pixels or a safe allocation size.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct SourceDimensions {
+    width: NonZeroU32,
+    height: NonZeroU32,
+}
+
+impl SourceDimensions {
+    pub fn new(width: u32, height: u32) -> Option<Self> {
+        Some(Self {
+            width: NonZeroU32::new(width)?,
+            height: NonZeroU32::new(height)?,
+        })
+    }
+
+    pub fn width(self) -> u32 {
+        self.width.get()
+    }
+    pub fn height(self) -> u32 {
+        self.height.get()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PreviewEntry {
     pub index: usize,
     pub name: String,
     pub tip: TipPreview,
+    /// None when the brush has no source raster or its dimensions cannot be read.
+    pub source_dimensions: Option<SourceDimensions>,
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +116,7 @@ struct Row {
     source: Source,
     name: String,
     tip: TipPreview,
+    source_dimensions: Option<SourceDimensions>,
 }
 
 /// Tips for a Photoshop `.abr` pack.
@@ -115,6 +143,7 @@ pub fn preview_abr(bytes: &[u8], opts: PreviewOptions) -> Result<PreviewSet, Pre
         } else {
             brush.name.clone()
         };
+        let source_dimensions = SourceDimensions::new(brush.tip.width, brush.tip.height);
         let tip = match deferred.decode_tip(i) {
             Ok(tip) => TipPreview::Available(downsample(&to_grayscale(&tip), max_cell)),
             Err(e) => TipPreview::Unavailable(UnavailableReason::Corrupt(e.to_string())),
@@ -122,6 +151,7 @@ pub fn preview_abr(bytes: &[u8], opts: PreviewOptions) -> Result<PreviewSet, Pre
         rows.push(Row {
             key,
             source: Source::Sampled,
+            source_dimensions,
             name,
             tip,
         });
@@ -144,6 +174,7 @@ pub fn preview_abr(bytes: &[u8], opts: PreviewOptions) -> Result<PreviewSet, Pre
         rows.push(Row {
             key,
             source: Source::Computed,
+            source_dimensions: None,
             name: preset.name.clone(),
             tip,
         });
@@ -159,6 +190,7 @@ pub fn preview_abr(bytes: &[u8], opts: PreviewOptions) -> Result<PreviewSet, Pre
         rows.push(Row {
             key: preset.preset_index,
             source: Source::Unsupported,
+            source_dimensions: None,
             name: preset.name.clone(),
             tip: TipPreview::Unavailable(UnavailableReason::UnsupportedTipKind(kind)),
         });
@@ -173,6 +205,7 @@ pub fn preview_abr(bytes: &[u8], opts: PreviewOptions) -> Result<PreviewSet, Pre
             index,
             name: row.name,
             tip: row.tip,
+            source_dimensions: row.source_dimensions,
         })
         .collect();
 
@@ -262,6 +295,7 @@ fn member_entry(
             return PreviewEntry {
                 index,
                 name: fallback_name,
+                source_dimensions: None,
                 tip: TipPreview::Unavailable(UnavailableReason::Corrupt(msg)),
             }
         }
@@ -273,21 +307,32 @@ fn member_entry(
             index,
             name,
             tip: TipPreview::Unavailable(UnavailableReason::NoShapePng),
+            source_dimensions: None,
         };
     }
 
+    let mut source_dimensions = None;
     let tip = match procreate::read_zip_entry(zip, &shape_path) {
         Err(msg) => TipPreview::Unavailable(UnavailableReason::Corrupt(msg)),
-        Ok(png) => match procreate::decode_tip_png(&png) {
-            Ok(bitmap) => TipPreview::Available(downsample(&bitmap, max_cell)),
-            Err(procreate::ShapePngError::TooLarge { width, height }) => {
-                TipPreview::Unavailable(UnavailableReason::TooLarge { width, height })
+        Ok(png) => {
+            source_dimensions = procreate::header_dimensions(&png)
+                .and_then(|(width, height)| SourceDimensions::new(width, height));
+            match procreate::decode_tip_png(&png) {
+                Ok(bitmap) => TipPreview::Available(downsample(&bitmap, max_cell)),
+                Err(procreate::ShapePngError::TooLarge { width, height }) => {
+                    TipPreview::Unavailable(UnavailableReason::TooLarge { width, height })
+                }
+                Err(procreate::ShapePngError::Corrupt(msg)) => {
+                    TipPreview::Unavailable(UnavailableReason::Corrupt(msg))
+                }
             }
-            Err(procreate::ShapePngError::Corrupt(msg)) => {
-                TipPreview::Unavailable(UnavailableReason::Corrupt(msg))
-            }
-        },
+        }
     };
 
-    PreviewEntry { index, name, tip }
+    PreviewEntry {
+        index,
+        name,
+        tip,
+        source_dimensions,
+    }
 }
