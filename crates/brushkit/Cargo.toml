@@ -8,8 +8,8 @@ repository.workspace = true
 readme.workspace = true
 
 [dependencies]
-brushkit-abr = { path = "../abr", version = "0.1.3" }
-brushkit-preview = { path = "../preview", version = "0.1.3", default-features = false }
+brushkit-abr.workspace = true
+brushkit-preview = { workspace = true, default-features = false }
 
 [features]
 default = ["text"]

@@ -11,6 +11,8 @@ repository = "https://github.com/pmwoz/brushkit"
 readme = "README.md"
 
 [workspace.dependencies]
+brushkit-abr = { path = "crates/abr", version = "0.1.3" }
+brushkit-preview = { path = "crates/preview", version = "0.1.3", default-features = false }
 thiserror = "2"
 byteorder = "1"
 flate2 = "1"

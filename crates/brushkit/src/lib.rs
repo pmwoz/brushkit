@@ -5,7 +5,7 @@
 //! two crates keep their own namespaces here because both export bitmap types.
 //!
 //! Features forward to the underlying crates: `text` (default) enables the
-//! contact-sheet labels in `preview`, `serde` enables serialization in `abr`.
+//! contact-sheet API in `preview`, `serde` enables serialization in `abr`.
 
 pub use brushkit_abr as abr;
 pub use brushkit_preview as preview;
