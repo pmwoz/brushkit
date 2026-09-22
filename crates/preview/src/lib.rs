@@ -287,6 +287,17 @@ fn member_entry(
         prefix.trim_end_matches('/').to_string()
     };
 
+    // Read before the archive so an unreadable Brush.archive still reports the
+    // size of a readable Shape.png.
+    let shape_path = format!("{prefix}Shape.png");
+    let has_shape = zip.by_name(&shape_path).is_ok();
+    let shape = has_shape.then(|| procreate::read_zip_entry(zip, &shape_path));
+    let source_dimensions = match &shape {
+        Some(Ok(png)) => procreate::header_dimensions(png)
+            .and_then(|(width, height)| SourceDimensions::new(width, height)),
+        _ => None,
+    };
+
     let archive = procreate::read_zip_entry(zip, &format!("{prefix}Brush.archive"))
         .and_then(|buf| procreate::brush_name(&buf));
     let name = match archive {
@@ -295,38 +306,24 @@ fn member_entry(
             return PreviewEntry {
                 index,
                 name: fallback_name,
-                source_dimensions: None,
+                source_dimensions,
                 tip: TipPreview::Unavailable(UnavailableReason::Corrupt(msg)),
             }
         }
     };
 
-    let shape_path = format!("{prefix}Shape.png");
-    if zip.by_name(&shape_path).is_err() {
-        return PreviewEntry {
-            index,
-            name,
-            tip: TipPreview::Unavailable(UnavailableReason::NoShapePng),
-            source_dimensions: None,
-        };
-    }
-
-    let mut source_dimensions = None;
-    let tip = match procreate::read_zip_entry(zip, &shape_path) {
-        Err(msg) => TipPreview::Unavailable(UnavailableReason::Corrupt(msg)),
-        Ok(png) => {
-            source_dimensions = procreate::header_dimensions(&png)
-                .and_then(|(width, height)| SourceDimensions::new(width, height));
-            match procreate::decode_tip_png(&png) {
-                Ok(bitmap) => TipPreview::Available(downsample(&bitmap, max_cell)),
-                Err(procreate::ShapePngError::TooLarge { width, height }) => {
-                    TipPreview::Unavailable(UnavailableReason::TooLarge { width, height })
-                }
-                Err(procreate::ShapePngError::Corrupt(msg)) => {
-                    TipPreview::Unavailable(UnavailableReason::Corrupt(msg))
-                }
+    let tip = match shape {
+        None => TipPreview::Unavailable(UnavailableReason::NoShapePng),
+        Some(Err(msg)) => TipPreview::Unavailable(UnavailableReason::Corrupt(msg)),
+        Some(Ok(png)) => match procreate::decode_tip_png(&png) {
+            Ok(bitmap) => TipPreview::Available(downsample(&bitmap, max_cell)),
+            Err(procreate::ShapePngError::TooLarge { width, height }) => {
+                TipPreview::Unavailable(UnavailableReason::TooLarge { width, height })
             }
-        }
+            Err(procreate::ShapePngError::Corrupt(msg)) => {
+                TipPreview::Unavailable(UnavailableReason::Corrupt(msg))
+            }
+        },
     };
 
     PreviewEntry {
