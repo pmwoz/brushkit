@@ -106,3 +106,43 @@ pub fn zip_with(entries: &[(&str, &[u8])]) -> Vec<u8> {
     }
     zw.finish().expect("finish zip").into_inner()
 }
+
+/// One sampled tip for [`samp_abr`]: `width` x `height` raw 8-bit pixels of
+/// `fill`. A `corrupt` tip declares RLE instead, so its first row byte count
+/// (two `fill` bytes) overruns the payload and decoding fails.
+pub struct SampTip {
+    pub width: u32,
+    pub height: u32,
+    pub fill: u8,
+    pub corrupt: bool,
+}
+
+/// A v6 `.abr` whose single `samp` block holds `tips` in order. The entries
+/// carry no uuid, so the parser lists the brushes in reverse block order.
+pub fn samp_abr(tips: &[SampTip]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    for tip in tips {
+        let mut entry = Vec::new();
+        entry.extend_from_slice(&0u32.to_be_bytes());
+        for bound in [0, 0, tip.height as i32, tip.width as i32] {
+            entry.extend_from_slice(&bound.to_be_bytes());
+        }
+        entry.extend_from_slice(&8u16.to_be_bytes());
+        entry.push(u8::from(tip.corrupt));
+        entry.extend(std::iter::repeat_n(
+            tip.fill,
+            (tip.width * tip.height) as usize,
+        ));
+        payload.extend_from_slice(&(entry.len() as u32).to_be_bytes());
+        payload.extend_from_slice(&entry);
+        payload.resize(payload.len().next_multiple_of(4), 0);
+    }
+
+    let mut file = Vec::new();
+    file.extend_from_slice(&6u16.to_be_bytes());
+    file.extend_from_slice(&2u16.to_be_bytes());
+    file.extend_from_slice(b"8BIMsamp");
+    file.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    file.extend_from_slice(&payload);
+    file
+}
