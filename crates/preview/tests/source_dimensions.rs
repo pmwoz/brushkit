@@ -113,7 +113,7 @@ fn procreate_dimensions_follow_members_and_survive_pixel_failures() {
 }
 
 #[test]
-fn computed_preview_has_no_source_raster() {
+fn computed_and_unsupported_previews_have_no_source_raster() {
     // One computed preset, with a diameter and otherwise default geometry.
     let mut descriptor = vec![0, 0, 0, 16, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
     descriptor.extend_from_slice(b"null\0\0\0\x01\0\0\0\0BrshVlLs\0\0\0\x01Objc\0\0\0\x01\0\0\0\0\0\x0bbrushPreset\0\0\0\x01\0\0\0\0BrshObjc\0\0\0\x01\0\0\0\0\0\x0dcomputedBrush\0\0\0\x01\0\0\0\0DmtrUntF#Pxl");
@@ -127,6 +127,19 @@ fn computed_preview_has_no_source_raster() {
     assert_eq!(set.entries.len(), 1);
     assert_eq!(set.entries[0].source_dimensions, None);
     assert!(matches!(set.entries[0].tip, TipPreview::Available(_)));
+
+    let class = bytes
+        .windows(13)
+        .position(|value| value == b"computedBrush")
+        .unwrap();
+    bytes[class..class + 13].copy_from_slice(b"computedBrusX");
+    let set = preview_abr(&bytes, PreviewOptions { max_cell: 8 }).unwrap();
+    assert_eq!(set.entries.len(), 1);
+    assert_eq!(set.entries[0].source_dimensions, None);
+    assert!(matches!(
+        set.entries[0].tip,
+        TipPreview::Unavailable(UnavailableReason::UnsupportedTipKind(_))
+    ));
 }
 
 fn corpus_files(directory: &Path, files: &mut Vec<PathBuf>) {
