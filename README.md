@@ -73,12 +73,13 @@ first `n` available entries of the full preview, in the same order. Each
 entry keeps its index from the full preview, so indices may skip. Entries
 after the `n`th available one are not built, which suits a thumbnail that
 draws a few tips under a time budget. An `.abr` pack is still parsed in full,
-and the parser decodes every tip of a v1 or v2 pack and every dual-brush tip
-up front.
+but the parse decodes no tip.
 
 `parse_abr` decodes every tip up front. `parse_abr_deferred` and
 `parse_abr_deferred_without_patterns` keep tips as byte ranges to decode on
-demand. The preview path uses the latter, so previewing a pack with a large
+demand, except that they decode every tip of a v1 or v2 pack and every
+dual-brush tip up front. `parse_abr_all_deferred_without_patterns` decodes no
+tip up front. The preview path uses it, so previewing a pack with a large
 pattern block does not copy or decode the patterns.
 
 ## Features

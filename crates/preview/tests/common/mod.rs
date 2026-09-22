@@ -148,6 +148,38 @@ pub fn samp_abr(tips: &[SampTip]) -> Vec<u8> {
     file
 }
 
+/// A v2 `.abr` whose entries hold `tips` in order, RLE-compressed with one
+/// repeat run per row, so `width` is at most 128. A `corrupt` tip carries only
+/// its row byte counts and fails to decode. The parser lists the brushes in
+/// reverse entry order.
+pub fn legacy_abr(tips: &[SampTip]) -> Vec<u8> {
+    let mut file = Vec::new();
+    file.extend_from_slice(&2u16.to_be_bytes());
+    file.extend_from_slice(&(tips.len() as u16).to_be_bytes());
+    for tip in tips {
+        let mut entry = Vec::new();
+        // Misc, spacing, an empty name, anti-aliasing and the i16 bounds.
+        entry.extend_from_slice(&[0; 4 + 2 + 4 + 1 + 8]);
+        for bound in [0, 0, tip.height as i32, tip.width as i32] {
+            entry.extend_from_slice(&bound.to_be_bytes());
+        }
+        entry.extend_from_slice(&8u16.to_be_bytes());
+        entry.push(1);
+        for _ in 0..tip.height {
+            entry.extend_from_slice(&2u16.to_be_bytes());
+        }
+        if !tip.corrupt {
+            for _ in 0..tip.height {
+                entry.extend_from_slice(&[(1 - tip.width as i32) as u8, tip.fill]);
+            }
+        }
+        file.extend_from_slice(&2u16.to_be_bytes());
+        file.extend_from_slice(&(entry.len() as u32).to_be_bytes());
+        file.extend_from_slice(&entry);
+    }
+    file
+}
+
 /// Every `.abr`, `.brush` and `.brushset` file under `directory`, recursively.
 pub fn corpus_files(directory: &Path, files: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(directory).expect("read corpus directory") {

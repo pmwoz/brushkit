@@ -22,7 +22,7 @@ pub use bitmap::*;
 pub use sheet::*;
 pub use synth::*;
 
-use brushkit_abr::{parse_abr_deferred_without_patterns, DeferredPack, ShapeTipFamily};
+use brushkit_abr::{parse_abr_all_deferred_without_patterns, DeferredPack, ShapeTipFamily};
 use std::io::Cursor;
 use std::num::NonZeroU32;
 
@@ -147,7 +147,10 @@ struct Row {
 /// Sampled tips are decoded one at a time and downsampled immediately, so the
 /// peak footprint holds one full-size tip rather than the whole pack. Computed
 /// presets are synthesized from their geometry; a preset that declares neither
-/// is reported as an unsupported tip kind.
+/// is reported as an unsupported tip kind. A sampled tip whose pixels fail to
+/// decode is a `Corrupt` entry, not an error for the whole preview. The
+/// exception is a raw v1 or v2 tip whose pixels run past the end of the input,
+/// which fails the whole preview.
 ///
 /// Embedded pattern payloads are neither copied nor decoded.
 pub fn preview_abr(bytes: &[u8], opts: PreviewOptions) -> Result<PreviewSet, PreviewError> {
@@ -159,9 +162,7 @@ pub fn preview_abr(bytes: &[u8], opts: PreviewOptions) -> Result<PreviewSet, Pre
 /// Unavailable entries do not count toward `n`, and entries after the `n`th
 /// available one are not built, so their tips are not decoded or downsampled.
 ///
-/// The whole pack is still parsed, and the parser decodes some tips itself:
-/// every tip of a v1 or v2 pack, and in newer packs the tips that a preset
-/// uses as its dual brush (see [`brushkit_abr::DeferredPack`]).
+/// The whole pack is still parsed, but the parse decodes no tip.
 pub fn preview_abr_first_available(
     bytes: &[u8],
     opts: PreviewOptions,
@@ -174,7 +175,7 @@ fn abr(bytes: &[u8], opts: PreviewOptions, take: Take) -> Result<PreviewSet, Pre
     let max_cell = check_max_cell(opts)?;
 
     let deferred =
-        parse_abr_deferred_without_patterns(bytes).map_err(|e| PreviewError(e.to_string()))?;
+        parse_abr_all_deferred_without_patterns(bytes).map_err(|e| PreviewError(e.to_string()))?;
     let pack = &deferred.pack;
 
     let mut rows: Vec<Row> = Vec::new();
@@ -443,7 +444,9 @@ mod common;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::{brush_archive, brushset_plist, gray_png, samp_abr, zip_with, SampTip};
+    use crate::common::{
+        brush_archive, brushset_plist, gray_png, legacy_abr, samp_abr, zip_with, SampTip,
+    };
     use std::cell::Cell;
 
     thread_local! {
@@ -510,6 +513,20 @@ mod tests {
         let entries = set.unwrap().entries;
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].index, 1);
+    }
+
+    #[test]
+    fn abr_v2_corrupt_tip_is_one_corrupt_entry() {
+        let bytes = legacy_abr(&[tip(false), tip(true), tip(false)]);
+        let entries = preview_abr(&bytes, OPTS).unwrap().entries;
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["brush_2", "brush_1", "brush_0"]);
+        assert!(matches!(entries[0].tip, TipPreview::Available(_)));
+        assert!(matches!(
+            entries[1].tip,
+            TipPreview::Unavailable(UnavailableReason::Corrupt(_))
+        ));
+        assert!(matches!(entries[2].tip, TipPreview::Available(_)));
     }
 
     #[test]
