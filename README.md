@@ -28,39 +28,41 @@ brushkit = "0.1"
 ```
 
 ```rust
-use brushkit::abr::parse_abr;
+use brushkit::abr::parse_abr_deferred_without_patterns;
 use brushkit::preview::{preview_abr, PreviewOptions, TipPreview};
 
-let bytes = std::fs::read("pack.abr").unwrap();
+fn main() {
+    let bytes = std::fs::read("pack.abr").unwrap();
 
-let pack = parse_abr(&bytes).unwrap();
-println!(
-    "{:?}: {} sampled brushes, {} computed presets, {} patterns",
-    pack.version,
-    pack.brushes.len(),
-    pack.computed_presets.len(),
-    pack.patterns.len()
-);
+    let pack = parse_abr_deferred_without_patterns(&bytes).unwrap().pack;
+    println!(
+        "{:?}: {} sampled brushes, {} computed presets",
+        pack.version,
+        pack.brushes.len(),
+        pack.computed_presets.len()
+    );
 
-let set = preview_abr(&bytes, PreviewOptions { max_cell: 128 }).unwrap();
-for entry in &set.entries {
-    match &entry.tip {
-        TipPreview::Available(bitmap) => {
-            println!("{}: {}x{}", entry.name, bitmap.width, bitmap.height)
+    let set = preview_abr(&bytes, PreviewOptions { max_cell: 128 }).unwrap();
+    for entry in &set.entries {
+        match &entry.tip {
+            TipPreview::Available(bitmap) => {
+                println!("{}: {}x{}", entry.name, bitmap.width, bitmap.height)
+            }
+            TipPreview::Unavailable(reason) => println!("{}: {reason:?}", entry.name),
         }
-        TipPreview::Unavailable(reason) => println!("{}: {reason:?}", entry.name),
     }
 }
 ```
 
-The same code is `crates/brushkit/examples/readme.rs`, so it compiles with
-the test suite.
+The same code is `crates/brushkit/examples/readme.rs`. A test checks the two
+are identical, so the block compiles whenever the test suite does.
 
 `preview_abr`, `preview_brush` and `preview_brushset` return every brush in
 file order exactly once, available or not. A brush whose tip cannot be
 rendered carries a reason (`NoShapePng`, `UnsupportedTipKind`, `Corrupt`,
 `TooLarge`) rather than being dropped, so a caller can lay out a complete
-grid. `max_cell` is the largest side of every returned bitmap. A `.brushset`
+grid. No returned bitmap has a side larger than `max_cell`, and a tip that
+already fits keeps its size. A `.brushset`
 without `brushset.plist` is read in zip order and has no set name.
 
 `parse_abr` decodes every tip up front. `parse_abr_deferred` and
@@ -70,8 +72,9 @@ pattern block does not copy or decode the patterns.
 
 ## Features
 
-- `text` (default, `brushkit` and `brushkit-preview`): contact-sheet labels.
-  Pulls in `ab_glyph` and an embedded copy of Inter Regular.
+- `text` (default, `brushkit` and `brushkit-preview`): the contact-sheet
+  API. Labels need a font, so it pulls in `ab_glyph` and an embedded copy of
+  Inter Regular.
 - `serde` (`brushkit` and `brushkit-abr`): `Serialize` on the raw descriptor
   dump in `brushkit_abr::dump`.
 

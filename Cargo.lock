@@ -89,7 +89,6 @@ version = "0.1.3"
 dependencies = [
  "ab_glyph",
  "brushkit-abr",
- "brushkit-fixture",
  "image",
  "plist",
  "png 0.17.16",
