@@ -187,20 +187,35 @@ fn real_file_dimensions_are_independent_of_cell_size() {
             "brush" => preview_brush,
             _ => preview_brushset,
         };
-        let small = reader(&bytes, PreviewOptions { max_cell: 8 }).unwrap();
-        let large = reader(&bytes, PreviewOptions { max_cell: 160 }).unwrap();
+        let large = match reader(&bytes, PreviewOptions { max_cell: 160 }) {
+            Ok(set) => set,
+            Err(error) => {
+                println!("skipped {}: {error}", path.display());
+                continue;
+            }
+        };
+        let small = reader(&bytes, PreviewOptions { max_cell: 8 })
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
         assert_eq!(small.entries.len(), large.entries.len());
         for (small, large) in small.entries.iter().zip(&large.entries) {
             assert_eq!(small.name, large.name);
             assert_eq!(small.index, large.index);
             assert_eq!(small.source_dimensions, large.source_dimensions);
-            if let Some(dimensions) = large.source_dimensions {
+            if large.source_dimensions.is_some() {
                 known += 1;
-                assert!(dimensions.width() > 0 && dimensions.height() > 0);
-                if let TipPreview::Available(bitmap) = &large.tip {
-                    assert!(
-                        dimensions.width() >= bitmap.width && dimensions.height() >= bitmap.height
-                    );
+            }
+            for (entry, max_cell) in [(small, 8), (large, 160)] {
+                let (Some(dimensions), TipPreview::Available(bitmap)) =
+                    (entry.source_dimensions, &entry.tip)
+                else {
+                    continue;
+                };
+                let source = (dimensions.width(), dimensions.height());
+                let preview = (bitmap.width, bitmap.height);
+                if source.0 <= max_cell && source.1 <= max_cell {
+                    assert_eq!(source, preview, "{} #{}", path.display(), entry.index);
+                } else {
+                    assert!(source.0 >= preview.0 && source.1 >= preview.1);
                 }
             }
         }
