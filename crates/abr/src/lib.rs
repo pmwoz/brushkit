@@ -13,7 +13,8 @@ mod parser;
 mod pattern;
 
 pub use parser::{
-    parse_abr, parse_abr_deferred, parse_abr_deferred_without_patterns, DeferredPack, DeferredTip,
+    parse_abr, parse_abr_all_deferred_without_patterns, parse_abr_deferred,
+    parse_abr_deferred_without_patterns, DeferredPack, DeferredTip,
 };
 pub use pattern::AbrPattern;
 

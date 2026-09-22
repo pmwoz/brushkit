@@ -37,7 +37,7 @@ use crate::limits::{MAX_DIMENSION, MAX_NAME_CODE_UNITS};
 const MAX_TIP_DECODED_BYTES: usize = 256 * 1024 * 1024;
 
 pub fn parse_abr(bytes: &[u8]) -> Result<AbrPack, AbrError> {
-    parse_abr_with(bytes, TipMode::Eager, PatternMode::Read).map(|parsed| parsed.pack)
+    parse_abr_with(bytes, Tips::Eager, PatternMode::Read).map(|parsed| parsed.pack)
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -47,7 +47,7 @@ enum PatternMode {
 }
 
 /// Everything `parse_abr_with` produces: the pack itself plus the bookkeeping
-/// only the deferred mode uses. In `TipMode::Eager` every tip vector holds
+/// only the deferred mode uses. In `Tips::Eager` every tip vector holds
 /// `None` and `samp_blocks` is empty.
 struct ParsedAbr {
     pack: AbrPack,
@@ -56,30 +56,28 @@ struct ParsedAbr {
     /// Aligned with `pack.dropped_tip_details`.
     dropped_tips: Vec<Option<DeferredTip>>,
     /// The `samp` block payloads, in block order, moved out of `read_blocks`.
+    /// For a v1/v2 pack with a deferred tip, the one block is the whole input.
     samp_blocks: Vec<Vec<u8>>,
-    /// Every `dual_brush_uuid` any preset names, sampled or computed.
+    /// Every `dual_brush_uuid` any preset names, sampled or computed. Filled
+    /// only in `Tips::Deferred(Defer::Paired)`, the one mode that reads it.
     dual_uuids: HashSet<String>,
 }
 
-fn parse_abr_with(
-    bytes: &[u8],
-    mode: TipMode,
-    patterns: PatternMode,
-) -> Result<ParsedAbr, AbrError> {
+/// Whether a parse decodes tips as it reads them or defers them.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum Tips {
+    Eager,
+    Deferred(Defer),
+}
+
+fn parse_abr_with(bytes: &[u8], tips: Tips, patterns: PatternMode) -> Result<ParsedAbr, AbrError> {
     let mut cursor = Cursor::new(bytes);
     let (version, subversion) = read_header(&mut cursor)?;
 
     match version {
         AbrVersion::V1 | AbrVersion::V2 => {
-            let pack = parse_legacy(&mut cursor, subversion, version)?;
-            let tips = vec![None; pack.brushes.len()];
-            return Ok(ParsedAbr {
-                pack,
-                tips,
-                dropped_tips: Vec::new(),
-                samp_blocks: Vec::new(),
-                dual_uuids: HashSet::new(),
-            });
+            let defer = tips == Tips::Deferred(Defer::All);
+            return parse_legacy(&mut cursor, subversion, version, defer);
         }
         AbrVersion::V6 | AbrVersion::V7 | AbrVersion::V9 | AbrVersion::V10 => {}
     }
@@ -90,9 +88,9 @@ fn parse_abr_with(
     let mut samp_index = 0usize;
     for block in &blocks {
         if block.block_type == "samp" {
-            let block_mode = match mode {
-                TipMode::Eager => TipMode::Eager,
-                TipMode::Deferred { .. } => TipMode::Deferred { block: samp_index },
+            let block_mode = match tips {
+                Tips::Eager => TipMode::Eager,
+                Tips::Deferred(_) => TipMode::Deferred { block: samp_index },
             };
             let entries = parse_samp_block(&block.data, version, subversion, block_mode);
             bitmaps.extend(entries);
@@ -141,6 +139,23 @@ fn parse_abr_with(
         }
     }
 
+    let dual_uuids: HashSet<String> = match tips {
+        Tips::Deferred(Defer::Paired) => desc_infos
+            .iter()
+            .filter_map(|info| info.dual_brush_uuid.clone())
+            .collect(),
+        Tips::Eager | Tips::Deferred(Defer::All) => HashSet::new(),
+    };
+
+    let samp_blocks: Vec<Vec<u8>> = match tips {
+        Tips::Eager => Vec::new(),
+        Tips::Deferred(_) => blocks
+            .into_iter()
+            .filter(|b| b.block_type == "samp")
+            .map(|b| b.data)
+            .collect(),
+    };
+
     let valid_bitmaps: Vec<SampEntry> = bitmaps.into_iter().flatten().collect();
     let PairedBrushes {
         brushes,
@@ -151,20 +166,6 @@ fn parse_abr_with(
         tips,
         dropped_tips,
     } = pair_brushes(valid_bitmaps, &desc_infos);
-
-    let dual_uuids: HashSet<String> = desc_infos
-        .iter()
-        .filter_map(|info| info.dual_brush_uuid.clone())
-        .collect();
-
-    let samp_blocks: Vec<Vec<u8>> = match mode {
-        TipMode::Eager => Vec::new(),
-        TipMode::Deferred { .. } => blocks
-            .into_iter()
-            .filter(|b| b.block_type == "samp")
-            .map(|b| b.data)
-            .collect(),
-    };
 
     let computed_presets = desc_infos
         .iter()
@@ -214,16 +215,19 @@ enum TipMode {
     Deferred { block: usize },
 }
 
-/// One sampled tip whose pixels are still compressed inside a samp block.
+/// One sampled tip whose pixels are still compressed inside a samp block, or
+/// inside the input of a v1/v2 pack.
 ///
-/// Produced by [`parse_abr_deferred`] and only useful through
+/// Produced by [`parse_abr_deferred`], [`parse_abr_deferred_without_patterns`]
+/// and [`parse_abr_all_deferred_without_patterns`], and only useful through
 /// [`DeferredPack::decode_tip`], which replays the exact slice and header the
 /// eager parse would have decoded.
 #[derive(Debug, Clone)]
 pub struct DeferredTip {
     /// Index into `DeferredPack::samp_blocks`.
     block: usize,
-    /// The samp entry's bytes inside that block.
+    /// The samp entry's bytes inside that block. For a v1/v2 tip, its rect
+    /// through its last pixel byte.
     entry: Range<usize>,
     header: BitmapHeader,
     /// `width * height * bytes_per_pixel` — what `decode_tip` will allocate.
@@ -236,14 +240,18 @@ pub struct DeferredTip {
 /// for brush `i`, `pack.brushes[i].tip.data` is EMPTY — the width, height and
 /// depth are correct, the pixels are not there. Pixels come only from
 /// [`decode_tip`](DeferredPack::decode_tip), which decodes one tip per call and
-/// hands the caller the sole copy. This is the only place in the workspace
-/// where a sampled `TipBitmap` may carry no data; a consumer that reads
-/// `brush.tip.data` directly on a deferred pack silently sees a blank tip.
+/// hands the caller the sole copy. A deferred pack is the only place in the
+/// workspace where a sampled `TipBitmap` may carry no data; a consumer that
+/// reads `brush.tip.data` directly on a deferred pack silently sees a blank
+/// tip. From [`parse_abr_all_deferred_without_patterns`] the same holds for
+/// every `pack.dropped_tip_details[*].bitmap`, which nothing decodes.
 ///
-/// Two kinds of tip are decoded eagerly even here, so the converter's
-/// dual-brush lookups keep working unchanged: every tip in
-/// `pack.dropped_tip_details`, and every brush a preset names as its dual
-/// brush. `is_deferred` is false for those.
+/// [`parse_abr_deferred`] and [`parse_abr_deferred_without_patterns`] decode
+/// two kinds of tip eagerly, so the converter's dual-brush lookups keep
+/// working unchanged: every tip in `pack.dropped_tip_details`, and every brush
+/// a preset names as its dual brush. They also decode every tip of a v1 or v2
+/// pack. `is_deferred` is false for those.
+/// [`parse_abr_all_deferred_without_patterns`] decodes none of them.
 pub struct DeferredPack {
     pub pack: AbrPack,
     tips: Vec<Option<DeferredTip>>,
@@ -281,10 +289,10 @@ fn decode_deferred_tip(samp_blocks: &[Vec<u8>], tip: &DeferredTip) -> Result<Tip
 /// Parse a pack without decoding its sampled tips, so a caller can hold the
 /// compressed samp bytes plus one decoded tip at a time instead of all of them.
 ///
-/// See [`DeferredPack`] for the empty-`tip.data` invariant and for the two
-/// kinds of tip this still decodes eagerly.
+/// See [`DeferredPack`] for the empty-`tip.data` invariant and for the tips
+/// this still decodes eagerly.
 pub fn parse_abr_deferred(bytes: &[u8]) -> Result<DeferredPack, AbrError> {
-    parse_abr_deferred_with(bytes, PatternMode::Read)
+    parse_abr_deferred_with(bytes, PatternMode::Read, Defer::Paired)
 }
 
 /// Like [`parse_abr_deferred`], but embedded pattern payloads are neither
@@ -295,30 +303,57 @@ pub fn parse_abr_deferred(bytes: &[u8]) -> Result<DeferredPack, AbrError> {
 /// not inspected. All other fields and decoded tips are unchanged.
 /// Declared block lengths are still checked against the input length.
 pub fn parse_abr_deferred_without_patterns(bytes: &[u8]) -> Result<DeferredPack, AbrError> {
-    parse_abr_deferred_with(bytes, PatternMode::Skip)
+    parse_abr_deferred_with(bytes, PatternMode::Skip, Defer::Paired)
 }
 
-fn parse_abr_deferred_with(bytes: &[u8], patterns: PatternMode) -> Result<DeferredPack, AbrError> {
+/// Like [`parse_abr_deferred_without_patterns`], but no tip is decoded up
+/// front. Every brush whose tip has pixels is deferred, including the tips of
+/// a v1 or v2 pack and the brushes a preset names as its dual brush, and every
+/// `pack.dropped_tip_details[*].bitmap` has correct dimensions and empty data.
+/// A tip whose pixels fail to decode fails its [`DeferredPack::decode_tip`]
+/// call, not the parse. The exception is a raw v1/v2 tip whose pixels run past
+/// the end of the input, which fails the parse as in [`parse_abr`]. See
+/// [`DeferredPack`].
+pub fn parse_abr_all_deferred_without_patterns(bytes: &[u8]) -> Result<DeferredPack, AbrError> {
+    parse_abr_deferred_with(bytes, PatternMode::Skip, Defer::All)
+}
+
+/// Which tips a deferred parse leaves to `DeferredPack::decode_tip`.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum Defer {
+    /// All but the tips [`DeferredPack`] lists as decoded eagerly.
+    Paired,
+    /// Every tip.
+    All,
+}
+
+fn parse_abr_deferred_with(
+    bytes: &[u8],
+    patterns: PatternMode,
+    defer: Defer,
+) -> Result<DeferredPack, AbrError> {
     let ParsedAbr {
         mut pack,
         mut tips,
         dropped_tips,
         samp_blocks,
         dual_uuids,
-    } = parse_abr_with(bytes, TipMode::Deferred { block: 0 }, patterns)?;
+    } = parse_abr_with(bytes, Tips::Deferred(defer), patterns)?;
 
-    for (detail, deferred) in pack.dropped_tip_details.iter_mut().zip(&dropped_tips) {
-        if let Some(tip) = deferred {
-            detail.bitmap = decode_deferred_tip(&samp_blocks, tip)?;
+    if defer == Defer::Paired {
+        for (detail, deferred) in pack.dropped_tip_details.iter_mut().zip(&dropped_tips) {
+            if let Some(tip) = deferred {
+                detail.bitmap = decode_deferred_tip(&samp_blocks, tip)?;
+            }
         }
-    }
 
-    for (i, brush) in pack.brushes.iter_mut().enumerate() {
-        if !dual_uuids.contains(&brush.id) {
-            continue;
-        }
-        if let Some(tip) = tips[i].take() {
-            brush.tip = decode_deferred_tip(&samp_blocks, &tip)?;
+        for (i, brush) in pack.brushes.iter_mut().enumerate() {
+            if !dual_uuids.contains(&brush.id) {
+                continue;
+            }
+            if let Some(tip) = tips[i].take() {
+                brush.tip = decode_deferred_tip(&samp_blocks, &tip)?;
+            }
         }
     }
 
@@ -493,12 +528,19 @@ fn pair_brushes(valid_bitmaps: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> 
 /// v1 and v2 share one entry layout; the only difference is that v2 carries
 /// a Unicode name between `spacing` and `anti_aliasing` and v1 has no name
 /// field at all.
+///
+/// With `defer`, every tip with pixels is deferred into the whole input,
+/// which becomes samp block 0. An entry's rect, depth and compression have the
+/// samp bitmap header layout, so a `BitmapHeader` with `rect_offset` 0 decodes
+/// it.
 fn parse_legacy(
     cursor: &mut Cursor<&[u8]>,
     brush_count: u16,
     version: AbrVersion,
-) -> Result<AbrPack, AbrError> {
+    defer: bool,
+) -> Result<ParsedAbr, AbrError> {
     let mut brushes = Vec::new();
+    let mut tips = Vec::new();
 
     for _ in 0..brush_count {
         let brush_type = cursor
@@ -539,6 +581,7 @@ fn parse_legacy(
                 .map_err(|_| AbrError::InvalidHeader)?;
         }
 
+        let rect_start = cursor.position() as usize;
         let top = cursor
             .read_i32::<BigEndian>()
             .map_err(|_| AbrError::InvalidHeader)?;
@@ -596,25 +639,55 @@ fn parse_legacy(
             ));
         }
 
-        let pixel_data = match compression {
+        let input: &[u8] = cursor.get_ref();
+        let pixel_start = cursor.position();
+        let pixel_end = match compression {
             0 => {
-                let mut buf = vec![0u8; expected];
-                cursor
-                    .read_exact(&mut buf)
-                    .map_err(|_| AbrError::Decompression("truncated raw data".into()))?;
-                buf
+                let end = pixel_start + expected as u64;
+                if end > input.len() as u64 {
+                    return Err(AbrError::Decompression("truncated raw data".into()));
+                }
+                end
             }
-            1 => {
-                let remaining = &cursor.get_ref()[cursor.position() as usize..entry_end as usize];
-                let decoded =
-                    decode_rle(remaining, height as usize, width as usize, bpp, expected)?;
-                cursor.set_position(entry_end);
-                decoded
-            }
+            1 => entry_end,
             _ => {
                 cursor.set_position(entry_end);
                 continue;
             }
+        };
+        cursor.set_position(pixel_end);
+        let pixels = &input[pixel_start as usize..pixel_end as usize];
+
+        let (pixel_data, deferred) = if !defer {
+            #[cfg(test)]
+            tests::record_decode();
+            let data = if compression == 0 {
+                pixels.to_vec()
+            } else {
+                decode_rle(pixels, height as usize, width as usize, bpp, expected)?
+            };
+            (data, None)
+        } else if expected == 0 {
+            // Nothing to decode, and `bitmap_geometry` rejects an empty pixel
+            // region.
+            (Vec::new(), None)
+        } else {
+            let header = BitmapHeader {
+                rect_offset: 0,
+                top,
+                left,
+                bottom,
+                right,
+                depth,
+                compression,
+            };
+            let tip = DeferredTip {
+                block: 0,
+                entry: rect_start..pixel_end as usize,
+                header,
+                decoded_len: expected,
+            };
+            (Vec::new(), Some(tip))
         };
 
         brushes.push(AbrBrush {
@@ -630,10 +703,18 @@ fn parse_legacy(
             synthesized: false,
             preset_index: None,
         });
+        tips.push(deferred);
     }
 
     brushes.reverse();
-    Ok(AbrPack {
+    tips.reverse();
+    // The one samp block `block: 0` above points into.
+    let samp_blocks = if tips.iter().any(Option::is_some) {
+        vec![cursor.get_ref().to_vec()]
+    } else {
+        Vec::new()
+    };
+    let pack = AbrPack {
         version,
         brushes,
         preset_count: brush_count as usize,
@@ -651,6 +732,13 @@ fn parse_legacy(
         unsupported_tip_count: 0,
         unsupported_tip_presets: Vec::new(),
         desc_parse_error: None,
+    };
+    Ok(ParsedAbr {
+        pack,
+        tips,
+        dropped_tips: Vec::new(),
+        samp_blocks,
+        dual_uuids: HashSet::new(),
     })
 }
 
@@ -1140,6 +1228,8 @@ fn read_entry_bitmap(
 }
 
 fn decode_bitmap(data: &[u8], header: &BitmapHeader) -> Result<TipBitmap, AbrError> {
+    #[cfg(test)]
+    tests::record_decode();
     let BitmapGeometry {
         width,
         height,
@@ -1354,9 +1444,28 @@ fn entry_err(offset: u64, reason: &str) -> AbrError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use brushkit_fixture::{write_bool, write_key};
     use byteorder::WriteBytesExt;
+    use std::cell::Cell;
 
     use crate::pattern::tests::{channel_slot, record_block, record_body, unreadable_chunk};
+
+    thread_local! {
+        // Thread-local because cargo runs unit tests on parallel threads.
+        static DECODES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Called once per tip whose pixels are decoded or copied out.
+    pub(super) fn record_decode() {
+        DECODES.with(|count| count.set(count.get() + 1));
+    }
+
+    /// `f`'s result and the tips it decoded on this thread.
+    fn decodes<T>(f: impl FnOnce() -> T) -> (T, usize) {
+        DECODES.with(|count| count.set(0));
+        let out = f();
+        (out, DECODES.with(Cell::get))
+    }
 
     fn tiny_bitmap() -> TipBitmap {
         TipBitmap {
@@ -2253,8 +2362,14 @@ mod tests {
     }
 
     fn build_v10_entry(w: u32, h: u32, val: u8) -> Vec<u8> {
+        build_v10_entry_with_uuid("a1b2c3d4-e5f6-7890-abcd-ef1234567890", w, h, val)
+    }
+
+    fn build_v10_entry_with_uuid(uuid: &str, w: u32, h: u32, val: u8) -> Vec<u8> {
         let mut buf = Vec::new();
-        buf.extend_from_slice(b"$a1b2c3d4-e5f6-7890-abcd-ef1234567890\0");
+        buf.push(b'$');
+        buf.extend_from_slice(uuid.as_bytes());
+        buf.push(0);
         buf.extend(std::iter::repeat_n(0u8, 200));
         buf.write_i32::<BigEndian>(0).unwrap();
         buf.write_i32::<BigEndian>(0).unwrap();
@@ -2657,27 +2772,55 @@ mod tests {
         assert!(parse_abr(&d).is_err());
     }
 
-    fn v2_stream_with_depth(depth: u16) -> Vec<u8> {
+    /// A v1 or v2 entry stream holding `entries`, each from [`legacy_entry`].
+    fn legacy_stream(version: u16, entries: &[Vec<u8>]) -> Vec<u8> {
+        let mut d = Vec::new();
+        d.write_u16::<BigEndian>(version).unwrap();
+        d.write_u16::<BigEndian>(entries.len() as u16).unwrap();
+        for entry in entries {
+            d.extend_from_slice(entry);
+        }
+        d
+    }
+
+    /// One sampled entry (brush type 2), with an empty name on v2, followed
+    /// by `pixels` as stored. `entry_len` overrides the entry's real length.
+    fn legacy_entry(
+        version: u16,
+        width: i32,
+        height: i32,
+        depth: u16,
+        compression: u8,
+        pixels: &[u8],
+        entry_len: Option<u32>,
+    ) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.write_u32::<BigEndian>(0).unwrap();
+        body.write_u16::<BigEndian>(0).unwrap();
+        if version == 2 {
+            body.write_u32::<BigEndian>(0).unwrap();
+        }
+        body.push(0);
+        for _ in 0..4 {
+            body.write_i16::<BigEndian>(0).unwrap();
+        }
+        for v in [0, 0, height, width] {
+            body.write_i32::<BigEndian>(v).unwrap();
+        }
+        body.write_u16::<BigEndian>(depth).unwrap();
+        body.push(compression);
+        body.extend_from_slice(pixels);
+
         let mut d = Vec::new();
         d.write_u16::<BigEndian>(2).unwrap();
-        d.write_u16::<BigEndian>(1).unwrap();
-        d.write_u16::<BigEndian>(2).unwrap();
-        d.write_u32::<BigEndian>(64).unwrap();
-        d.write_u32::<BigEndian>(0).unwrap();
-        d.write_u16::<BigEndian>(0).unwrap();
-        d.write_u32::<BigEndian>(0).unwrap();
-        d.push(0);
-        for _ in 0..4 {
-            d.write_i16::<BigEndian>(0).unwrap();
-        }
-        d.write_i32::<BigEndian>(0).unwrap();
-        d.write_i32::<BigEndian>(0).unwrap();
-        d.write_i32::<BigEndian>(8).unwrap();
-        d.write_i32::<BigEndian>(8).unwrap();
-        d.write_u16::<BigEndian>(depth).unwrap();
-        d.push(0);
-        d.extend(std::iter::repeat_n(0u8, 8 * 8));
+        d.write_u32::<BigEndian>(entry_len.unwrap_or(body.len() as u32))
+            .unwrap();
+        d.extend_from_slice(&body);
         d
+    }
+
+    fn v2_stream_with_depth(depth: u16) -> Vec<u8> {
+        legacy_stream(2, &[legacy_entry(2, 8, 8, depth, 0, &[0u8; 64], Some(64))])
     }
 
     #[test]
@@ -2696,25 +2839,291 @@ mod tests {
     }
 
     fn v2_rle_entry(entry_len: u32) -> Vec<u8> {
-        let mut d = Vec::new();
-        d.write_u16::<BigEndian>(2).unwrap();
-        d.write_u16::<BigEndian>(1).unwrap();
-        d.write_u16::<BigEndian>(2).unwrap();
-        d.write_u32::<BigEndian>(entry_len).unwrap();
-        d.write_u32::<BigEndian>(0).unwrap();
-        d.write_u16::<BigEndian>(0).unwrap();
-        d.write_u32::<BigEndian>(0).unwrap();
-        d.push(0);
-        for _ in 0..4 {
-            d.write_i16::<BigEndian>(0).unwrap();
+        legacy_stream(2, &[legacy_entry(2, 1, 1, 8, 1, &[], Some(entry_len))])
+    }
+
+    /// PackBits for `rows`, each row one literal run.
+    fn rle_literal_rows(rows: &[Vec<u8>]) -> Vec<u8> {
+        let counts: Vec<u16> = rows.iter().map(|row| row.len() as u16 + 1).collect();
+        let mut packed = Vec::new();
+        for row in rows {
+            packed.push(row.len() as u8 - 1);
+            packed.extend_from_slice(row);
         }
-        d.write_i32::<BigEndian>(0).unwrap();
-        d.write_i32::<BigEndian>(0).unwrap();
-        d.write_i32::<BigEndian>(1).unwrap();
-        d.write_i32::<BigEndian>(1).unwrap();
-        d.write_u16::<BigEndian>(8).unwrap();
-        d.push(1);
+        rle(&counts, &packed)
+    }
+
+    /// A `width` x `height` 8-bit tip whose bytes count up from `seed`,
+    /// wrapping at 256.
+    fn tip_rows(width: usize, height: usize, seed: u8) -> Vec<Vec<u8>> {
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| seed.wrapping_add((y * width + x) as u8))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Three RLE tips and one raw tip. The raw tip's declared entry length
+    /// stops short of its pixels, which the parser reads past.
+    fn legacy_multi_tip_stream(version: u16) -> Vec<u8> {
+        let rle_entry = |w: usize, h: usize, seed: u8| {
+            let packed = rle_literal_rows(&tip_rows(w, h, seed));
+            legacy_entry(version, w as i32, h as i32, 8, 1, &packed, None)
+        };
+        let raw_pixels: Vec<u8> = tip_rows(3, 2, 0x70).concat();
+        let raw_header_len = legacy_entry(version, 3, 2, 8, 0, &[], None).len() as u32 - 6;
+        legacy_stream(
+            version,
+            &[
+                rle_entry(3, 2, 0x10),
+                rle_entry(5, 4, 0x30),
+                legacy_entry(version, 3, 2, 8, 0, &raw_pixels, Some(raw_header_len)),
+                rle_entry(1, 1, 0x90),
+            ],
+        )
+    }
+
+    /// Asserts that every field but the tip pixels agrees.
+    fn assert_same_but_pixels(all: &AbrPack, paired: &AbrPack) {
+        assert_eq!(all.version, paired.version);
+        assert_eq!(all.preset_count, paired.preset_count);
+        assert_eq!(all.brushes.len(), paired.brushes.len());
+        for (a, p) in all.brushes.iter().zip(&paired.brushes) {
+            assert_eq!(
+                (&a.id, &a.name, a.preset_index),
+                (&p.id, &p.name, p.preset_index)
+            );
+            assert_eq!(
+                (a.tip.width, a.tip.height, a.tip.depth),
+                (p.tip.width, p.tip.height, p.tip.depth)
+            );
+        }
+        assert_eq!(all.computed_presets.len(), paired.computed_presets.len());
+        assert_eq!(all.dropped_samp_count, paired.dropped_samp_count);
+        assert_eq!(all.skipped_preset_count, paired.skipped_preset_count);
+        assert_eq!(all.unsupported_tip_count, paired.unsupported_tip_count);
+        assert_eq!(
+            all.dropped_tip_details.len(),
+            paired.dropped_tip_details.len()
+        );
+        for (a, p) in all
+            .dropped_tip_details
+            .iter()
+            .zip(&paired.dropped_tip_details)
+        {
+            assert_eq!(
+                (&a.uuid, a.width, a.height, &a.owner_preset_names),
+                (&p.uuid, p.width, p.height, &p.owner_preset_names)
+            );
+            assert_eq!(
+                (a.bitmap.width, a.bitmap.height, a.bitmap.depth),
+                (p.bitmap.width, p.bitmap.height, p.bitmap.depth)
+            );
+        }
+    }
+
+    /// Asserts that `decode_tip` reproduces `parse_abr`'s tip for every brush.
+    fn assert_tips_match_eager(deferred: &DeferredPack, eager: &AbrPack) {
+        assert_eq!(deferred.pack.brushes.len(), eager.brushes.len());
+        for (i, brush) in eager.brushes.iter().enumerate() {
+            let tip = deferred.decode_tip(i).unwrap();
+            assert_eq!(
+                (tip.width, tip.height, tip.depth, &tip.data),
+                (
+                    brush.tip.width,
+                    brush.tip.height,
+                    brush.tip.depth,
+                    &brush.tip.data
+                ),
+                "brush {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn all_deferred_parse_decodes_no_legacy_tip() {
+        for version in [1, 2] {
+            let d = legacy_multi_tip_stream(version);
+            let (eager, eager_decodes) = decodes(|| parse_abr(&d).unwrap());
+            assert_eq!(eager.brushes.len(), 4, "v{version}");
+            assert_eq!(eager_decodes, 4, "v{version}");
+
+            let (paired, paired_decodes) =
+                decodes(|| parse_abr_deferred_without_patterns(&d).unwrap());
+            assert_eq!(paired_decodes, 4, "v{version}: the legacy tips stay eager");
+            assert!(!paired.is_deferred(0));
+            assert_tips_match_eager(&paired, &eager);
+
+            let (all, all_decodes) =
+                decodes(|| parse_abr_all_deferred_without_patterns(&d).unwrap());
+            assert_eq!(all_decodes, 0, "v{version}");
+            assert_same_but_pixels(&all.pack, &paired.pack);
+            for (i, brush) in all.pack.brushes.iter().enumerate() {
+                assert!(all.is_deferred(i), "v{version}: brush {i}");
+                assert!(brush.tip.data.is_empty(), "v{version}: brush {i}");
+                assert_eq!(all.tip_decoded_len(i), eager.brushes[i].tip.data.len());
+            }
+
+            let (_, one) = decodes(|| all.decode_tip(0).unwrap());
+            assert_eq!(one, 1, "v{version}");
+            assert_tips_match_eager(&all, &eager);
+        }
+    }
+
+    #[test]
+    fn all_deferred_parse_keeps_an_empty_legacy_tip_eager() {
+        let d = legacy_stream(2, &[legacy_entry(2, 0, 0, 8, 0, &[], None)]);
+        let all = parse_abr_all_deferred_without_patterns(&d).unwrap();
+        assert!(!all.is_deferred(0));
+        assert_tips_match_eager(&all, &parse_abr(&d).unwrap());
+    }
+
+    #[test]
+    fn all_deferred_parse_does_not_decode_a_zero_area_legacy_tip() {
+        // Width 0, height 3, RLE, and none of the 3 row byte counts.
+        let d = legacy_stream(2, &[legacy_entry(2, 0, 3, 8, 1, &[], None)]);
+        for result in [
+            parse_abr(&d).map(|_| ()),
+            parse_abr_deferred_without_patterns(&d).map(|_| ()),
+        ] {
+            assert!(
+                matches!(&result, Err(AbrError::Decompression(msg)) if msg == "truncated RLE row byte counts"),
+                "got {result:?}"
+            );
+        }
+
+        let all = parse_abr_all_deferred_without_patterns(&d).unwrap();
+        assert!(!all.is_deferred(0));
+        let tip = all.decode_tip(0).unwrap();
+        assert_eq!((tip.width, tip.height, tip.depth), (0, 3, 8));
+        assert!(tip.data.is_empty());
+    }
+
+    #[test]
+    fn all_deferred_parse_rejects_raw_legacy_pixels_past_the_input() {
+        // The entry length covers the header, so only the pixel read overruns.
+        let header_len = legacy_entry(2, 2, 2, 8, 0, &[], None).len() as u32 - 6;
+        let d = legacy_stream(
+            2,
+            &[legacy_entry(2, 2, 2, 8, 0, &[1, 2, 3], Some(header_len))],
+        );
+        for result in [
+            parse_abr(&d).map(|_| ()),
+            parse_abr_all_deferred_without_patterns(&d).map(|_| ()),
+        ] {
+            assert!(
+                matches!(&result, Err(AbrError::Decompression(msg)) if msg == "truncated raw data"),
+                "got {result:?}"
+            );
+        }
+    }
+
+    fn desc_text(buf: &mut Vec<u8>, key: &[u8], text: &str) {
+        write_key(buf, key);
+        buf.extend_from_slice(b"TEXT");
+        let u: Vec<u16> = text.encode_utf16().collect();
+        buf.write_u32::<BigEndian>(u.len() as u32 + 1).unwrap();
+        for c in &u {
+            buf.write_u16::<BigEndian>(*c).unwrap();
+        }
+        buf.write_u16::<BigEndian>(0).unwrap();
+    }
+
+    fn desc_objc(buf: &mut Vec<u8>, key: &[u8], class_id: &[u8], item_count: u32) {
+        write_key(buf, key);
+        buf.extend_from_slice(b"Objc");
+        buf.write_u32::<BigEndian>(1).unwrap();
+        buf.write_u16::<BigEndian>(0).unwrap();
+        write_key(buf, class_id);
+        buf.write_u32::<BigEndian>(item_count).unwrap();
+    }
+
+    /// A desc block of sampled presets `(name, tip uuid, dual-brush uuid)`.
+    fn build_dual_desc_block(presets: &[(&str, &str, Option<&str>)]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.write_u32::<BigEndian>(16).unwrap();
+        buf.write_u32::<BigEndian>(1).unwrap();
+        buf.write_u16::<BigEndian>(0).unwrap();
+        buf.write_u32::<BigEndian>(0).unwrap();
+        buf.extend_from_slice(b"null");
+        buf.write_u32::<BigEndian>(1).unwrap();
+        buf.write_u32::<BigEndian>(0).unwrap();
+        buf.extend_from_slice(b"Brsh");
+        buf.extend_from_slice(b"VlLs");
+        buf.write_u32::<BigEndian>(presets.len() as u32).unwrap();
+
+        for (name, uuid, dual) in presets {
+            desc_preset_header(&mut buf, 2 + u32::from(dual.is_some()));
+            desc_name(&mut buf, name);
+            desc_text(&mut buf, b"sampledData", uuid);
+            if let Some(dual) = dual {
+                desc_objc(&mut buf, b"dualBrush", b"dualBrush", 2);
+                write_bool(&mut buf, b"useDualBrush", true);
+                desc_objc(&mut buf, b"Brsh", b"sampledBrush", 1);
+                desc_text(&mut buf, b"sampledData", dual);
+            }
+        }
+        buf
+    }
+
+    const TIP_A: &str = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+    const TIP_B: &str = "a1b2c3d4-e5f6-7890-abcd-ef1234567891";
+    const TIP_C: &str = "a1b2c3d4-e5f6-7890-abcd-ef1234567892";
+    const TIP_D: &str = "a1b2c3d4-e5f6-7890-abcd-ef1234567893";
+
+    /// Four samp tips. `Second` uses tip B, which `First` also names as its
+    /// dual brush; tip D is only `Third`'s dual brush, so pairing drops it.
+    fn dual_brush_pack() -> Vec<u8> {
+        let mut samp = Vec::new();
+        for (uuid, side, val) in [
+            (TIP_A, 4, 0x11),
+            (TIP_B, 5, 0x22),
+            (TIP_C, 6, 0x33),
+            (TIP_D, 7, 0x44),
+        ] {
+            push_framed(&mut samp, &build_v10_entry_with_uuid(uuid, side, side, val));
+        }
+        let desc = build_dual_desc_block(&[
+            ("First", TIP_A, Some(TIP_B)),
+            ("Second", TIP_B, None),
+            ("Third", TIP_C, Some(TIP_D)),
+        ]);
+        let mut d = v10_header();
+        push_block(&mut d, b"samp", &samp);
+        push_block(&mut d, b"desc", &desc);
         d
+    }
+
+    #[test]
+    fn all_deferred_parse_decodes_no_dual_brush_or_dropped_tip() {
+        let d = dual_brush_pack();
+        let eager = parse_abr(&d).unwrap();
+        let names: Vec<&str> = eager.brushes.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, ["First", "Second", "Third"]);
+        assert_eq!(eager.dropped_tip_details.len(), 1);
+        assert_eq!(eager.dropped_tip_details[0].uuid.as_deref(), Some(TIP_D));
+
+        let (paired, paired_decodes) = decodes(|| parse_abr_deferred(&d).unwrap());
+        assert_eq!(
+            paired_decodes, 2,
+            "the dual-brush tip B and the dropped tip D"
+        );
+        assert!(!paired.is_deferred(1));
+        assert_eq!(
+            paired.pack.dropped_tip_details[0].bitmap.data,
+            eager.dropped_tip_details[0].bitmap.data
+        );
+
+        let paired = parse_abr_deferred_without_patterns(&d).unwrap();
+        assert_tips_match_eager(&paired, &eager);
+        let (all, all_decodes) = decodes(|| parse_abr_all_deferred_without_patterns(&d).unwrap());
+        assert_eq!(all_decodes, 0);
+        assert_same_but_pixels(&all.pack, &paired.pack);
+        assert!((0..3).all(|i| all.is_deferred(i)));
+        assert!(all.pack.dropped_tip_details[0].bitmap.data.is_empty());
+        assert_tips_match_eager(&all, &eager);
     }
 
     #[test]
