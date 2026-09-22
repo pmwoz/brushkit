@@ -90,7 +90,7 @@ fn procreate_dimensions_follow_members_and_survive_pixel_failures() {
                 SourceDimensions::new(64, 16),
                 None,
                 SourceDimensions::new(60000, 30000),
-                None
+                SourceDimensions::new(64, 16)
             ]
         );
         assert!(matches!(
@@ -108,6 +108,10 @@ fn procreate_dimensions_follow_members_and_survive_pixel_failures() {
                 width: 60000,
                 height: 30000
             })
+        ));
+        assert!(matches!(
+            set.entries[5].tip,
+            TipPreview::Unavailable(UnavailableReason::Corrupt(_))
         ));
     }
 }
