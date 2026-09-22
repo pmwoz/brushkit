@@ -1,6 +1,9 @@
 mod common;
 
-use brushkit_preview::{preview_abr, preview_brush, preview_brushset, PreviewOptions, TipPreview};
+use brushkit_preview::{
+    preview_abr, preview_abr_first_available, preview_brush, preview_brush_first_available,
+    preview_brushset, preview_brushset_first_available, PreviewOptions, TipPreview,
+};
 use common::{
     brush_archive, brushset_plist, depth_bomb_plist_xml, dimension_bomb_png, gray_png, zip_with,
 };
@@ -23,12 +26,15 @@ type Reader = fn(&[u8]);
 const TARGETS: [(&str, Reader); 3] = [
     ("preview_abr", |bytes| {
         let _ = preview_abr(bytes, OPTIONS);
+        let _ = preview_abr_first_available(bytes, OPTIONS, 4);
     }),
     ("preview_brush", |bytes| {
         let _ = preview_brush(bytes, OPTIONS);
+        let _ = preview_brush_first_available(bytes, OPTIONS, 4);
     }),
     ("preview_brushset", |bytes| {
         let _ = preview_brushset(bytes, OPTIONS);
+        let _ = preview_brushset_first_available(bytes, OPTIONS, 4);
     }),
 ];
 

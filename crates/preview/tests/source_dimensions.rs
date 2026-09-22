@@ -4,8 +4,8 @@ use brushkit_preview::{
     preview_abr, preview_brush, preview_brushset, PreviewOptions, SourceDimensions, TipPreview,
     UnavailableReason,
 };
-use common::{brush_archive, brushset_plist, dimension_bomb_png, gray_png, zip_with};
-use std::path::{Path, PathBuf};
+use common::{brush_archive, brushset_plist, corpus_files, dimension_bomb_png, gray_png, zip_with};
+use std::path::Path;
 
 #[test]
 fn dimensions_require_two_positive_sides() {
@@ -150,21 +150,6 @@ fn computed_and_unsupported_previews_have_no_source_raster() {
         set.entries[0].tip,
         TipPreview::Unavailable(UnavailableReason::UnsupportedTipKind(_))
     ));
-}
-
-fn corpus_files(directory: &Path, files: &mut Vec<PathBuf>) {
-    for entry in std::fs::read_dir(directory).expect("read corpus directory") {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            corpus_files(&path, files);
-        } else if path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| matches!(ext.to_lowercase().as_str(), "abr" | "brush" | "brushset"))
-        {
-            files.push(path);
-        }
-    }
 }
 
 #[test]

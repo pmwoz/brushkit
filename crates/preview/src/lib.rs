@@ -3,7 +3,9 @@
 //! `preview_abr`, `preview_brush` and `preview_brushset` each take the whole
 //! file as bytes and return one [`PreviewEntry`] per brush in file order,
 //! available or not. A brush whose tip cannot be rendered is reported with a
-//! reason rather than dropped, so a caller can lay out a complete grid.
+//! reason rather than dropped, so a caller can lay out a complete grid. Each
+//! has a `_first_available` twin that returns only the first `n` available
+//! entries and builds no entry after them.
 //!
 //! Every function here is pure over `&[u8]`: no filesystem, no threads, so the
 //! crate builds for `wasm32-unknown-unknown`.
@@ -20,7 +22,7 @@ pub use bitmap::*;
 pub use sheet::*;
 pub use synth::*;
 
-use brushkit_abr::{parse_abr_deferred_without_patterns, ShapeTipFamily};
+use brushkit_abr::{parse_abr_deferred_without_patterns, DeferredPack, ShapeTipFamily};
 use std::io::Cursor;
 use std::num::NonZeroU32;
 
@@ -101,22 +103,43 @@ fn check_max_cell(opts: PreviewOptions) -> Result<u32, PreviewError> {
     Ok(opts.max_cell)
 }
 
-/// Where an `.abr` preview row came from. Orders rows that share a preset
-/// ordinal: sampled first, then computed, then unsupported.
+/// Which entries a preview returns.
+#[derive(Clone, Copy)]
+enum Take {
+    All,
+    /// The first `n` entries whose tip is available. This stops pulling after
+    /// the `n`th; it saves work only because callers pass a lazy iterator.
+    FirstAvailable(usize),
+}
+
+impl Take {
+    fn collect(self, entries: impl Iterator<Item = PreviewEntry>) -> Vec<PreviewEntry> {
+        match self {
+            Take::All => entries.collect(),
+            Take::FirstAvailable(n) => entries
+                .filter(|entry| matches!(entry.tip, TipPreview::Available(_)))
+                .take(n)
+                .collect(),
+        }
+    }
+}
+
+/// Where an `.abr` preview row came from: an index into `brushes`,
+/// `computed_presets` or `unsupported_tip_presets` of the parsed pack. The
+/// derived order, variant first and then index, orders rows that share a
+/// preset ordinal: sampled first, then computed, then unsupported, each in
+/// file order.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Source {
-    Sampled,
-    Computed,
-    Unsupported,
+    Sampled(usize),
+    Computed(usize),
+    Unsupported(usize),
 }
 
 struct Row {
     /// The preset ordinal from the descriptor, `usize::MAX` when unknown.
     key: usize,
     source: Source,
-    name: String,
-    tip: TipPreview,
-    source_dimensions: Option<SourceDimensions>,
 }
 
 /// Tips for a Photoshop `.abr` pack.
@@ -128,91 +151,130 @@ struct Row {
 ///
 /// Embedded pattern payloads are neither copied nor decoded.
 pub fn preview_abr(bytes: &[u8], opts: PreviewOptions) -> Result<PreviewSet, PreviewError> {
+    abr(bytes, opts, Take::All)
+}
+
+/// The first `n` entries of [`preview_abr`] whose tip is available, in the
+/// same order and with the same `index` they have there, so indices may skip.
+/// Unavailable entries do not count toward `n`, and entries after the `n`th
+/// available one are not built, so their tips are not decoded or downsampled.
+///
+/// The whole pack is still parsed, and the parser decodes some tips itself:
+/// every tip of a v1 or v2 pack, and in newer packs the tips that a preset
+/// uses as its dual brush (see [`brushkit_abr::DeferredPack`]).
+pub fn preview_abr_first_available(
+    bytes: &[u8],
+    opts: PreviewOptions,
+    n: usize,
+) -> Result<PreviewSet, PreviewError> {
+    abr(bytes, opts, Take::FirstAvailable(n))
+}
+
+fn abr(bytes: &[u8], opts: PreviewOptions, take: Take) -> Result<PreviewSet, PreviewError> {
     let max_cell = check_max_cell(opts)?;
 
     let deferred =
         parse_abr_deferred_without_patterns(bytes).map_err(|e| PreviewError(e.to_string()))?;
+    let pack = &deferred.pack;
 
     let mut rows: Vec<Row> = Vec::new();
-
-    for i in 0..deferred.pack.brushes.len() {
-        let brush = &deferred.pack.brushes[i];
-        let key = brush.preset_index.unwrap_or(usize::MAX);
-        let name = if brush.name.is_empty() {
-            brush.id.clone()
-        } else {
-            brush.name.clone()
-        };
-        let source_dimensions = SourceDimensions::new(brush.tip.width, brush.tip.height);
-        let tip = match deferred.decode_tip(i) {
-            Ok(tip) => TipPreview::Available(downsample(&to_grayscale(&tip), max_cell)),
-            Err(e) => TipPreview::Unavailable(UnavailableReason::Corrupt(e.to_string())),
-        };
-        rows.push(Row {
-            key,
-            source: Source::Sampled,
-            source_dimensions,
-            name,
-            tip,
-        });
-    }
-
-    for preset in &deferred.pack.computed_presets {
-        let key = preset.preset_index.unwrap_or(usize::MAX);
-        let tip = match preset
-            .descriptor
-            .computed
-            .as_ref()
-            .filter(|geom| can_synthesize(geom))
-            .and_then(synthesize_computed_tip)
-        {
-            Some(bitmap) => TipPreview::Available(downsample(&bitmap, max_cell)),
-            None => TipPreview::Unavailable(UnavailableReason::UnsupportedTipKind(
-                "computed".to_string(),
-            )),
-        };
-        rows.push(Row {
-            key,
-            source: Source::Computed,
-            source_dimensions: None,
-            name: preset.name.clone(),
-            tip,
-        });
-    }
-
-    for preset in &deferred.pack.unsupported_tip_presets {
-        let kind = match (&preset.tip_shape, &preset.shape_tip_family) {
-            (Some(shape), _) => format!("{shape:?}"),
-            (None, Some(ShapeTipFamily::Bristle)) => "bristle".to_string(),
-            (None, Some(ShapeTipFamily::Erodible)) => "erodible".to_string(),
-            (None, None) => "shape tip".to_string(),
-        };
-        rows.push(Row {
-            key: preset.preset_index,
-            source: Source::Unsupported,
-            source_dimensions: None,
-            name: preset.name.clone(),
-            tip: TipPreview::Unavailable(UnavailableReason::UnsupportedTipKind(kind)),
-        });
-    }
+    rows.extend(pack.brushes.iter().enumerate().map(|(i, brush)| Row {
+        key: brush.preset_index.unwrap_or(usize::MAX),
+        source: Source::Sampled(i),
+    }));
+    rows.extend(
+        pack.computed_presets
+            .iter()
+            .enumerate()
+            .map(|(i, preset)| Row {
+                key: preset.preset_index.unwrap_or(usize::MAX),
+                source: Source::Computed(i),
+            }),
+    );
+    rows.extend(
+        pack.unsupported_tip_presets
+            .iter()
+            .enumerate()
+            .map(|(i, preset)| Row {
+                key: preset.preset_index,
+                source: Source::Unsupported(i),
+            }),
+    );
 
     rows.sort_by_key(|row| (row.key, row.source));
 
     let entries = rows
         .into_iter()
         .enumerate()
-        .map(|(index, row)| PreviewEntry {
-            index,
-            name: row.name,
-            tip: row.tip,
-            source_dimensions: row.source_dimensions,
-        })
-        .collect();
+        .map(|(index, row)| abr_entry(&deferred, index, row.source, max_cell));
 
     Ok(PreviewSet {
         set_name: None,
-        entries,
+        entries: take.collect(entries),
     })
+}
+
+/// Render one `.abr` row. A sampled tip is decoded and downsampled here, so
+/// only the rows a caller takes are decoded.
+fn abr_entry(deferred: &DeferredPack, index: usize, source: Source, max_cell: u32) -> PreviewEntry {
+    #[cfg(test)]
+    tests::record_entry();
+    let pack = &deferred.pack;
+    let (name, tip, source_dimensions) = match source {
+        Source::Sampled(i) => {
+            let brush = &pack.brushes[i];
+            let name = if brush.name.is_empty() {
+                brush.id.clone()
+            } else {
+                brush.name.clone()
+            };
+            let tip = match deferred.decode_tip(i) {
+                Ok(tip) => TipPreview::Available(downsample(&to_grayscale(&tip), max_cell)),
+                Err(e) => TipPreview::Unavailable(UnavailableReason::Corrupt(e.to_string())),
+            };
+            (
+                name,
+                tip,
+                SourceDimensions::new(brush.tip.width, brush.tip.height),
+            )
+        }
+        Source::Computed(i) => {
+            let preset = &pack.computed_presets[i];
+            let tip = match preset
+                .descriptor
+                .computed
+                .as_ref()
+                .filter(|geom| can_synthesize(geom))
+                .and_then(synthesize_computed_tip)
+            {
+                Some(bitmap) => TipPreview::Available(downsample(&bitmap, max_cell)),
+                None => TipPreview::Unavailable(UnavailableReason::UnsupportedTipKind(
+                    "computed".to_string(),
+                )),
+            };
+            (preset.name.clone(), tip, None)
+        }
+        Source::Unsupported(i) => {
+            let preset = &pack.unsupported_tip_presets[i];
+            let kind = match (&preset.tip_shape, &preset.shape_tip_family) {
+                (Some(shape), _) => format!("{shape:?}"),
+                (None, Some(ShapeTipFamily::Bristle)) => "bristle".to_string(),
+                (None, Some(ShapeTipFamily::Erodible)) => "erodible".to_string(),
+                (None, None) => "shape tip".to_string(),
+            };
+            (
+                preset.name.clone(),
+                TipPreview::Unavailable(UnavailableReason::UnsupportedTipKind(kind)),
+                None,
+            )
+        }
+    };
+    PreviewEntry {
+        index,
+        name,
+        tip,
+        source_dimensions,
+    }
 }
 
 /// Tips for a Procreate `.brushset`.
@@ -221,6 +283,22 @@ pub fn preview_abr(bytes: &[u8], opts: PreviewOptions) -> Result<PreviewSet, Pre
 /// without one the members are the top-level directories that hold a
 /// `Brush.archive`, in zip order, and the set has no name.
 pub fn preview_brushset(bytes: &[u8], opts: PreviewOptions) -> Result<PreviewSet, PreviewError> {
+    brushset(bytes, opts, Take::All)
+}
+
+/// The first `n` entries of [`preview_brushset`] whose tip is available, in
+/// the same order and with the same `index` they have there, so indices may
+/// skip. Unavailable entries do not count toward `n`, and members after the
+/// `n`th available one are not read.
+pub fn preview_brushset_first_available(
+    bytes: &[u8],
+    opts: PreviewOptions,
+    n: usize,
+) -> Result<PreviewSet, PreviewError> {
+    brushset(bytes, opts, Take::FirstAvailable(n))
+}
+
+fn brushset(bytes: &[u8], opts: PreviewOptions, take: Take) -> Result<PreviewSet, PreviewError> {
     let max_cell = check_max_cell(opts)?;
     let mut zip = open_zip(bytes)?;
 
@@ -242,15 +320,32 @@ pub fn preview_brushset(bytes: &[u8], opts: PreviewOptions) -> Result<PreviewSet
     let entries = prefixes
         .iter()
         .enumerate()
-        .map(|(index, prefix)| member_entry(&mut zip, index, prefix, max_cell))
-        .collect();
+        .map(|(index, prefix)| member_entry(&mut zip, index, prefix, max_cell));
 
-    Ok(PreviewSet { set_name, entries })
+    Ok(PreviewSet {
+        set_name,
+        entries: take.collect(entries),
+    })
 }
 
 /// The tip of a single Procreate `.brush`: one entry at index 0, read from the
 /// archive's root rather than from a member directory.
 pub fn preview_brush(bytes: &[u8], opts: PreviewOptions) -> Result<PreviewSet, PreviewError> {
+    brush(bytes, opts, Take::All)
+}
+
+/// [`preview_brush`] limited to available tips: its single entry when the tip
+/// is available and `n >= 1`, otherwise no entries. With `n == 0` the tip is
+/// not decoded.
+pub fn preview_brush_first_available(
+    bytes: &[u8],
+    opts: PreviewOptions,
+    n: usize,
+) -> Result<PreviewSet, PreviewError> {
+    brush(bytes, opts, Take::FirstAvailable(n))
+}
+
+fn brush(bytes: &[u8], opts: PreviewOptions, take: Take) -> Result<PreviewSet, PreviewError> {
     let max_cell = check_max_cell(opts)?;
     let mut zip = open_zip(bytes)?;
 
@@ -258,9 +353,10 @@ pub fn preview_brush(bytes: &[u8], opts: PreviewOptions) -> Result<PreviewSet, P
         return Err(PreviewError("Brush.archive not found".to_string()));
     }
 
+    let entry = std::iter::once_with(|| member_entry(&mut zip, 0, "", max_cell));
     Ok(PreviewSet {
         set_name: None,
-        entries: vec![member_entry(&mut zip, 0, "", max_cell)],
+        entries: take.collect(entry),
     })
 }
 
@@ -281,6 +377,8 @@ fn member_entry(
     prefix: &str,
     max_cell: u32,
 ) -> PreviewEntry {
+    #[cfg(test)]
+    tests::record_entry();
     let fallback_name = if prefix.is_empty() {
         "Brush".to_string()
     } else {
@@ -334,5 +432,102 @@ fn shape_tip(shape: Option<Result<Vec<u8>, String>>, max_cell: u32) -> TipPrevie
         Err(procreate::ShapePngError::Corrupt(msg)) => {
             TipPreview::Unavailable(UnavailableReason::Corrupt(msg))
         }
+    }
+}
+
+// The integration tests' fixture builders, shared with the unit tests below.
+#[cfg(test)]
+#[path = "../tests/common/mod.rs"]
+mod common;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::{brush_archive, brushset_plist, gray_png, samp_abr, zip_with, SampTip};
+    use std::cell::Cell;
+
+    thread_local! {
+        // Thread-local because cargo runs unit tests on parallel threads.
+        static ENTRIES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Called once per entry built, before any of its tip is read or decoded.
+    pub(super) fn record_entry() {
+        ENTRIES.with(|count| count.set(count.get() + 1));
+    }
+
+    /// Entries built by `f` on this thread.
+    fn entries_built<T>(f: impl FnOnce() -> T) -> usize {
+        ENTRIES.with(|count| count.set(0));
+        f();
+        ENTRIES.with(Cell::get)
+    }
+
+    const OPTS: PreviewOptions = PreviewOptions { max_cell: 8 };
+
+    fn tip(corrupt: bool) -> SampTip {
+        SampTip {
+            width: 4,
+            height: 4,
+            fill: 0x80,
+            corrupt,
+        }
+    }
+
+    #[test]
+    fn abr_builds_only_the_entries_it_returns() {
+        let bytes = samp_abr(&[
+            tip(false),
+            tip(false),
+            tip(false),
+            tip(false),
+            tip(false),
+            tip(false),
+        ]);
+        assert_eq!(
+            entries_built(|| preview_abr_first_available(&bytes, OPTS, 2).unwrap()),
+            2
+        );
+        assert_eq!(
+            entries_built(|| preview_abr_first_available(&bytes, OPTS, 0).unwrap()),
+            0
+        );
+        assert_eq!(entries_built(|| preview_abr(&bytes, OPTS).unwrap()), 6);
+    }
+
+    #[test]
+    fn abr_failed_decode_does_not_count_toward_n() {
+        let bytes = samp_abr(&[tip(false), tip(false), tip(true)]);
+        assert!(matches!(
+            preview_abr(&bytes, OPTS).unwrap().entries[0].tip,
+            TipPreview::Unavailable(UnavailableReason::Corrupt(_))
+        ));
+        let mut set = None;
+        assert_eq!(
+            entries_built(|| set = Some(preview_abr_first_available(&bytes, OPTS, 1).unwrap())),
+            2
+        );
+        let entries = set.unwrap().entries;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].index, 1);
+    }
+
+    #[test]
+    fn brushset_reads_only_the_members_it_returns() {
+        let archive = brush_archive("Tip");
+        let shape = gray_png(4, 4, 200);
+        let plist = brushset_plist("Set", &["a", "b", "c", "d"]);
+        let mut files: Vec<(String, &[u8])> = vec![("brushset.plist".into(), &plist)];
+        for member in ["a", "b", "c", "d"] {
+            files.push((format!("{member}/Brush.archive"), &archive));
+            files.push((format!("{member}/Shape.png"), &shape));
+        }
+        let files: Vec<(&str, &[u8])> = files.iter().map(|(p, b)| (p.as_str(), *b)).collect();
+        let bytes = zip_with(&files);
+        assert_eq!(
+            entries_built(|| preview_brushset_first_available(&bytes, OPTS, 1).unwrap()),
+            1
+        );
+        assert_eq!(entries_built(|| preview_brushset(&bytes, OPTS).unwrap()), 4);
     }
 }
