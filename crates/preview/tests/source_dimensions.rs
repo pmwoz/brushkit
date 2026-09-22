@@ -54,7 +54,9 @@ fn procreate_dimensions_follow_members_and_survive_pixel_failures() {
     let corrupt_pixels = &shape[..idat + 4];
     let plist = brushset_plist(
         "Sizes",
-        &["missing", "valid", "pixels", "header", "large", "archive"],
+        &[
+            "missing", "valid", "pixels", "header", "large", "archive", "nothing",
+        ],
     );
     let bytes = zip_with(&[
         ("brushset.plist", &plist),
@@ -69,6 +71,7 @@ fn procreate_dimensions_follow_members_and_survive_pixel_failures() {
         ("large/Shape.png", &dimension_bomb_png(60000, 30000)),
         ("archive/Brush.archive", b"bad archive"),
         ("archive/Shape.png", &shape),
+        ("nothing/Brush.archive", b"bad archive"),
     ]);
     for max_cell in [1, 8, 128] {
         let set = preview_brushset(&bytes, PreviewOptions { max_cell }).unwrap();
@@ -77,7 +80,7 @@ fn procreate_dimensions_follow_members_and_survive_pixel_failures() {
                 .iter()
                 .map(|entry| entry.index)
                 .collect::<Vec<_>>(),
-            vec![0, 1, 2, 3, 4, 5]
+            vec![0, 1, 2, 3, 4, 5, 6]
         );
         assert_eq!(
             set.entries
@@ -90,7 +93,8 @@ fn procreate_dimensions_follow_members_and_survive_pixel_failures() {
                 SourceDimensions::new(64, 16),
                 None,
                 SourceDimensions::new(60000, 30000),
-                SourceDimensions::new(64, 16)
+                SourceDimensions::new(64, 16),
+                None
             ]
         );
         assert!(matches!(
@@ -109,10 +113,12 @@ fn procreate_dimensions_follow_members_and_survive_pixel_failures() {
                 height: 30000
             })
         ));
-        assert!(matches!(
-            set.entries[5].tip,
-            TipPreview::Unavailable(UnavailableReason::Corrupt(_))
-        ));
+        for archive_error in &set.entries[5..] {
+            assert!(matches!(
+                archive_error.tip,
+                TipPreview::Unavailable(UnavailableReason::Corrupt(_))
+            ));
+        }
     }
 }
 
@@ -215,6 +221,13 @@ fn real_file_dimensions_are_independent_of_cell_size() {
                 if source.0 <= max_cell && source.1 <= max_cell {
                     assert_eq!(source, preview, "{} #{}", path.display(), entry.index);
                 } else {
+                    assert_eq!(
+                        preview.0.max(preview.1),
+                        max_cell,
+                        "{} #{}",
+                        path.display(),
+                        entry.index
+                    );
                     assert!(source.0 >= preview.0 && source.1 >= preview.1);
                 }
             }

@@ -274,7 +274,7 @@ fn open_zip(bytes: &[u8]) -> Result<zip::ZipArchive<Cursor<&[u8]>>, PreviewError
 ///
 /// A member is always an entry: an archive that cannot be read names the entry
 /// after its directory and reports why, rather than shifting every index after
-/// it.
+/// it. A readable `Shape.png` reports its size either way.
 fn member_entry(
     zip: &mut zip::ZipArchive<Cursor<&[u8]>>,
     index: usize,
@@ -287,43 +287,27 @@ fn member_entry(
         prefix.trim_end_matches('/').to_string()
     };
 
-    // Read before the archive so an unreadable Brush.archive still reports the
-    // size of a readable Shape.png.
+    let archive = procreate::read_zip_entry(zip, &format!("{prefix}Brush.archive"))
+        .and_then(|buf| procreate::brush_name(&buf));
+
     let shape_path = format!("{prefix}Shape.png");
-    let has_shape = zip.by_name(&shape_path).is_ok();
-    let shape = has_shape.then(|| procreate::read_zip_entry(zip, &shape_path));
+    let shape = if zip.by_name(&shape_path).is_ok() {
+        Some(procreate::read_zip_entry(zip, &shape_path))
+    } else {
+        None
+    };
     let source_dimensions = match &shape {
         Some(Ok(png)) => procreate::header_dimensions(png)
             .and_then(|(width, height)| SourceDimensions::new(width, height)),
         _ => None,
     };
 
-    let archive = procreate::read_zip_entry(zip, &format!("{prefix}Brush.archive"))
-        .and_then(|buf| procreate::brush_name(&buf));
-    let name = match archive {
-        Ok(name) => name.unwrap_or(fallback_name),
-        Err(msg) => {
-            return PreviewEntry {
-                index,
-                name: fallback_name,
-                source_dimensions,
-                tip: TipPreview::Unavailable(UnavailableReason::Corrupt(msg)),
-            }
-        }
-    };
-
-    let tip = match shape {
-        None => TipPreview::Unavailable(UnavailableReason::NoShapePng),
-        Some(Err(msg)) => TipPreview::Unavailable(UnavailableReason::Corrupt(msg)),
-        Some(Ok(png)) => match procreate::decode_tip_png(&png) {
-            Ok(bitmap) => TipPreview::Available(downsample(&bitmap, max_cell)),
-            Err(procreate::ShapePngError::TooLarge { width, height }) => {
-                TipPreview::Unavailable(UnavailableReason::TooLarge { width, height })
-            }
-            Err(procreate::ShapePngError::Corrupt(msg)) => {
-                TipPreview::Unavailable(UnavailableReason::Corrupt(msg))
-            }
-        },
+    let (name, tip) = match archive {
+        Ok(name) => (name.unwrap_or(fallback_name), shape_tip(shape, max_cell)),
+        Err(msg) => (
+            fallback_name,
+            TipPreview::Unavailable(UnavailableReason::Corrupt(msg)),
+        ),
     };
 
     PreviewEntry {
@@ -331,5 +315,24 @@ fn member_entry(
         name,
         tip,
         source_dimensions,
+    }
+}
+
+/// The tip for a member's `Shape.png`: `None` when the member has no shape,
+/// otherwise the read result.
+fn shape_tip(shape: Option<Result<Vec<u8>, String>>, max_cell: u32) -> TipPreview {
+    let png = match shape {
+        None => return TipPreview::Unavailable(UnavailableReason::NoShapePng),
+        Some(Err(msg)) => return TipPreview::Unavailable(UnavailableReason::Corrupt(msg)),
+        Some(Ok(png)) => png,
+    };
+    match procreate::decode_tip_png(&png) {
+        Ok(bitmap) => TipPreview::Available(downsample(&bitmap, max_cell)),
+        Err(procreate::ShapePngError::TooLarge { width, height }) => {
+            TipPreview::Unavailable(UnavailableReason::TooLarge { width, height })
+        }
+        Err(procreate::ShapePngError::Corrupt(msg)) => {
+            TipPreview::Unavailable(UnavailableReason::Corrupt(msg))
+        }
     }
 }
