@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use std::io::{Cursor, Write};
+use std::path::{Path, PathBuf};
 
 pub fn brush_archive(name: &str) -> Vec<u8> {
     use plist::{Dictionary, Uid, Value};
@@ -145,4 +146,20 @@ pub fn samp_abr(tips: &[SampTip]) -> Vec<u8> {
     file.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     file.extend_from_slice(&payload);
     file
+}
+
+/// Every `.abr`, `.brush` and `.brushset` file under `directory`, recursively.
+pub fn corpus_files(directory: &Path, files: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(directory).expect("read corpus directory") {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            corpus_files(&path, files);
+        } else if path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| matches!(ext.to_lowercase().as_str(), "abr" | "brush" | "brushset"))
+        {
+            files.push(path);
+        }
+    }
 }

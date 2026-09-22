@@ -5,7 +5,7 @@
 //! available or not. A brush whose tip cannot be rendered is reported with a
 //! reason rather than dropped, so a caller can lay out a complete grid. Each
 //! has a `_first_available` twin that returns only the first `n` available
-//! entries and decodes nothing after them.
+//! entries and builds no entry after them.
 //!
 //! Every function here is pure over `&[u8]`: no filesystem, no threads, so the
 //! crate builds for `wasm32-unknown-unknown`.
@@ -107,8 +107,8 @@ fn check_max_cell(opts: PreviewOptions) -> Result<u32, PreviewError> {
 #[derive(Clone, Copy)]
 enum Take {
     All,
-    /// The first `n` entries whose tip is available. Entries are rendered
-    /// lazily, so nothing after the `n`th available one is decoded.
+    /// The first `n` entries whose tip is available. This stops pulling after
+    /// the `n`th; it saves work only because callers pass a lazy iterator.
     FirstAvailable(usize),
 }
 
@@ -156,8 +156,12 @@ pub fn preview_abr(bytes: &[u8], opts: PreviewOptions) -> Result<PreviewSet, Pre
 
 /// The first `n` entries of [`preview_abr`] whose tip is available, in the
 /// same order and with the same `index` they have there, so indices may skip.
-/// Unavailable entries do not count toward `n`, and tips after the `n`th
-/// available one are not decoded.
+/// Unavailable entries do not count toward `n`, and entries after the `n`th
+/// available one are not built, so their tips are not decoded or downsampled.
+///
+/// The whole pack is still parsed, and the parser decodes some tips itself:
+/// every tip of a v1 or v2 pack, and in newer packs the tips that a preset
+/// uses as its dual brush (see [`brushkit_abr::DeferredPack`]).
 pub fn preview_abr_first_available(
     bytes: &[u8],
     opts: PreviewOptions,
@@ -213,6 +217,8 @@ fn abr(bytes: &[u8], opts: PreviewOptions, take: Take) -> Result<PreviewSet, Pre
 /// Render one `.abr` row. A sampled tip is decoded and downsampled here, so
 /// only the rows a caller takes are decoded.
 fn abr_entry(deferred: &DeferredPack, index: usize, source: Source, max_cell: u32) -> PreviewEntry {
+    #[cfg(test)]
+    tests::record_entry();
     let pack = &deferred.pack;
     let (name, tip, source_dimensions) = match source {
         Source::Sampled(i) => {
@@ -222,8 +228,6 @@ fn abr_entry(deferred: &DeferredPack, index: usize, source: Source, max_cell: u3
             } else {
                 brush.name.clone()
             };
-            #[cfg(test)]
-            tests::record_decode();
             let tip = match deferred.decode_tip(i) {
                 Ok(tip) => TipPreview::Available(downsample(&to_grayscale(&tip), max_cell)),
                 Err(e) => TipPreview::Unavailable(UnavailableReason::Corrupt(e.to_string())),
@@ -373,6 +377,8 @@ fn member_entry(
     prefix: &str,
     max_cell: u32,
 ) -> PreviewEntry {
+    #[cfg(test)]
+    tests::record_entry();
     let fallback_name = if prefix.is_empty() {
         "Brush".to_string()
     } else {
@@ -418,8 +424,6 @@ fn shape_tip(shape: Option<Result<Vec<u8>, String>>, max_cell: u32) -> TipPrevie
         Some(Err(msg)) => return TipPreview::Unavailable(UnavailableReason::Corrupt(msg)),
         Some(Ok(png)) => png,
     };
-    #[cfg(test)]
-    tests::record_decode();
     match procreate::decode_tip_png(&png) {
         Ok(bitmap) => TipPreview::Available(downsample(&bitmap, max_cell)),
         Err(procreate::ShapePngError::TooLarge { width, height }) => {
@@ -444,19 +448,19 @@ mod tests {
 
     thread_local! {
         // Thread-local because cargo runs unit tests on parallel threads.
-        static DECODES: Cell<usize> = const { Cell::new(0) };
+        static ENTRIES: Cell<usize> = const { Cell::new(0) };
     }
 
-    /// Called once per sampled `decode_tip` and per `Shape.png` decode.
-    pub(super) fn record_decode() {
-        DECODES.with(|count| count.set(count.get() + 1));
+    /// Called once per entry built, before any of its tip is read or decoded.
+    pub(super) fn record_entry() {
+        ENTRIES.with(|count| count.set(count.get() + 1));
     }
 
-    /// Decodes made by `f` on this thread.
-    fn decodes<T>(f: impl FnOnce() -> T) -> usize {
-        DECODES.with(|count| count.set(0));
+    /// Entries built by `f` on this thread.
+    fn entries_built<T>(f: impl FnOnce() -> T) -> usize {
+        ENTRIES.with(|count| count.set(0));
         f();
-        DECODES.with(Cell::get)
+        ENTRIES.with(Cell::get)
     }
 
     const OPTS: PreviewOptions = PreviewOptions { max_cell: 8 };
@@ -471,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn abr_decodes_only_the_tips_it_returns() {
+    fn abr_builds_only_the_entries_it_returns() {
         let bytes = samp_abr(&[
             tip(false),
             tip(false),
@@ -481,14 +485,14 @@ mod tests {
             tip(false),
         ]);
         assert_eq!(
-            decodes(|| preview_abr_first_available(&bytes, OPTS, 2).unwrap()),
+            entries_built(|| preview_abr_first_available(&bytes, OPTS, 2).unwrap()),
             2
         );
         assert_eq!(
-            decodes(|| preview_abr_first_available(&bytes, OPTS, 0).unwrap()),
+            entries_built(|| preview_abr_first_available(&bytes, OPTS, 0).unwrap()),
             0
         );
-        assert_eq!(decodes(|| preview_abr(&bytes, OPTS).unwrap()), 6);
+        assert_eq!(entries_built(|| preview_abr(&bytes, OPTS).unwrap()), 6);
     }
 
     #[test]
@@ -500,7 +504,7 @@ mod tests {
         ));
         let mut set = None;
         assert_eq!(
-            decodes(|| set = Some(preview_abr_first_available(&bytes, OPTS, 1).unwrap())),
+            entries_built(|| set = Some(preview_abr_first_available(&bytes, OPTS, 1).unwrap())),
             2
         );
         let entries = set.unwrap().entries;
@@ -509,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn brushset_decodes_only_the_shapes_it_returns() {
+    fn brushset_reads_only_the_members_it_returns() {
         let archive = brush_archive("Tip");
         let shape = gray_png(4, 4, 200);
         let plist = brushset_plist("Set", &["a", "b", "c", "d"]);
@@ -521,9 +525,9 @@ mod tests {
         let files: Vec<(&str, &[u8])> = files.iter().map(|(p, b)| (p.as_str(), *b)).collect();
         let bytes = zip_with(&files);
         assert_eq!(
-            decodes(|| preview_brushset_first_available(&bytes, OPTS, 1).unwrap()),
+            entries_built(|| preview_brushset_first_available(&bytes, OPTS, 1).unwrap()),
             1
         );
-        assert_eq!(decodes(|| preview_brushset(&bytes, OPTS).unwrap()), 4);
+        assert_eq!(entries_built(|| preview_brushset(&bytes, OPTS).unwrap()), 4);
     }
 }

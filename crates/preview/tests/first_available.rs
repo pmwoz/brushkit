@@ -5,8 +5,8 @@ use brushkit_preview::{
     preview_brushset, preview_brushset_first_available, PreviewError, PreviewOptions, PreviewSet,
     TipPreview,
 };
-use common::{brush_archive, brushset_plist, gray_png, samp_abr, zip_with, SampTip};
-use std::path::{Path, PathBuf};
+use common::{brush_archive, brushset_plist, corpus_files, gray_png, samp_abr, zip_with, SampTip};
+use std::path::Path;
 
 type Preview = fn(&[u8], PreviewOptions) -> Result<PreviewSet, PreviewError>;
 type FirstAvailable = fn(&[u8], PreviewOptions, usize) -> Result<PreviewSet, PreviewError>;
@@ -151,21 +151,6 @@ fn brush_returns_its_tip_only_when_available() {
     let missing = zip_with(&[("Brush.archive", &archive)]);
     let full = check_every_n(&missing, preview_brush, preview_brush_first_available);
     assert_eq!(availability(&full), vec![false]);
-}
-
-fn corpus_files(directory: &Path, files: &mut Vec<PathBuf>) {
-    for entry in std::fs::read_dir(directory).expect("read corpus directory") {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            corpus_files(&path, files);
-        } else if path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| matches!(ext.to_lowercase().as_str(), "abr" | "brush" | "brushset"))
-        {
-            files.push(path);
-        }
-    }
 }
 
 #[test]
