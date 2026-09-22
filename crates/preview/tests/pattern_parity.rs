@@ -35,6 +35,7 @@ fn assert_same_preview(actual: &PreviewSet, expected: &PreviewSet) {
     for (actual, expected) in actual.entries.iter().zip(&expected.entries) {
         assert_eq!(actual.index, expected.index);
         assert_eq!(actual.name, expected.name);
+        assert_eq!(actual.source_dimensions, expected.source_dimensions);
         match (&actual.tip, &expected.tip) {
             (TipPreview::Available(actual), TipPreview::Available(expected)) => {
                 assert_eq!(actual.width, expected.width);
