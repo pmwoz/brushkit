@@ -36,30 +36,23 @@ fn huge_declared_entry_is_rejected_before_inflate() {
 
 #[test]
 fn png_dimension_bomb_is_rejected_not_allocated() {
-    let zip_bytes = zip_with(&[
-        ("Brush.archive", &brush_archive("bomb")),
-        ("Shape.png", &dimension_bomb_png(60000, 60000)),
-    ]);
+    // u32::MAX overflows the output buffer size on 64-bit targets as well.
+    for (width, height) in [(60000, 60000), (u32::MAX, u32::MAX)] {
+        let zip_bytes = zip_with(&[
+            ("Brush.archive", &brush_archive("bomb")),
+            ("Shape.png", &dimension_bomb_png(width, height)),
+        ]);
 
-    let set = preview_brush(&zip_bytes, PreviewOptions { max_cell: 8 }).expect("brush reads");
-    let TipPreview::Unavailable(reason) = only_tip(&set) else {
-        panic!("expected Unavailable, got {:?}", only_tip(&set));
-    };
-    #[cfg(not(target_pointer_width = "32"))]
-    assert_eq!(
-        *reason,
-        UnavailableReason::TooLarge {
-            width: 60000,
-            height: 60000
-        },
-        "the declared dimensions must be reported, not allocated"
-    );
-    // Still rejected on 32-bit, but reported as Corrupt, see #32.
-    #[cfg(target_pointer_width = "32")]
-    assert!(
-        matches!(reason, UnavailableReason::Corrupt(_)),
-        "expected Corrupt on 32-bit, got {reason:?}"
-    );
+        let set = preview_brush(&zip_bytes, PreviewOptions { max_cell: 8 }).expect("brush reads");
+        let TipPreview::Unavailable(reason) = only_tip(&set) else {
+            panic!("expected Unavailable, got {:?}", only_tip(&set));
+        };
+        assert_eq!(
+            *reason,
+            UnavailableReason::TooLarge { width, height },
+            "the declared dimensions must be reported, not allocated"
+        );
+    }
 }
 
 #[test]
