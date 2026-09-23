@@ -406,7 +406,7 @@ fn member_entry(
         None
     };
     let source_dimensions = match &shape {
-        Some(Ok(png)) => procreate::header_dimensions(png)
+        Some(Ok(png)) => bitmap::header_dimensions(png)
             .and_then(|(width, height)| SourceDimensions::new(width, height)),
         _ => None,
     };

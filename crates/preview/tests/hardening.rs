@@ -187,11 +187,13 @@ fn imported_image_dimension_bomb_is_rejected_not_allocated() {
 #[test]
 fn imported_image_over_the_memory_budget_is_too_large() {
     // Both sides are within MAX_IMPORT_DIMENSION. RGBA8 at the limit decodes to
-    // 1 GiB and RGBA16 to 2 GiB, past isize::MAX on 32-bit targets.
+    // 1 GiB and RGBA16 to 2 GiB, past isize::MAX on 32-bit targets. The PNGs are
+    // sized from IHDR, the RGB JPEG (768 MiB) from the decoder.
     let side = MAX_IMPORT_DIMENSION;
     for bytes in [
         rgba_dimension_bomb_png(side, side, 8),
         rgba_dimension_bomb_png(side, side, 16),
+        baseline_jpeg(side, side, 3),
     ] {
         let err = decode_tip_image(&bytes).expect_err("an over-budget image must be rejected");
         assert!(

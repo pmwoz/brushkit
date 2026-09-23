@@ -5,8 +5,8 @@
 //! Every entry here parses untrusted bytes, so each size, count and dimension
 //! is checked against a ceiling before anything is allocated.
 
+use crate::bitmap::{decode_guarded, GuardedDecodeError};
 use crate::GrayscaleBitmap;
-use image::ImageDecoder;
 use std::io::{Cursor, Read};
 
 /// Defensive ceilings for untrusted archives: anything above them is treated
@@ -100,9 +100,6 @@ pub fn decode_tip_png(bytes: &[u8]) -> Result<GrayscaleBitmap, ShapePngError> {
             GuardedDecodeError::TooLarge { width, height } => {
                 ShapePngError::TooLarge { width, height }
             }
-            GuardedDecodeError::Sniff(e) => {
-                ShapePngError::Corrupt(format!("failed to sniff Shape.png: {e}"))
-            }
             GuardedDecodeError::Decode(e) => {
                 ShapePngError::Corrupt(format!("failed to decode Shape.png: {e}"))
             }
@@ -113,91 +110,6 @@ pub fn decode_tip_png(bytes: &[u8]) -> Result<GrayscaleBitmap, ShapePngError> {
         height: luma.height(),
         data: luma.into_raw(),
     })
-}
-
-/// Why `decode_guarded` returned no image.
-pub(crate) enum GuardedDecodeError {
-    /// A side over `max_side`, or a decoded buffer over `max_bytes`.
-    TooLarge {
-        width: u32,
-        height: u32,
-    },
-    Sniff(std::io::Error),
-    Decode(image::ImageError),
-}
-
-/// Decode an image of at most `max_side` px per side and `max_bytes` decoded
-/// in its own pixel format. Oversize is decided from the header before any
-/// pixels are decoded.
-pub(crate) fn decode_guarded(
-    bytes: &[u8],
-    max_side: u32,
-    max_bytes: u64,
-) -> Result<image::DynamicImage, GuardedDecodeError> {
-    if let Some((width, height)) = header_dimensions(bytes) {
-        if width > max_side || height > max_side {
-            return Err(GuardedDecodeError::TooLarge { width, height });
-        }
-    }
-    // On 32-bit targets `png` rejects an output buffer over `isize::MAX` while
-    // `image` builds its decoder, so an over-budget PNG is sized from IHDR first.
-    // IHDR undercounts indexed color, which `image` expands to RGB or RGBA.
-    if let Some(info) = png_header(bytes) {
-        let min_decoded =
-            u64::from(info.width) * u64::from(info.height) * info.bytes_per_pixel() as u64;
-        if min_decoded > max_bytes {
-            return Err(GuardedDecodeError::TooLarge {
-                width: info.width,
-                height: info.height,
-            });
-        }
-    }
-    let mut reader = image::ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .map_err(GuardedDecodeError::Sniff)?;
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(max_side);
-    limits.max_image_height = Some(max_side);
-    limits.max_alloc = Some(max_bytes);
-    reader.limits(limits.clone());
-    let mut decoder = reader.into_decoder().map_err(GuardedDecodeError::Decode)?;
-    // What `ImageReader::decode` does, with the budget failure reported as
-    // `TooLarge`: the output buffer is reserved and the decoder keeps the rest.
-    if limits.reserve(decoder.total_bytes()).is_err() {
-        let (width, height) = decoder.dimensions();
-        return Err(GuardedDecodeError::TooLarge { width, height });
-    }
-    decoder
-        .set_limits(limits)
-        .map_err(GuardedDecodeError::Decode)?;
-    image::DynamicImage::from_decoder(decoder).map_err(GuardedDecodeError::Decode)
-}
-
-/// Reads header dimensions without allocating pixels or applying decode limits.
-/// PNG goes through the `png` header alone: `image` sizes the output buffer
-/// before it reports dimensions, which fails on 32-bit targets for large ones.
-pub(crate) fn header_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
-    if image::guess_format(bytes).ok()? == image::ImageFormat::Png {
-        let info = png_header(bytes)?;
-        return Some((info.width, info.height));
-    }
-    image::ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .ok()?
-        .into_dimensions()
-        .ok()
-}
-
-/// A PNG's IHDR, parsed without allocating pixels. `None` for other formats
-/// and for a PNG whose header does not parse.
-fn png_header(bytes: &[u8]) -> Option<png::Info<'static>> {
-    if image::guess_format(bytes).ok()? != image::ImageFormat::Png {
-        return None;
-    }
-    png::Decoder::new(Cursor::new(bytes))
-        .read_header_info()
-        .ok()
-        .cloned()
 }
 
 /// The set name and the member uuids a `brushset.plist` declares, in its order.
