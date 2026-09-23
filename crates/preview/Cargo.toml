@@ -12,10 +12,10 @@ brushkit-abr.workspace = true
 zip.workspace = true
 plist.workspace = true
 image.workspace = true
+png.workspace = true
 ab_glyph = { workspace = true, optional = true }
 
 [dev-dependencies]
-png.workspace = true
 # Integration tests are their own crates, so the zip and plist builders they
 # use to construct inputs need their own dependency edges.
 plist.workspace = true
