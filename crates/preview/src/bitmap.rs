@@ -522,20 +522,24 @@ fn jpeg_decoder<R: ZByteReaderTrait>(
 /// holds after every marker, so parts that never complete make the header
 /// parse quadratic. zune-jpeg recognizes a part by peeking its 35-byte
 /// namespace, so this reader changes that peek and zune-jpeg skips the part
-/// as an unknown APP1 segment. A part too short for its 40-byte header stays
-/// visible, so zune-jpeg rejects it as `image` does.
+/// as an unknown APP1 segment. A part too short for its 40-byte header or
+/// running past the end of the input stays visible, so zune-jpeg rejects it
+/// as `image` does.
 struct HideExtendedXmp<R>(R);
 
 const EXTENDED_XMP_NAMESPACE: &[u8; 35] = b"http://ns.adobe.com/xmp/extension/\0";
 
 impl<R: ZByteReaderTrait> HideExtendedXmp<R> {
     /// Whether the APP1 segment whose length field ends at the cursor holds
-    /// the namespace and a 40-byte part header.
+    /// the namespace and a 40-byte part header, and ends within the input.
     fn holds_part_header(&mut self) -> Result<bool, ZByteIoError> {
-        self.0.z_seek(ZSeekFrom::Current(-2))?;
+        let position = self.0.z_seek(ZSeekFrom::Current(-2))?;
         let mut length = [0; 2];
         self.0.read_exact_bytes(&mut length)?;
-        Ok(usize::from(u16::from_be_bytes(length)) >= 2 + EXTENDED_XMP_NAMESPACE.len() + 40)
+        let length = u64::from(u16::from_be_bytes(length));
+        let end = self.0.z_seek(ZSeekFrom::End(0))?;
+        self.0.z_seek(ZSeekFrom::Start(position + 2))?;
+        Ok(length >= 2 + EXTENDED_XMP_NAMESPACE.len() as u64 + 40 && position + length <= end)
     }
 }
 
@@ -1011,12 +1015,12 @@ mod tip_image_tests {
         };
         assert_eq!(err.to_string(), expected.to_string());
 
-        // An extended XMP part holds a 40-byte header after its namespace,
-        // and zune-jpeg rejects a part with a shorter one.
-        for header in [40, 39] {
+        // An extended XMP part holds a 40-byte header after its namespace.
+        // zune-jpeg rejects a part with a shorter one or one that runs past
+        // the end of the input.
+        for (header, length, decodes) in [(40, 77, true), (39, 76, false), (40, u16::MAX, false)] {
             let mut part = vec![0xFF, 0xE1];
-            let length = u16::try_from(2 + EXTENDED_XMP_NAMESPACE.len() + header).unwrap();
-            part.extend_from_slice(&length.to_be_bytes());
+            part.extend_from_slice(&u16::to_be_bytes(length));
             part.extend_from_slice(EXTENDED_XMP_NAMESPACE);
             part.resize(part.len() + header, 0);
             let mut jpeg = gray.get_ref().clone();
@@ -1025,14 +1029,14 @@ mod tip_image_tests {
                 image::load_from_memory(&jpeg),
                 decode_guarded(&jpeg, 64, u64::MAX),
             ) {
-                (Ok(expected), Ok(decoded)) if header == 40 => {
+                (Ok(expected), Ok(decoded)) if decodes => {
                     assert_eq!(decoded.bytes, expected.as_bytes());
                 }
-                (Err(expected), Err(GuardedDecodeError::Decode(err))) if header == 39 => {
-                    assert_eq!(err.to_string(), expected.to_string());
+                (Err(expected), Err(GuardedDecodeError::Decode(err))) if !decodes => {
+                    assert_eq!(err.to_string(), expected.to_string(), "length {length}");
                 }
                 (expected, decoded) => panic!(
-                    "a {header}-byte part header: image {:?}, decode_guarded {:?}",
+                    "a part of length {length}: image {:?}, decode_guarded {:?}",
                     expected.is_ok(),
                     decoded.is_ok()
                 ),
