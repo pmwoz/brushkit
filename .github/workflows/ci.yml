@@ -10,10 +10,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with: { components: "clippy, rustfmt", targets: wasm32-unknown-unknown }
       - uses: Swatinem/rust-cache@v2
-      - name: The JPEG decoder and image share one zune-jpeg
-        run: cargo tree --invert zune-jpeg --depth 0
-      - name: The PNG decoder and image share one png
-        run: cargo tree --invert png --depth 0
+      - uses: ./.github/actions/single-copy
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo doc --workspace --no-deps --document-private-items
@@ -33,10 +30,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with: { targets: wasm32-wasip1 }
       - uses: Swatinem/rust-cache@v2
-      - name: The JPEG decoder and image share one zune-jpeg
-        run: cargo tree --invert zune-jpeg --depth 0
-      - name: The PNG decoder and image share one png
-        run: cargo tree --invert png --depth 0
+      - uses: ./.github/actions/single-copy
       - uses: taiki-e/install-action@v2
         with: { tool: wasmtime@49.0.0 }
       - run: cargo test --workspace --target wasm32-wasip1 --no-fail-fast -- --no-capture

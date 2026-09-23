@@ -1,0 +1,8 @@
+name: Single-copy crates
+description: Fail when a crate that the decoders share with image resolves to more than one version. cargo tree rejects an ambiguous package spec, so it exits non-zero on a second copy.
+runs:
+  using: composite
+  steps:
+    - name: The decoders and image share one zune-jpeg and one png
+      shell: bash
+      run: cargo tree --invert zune-jpeg --invert png --depth 0
