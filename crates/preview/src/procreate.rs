@@ -69,7 +69,8 @@ pub fn parse_plist_guarded(bytes: &[u8], label: &str) -> Result<plist::Value, St
 pub enum ShapePngError {
     /// A side over `MAX_PNG_DIMENSION`, or a decode over `MAX_ENTRY_BYTES`:
     /// the image in its own pixel format, plus the DCT coefficients of a
-    /// progressive JPEG.
+    /// progressive JPEG. The decoder's row buffers, which grow with the width
+    /// only, are not counted.
     TooLarge {
         width: u32,
         height: u32,

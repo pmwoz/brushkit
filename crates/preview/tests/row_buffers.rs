@@ -1,0 +1,82 @@
+mod common;
+mod counting_alloc;
+
+use std::io::Cursor;
+
+use brushkit_preview::decode_tip_image;
+use common::{baseline_jpeg, progressive_jpeg};
+use counting_alloc::{live, peak, reset_peak};
+use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba};
+
+const WIDTH: u32 = 4096;
+const SHORT: u32 = 256;
+const TALL: u32 = 2048;
+/// Under 0.01 byte per pixel the tall image adds, so a buffer that grows with
+/// the height fails the check.
+const NOISE: usize = 64 * 1024;
+
+fn rgba_png(height: u32) -> Vec<u8> {
+    let mut bytes = Cursor::new(Vec::new());
+    DynamicImage::from(ImageBuffer::from_pixel(
+        WIDTH,
+        height,
+        Rgba([0x10u8, 0x20, 0x30, 0xC0]),
+    ))
+    .write_to(&mut bytes, ImageFormat::Png)
+    .expect("encode fixture");
+    bytes.into_inner()
+}
+
+/// How far the peak of `decode_tip_image` rises above what the decode budget
+/// counts, `counted_per_pixel` bytes for each pixel.
+fn uncounted(name: &str, bytes: &[u8], height: u32, counted_per_pixel: usize) -> usize {
+    let before = live();
+    reset_peak();
+    let bitmap = decode_tip_image(bytes).expect("tip decodes");
+    let growth = peak() - before;
+    assert_eq!((bitmap.width, bitmap.height), (WIDTH, height), "{name}");
+    growth - counted_per_pixel * (WIDTH * height) as usize
+}
+
+/// The budget counts the decoded image and a progressive JPEG's coefficients.
+/// What it leaves out, the decoder's row buffers, must not grow with the
+/// height. Heights are whole MCUs, so the coefficients are exact per pixel:
+/// 2 bytes per sample of each component.
+#[test]
+fn uncounted_decode_buffers_do_not_grow_with_the_height() {
+    type Fixture = fn(u32) -> Vec<u8>;
+    let cases: [(&str, Fixture, usize); 7] = [
+        ("baseline gray JPEG", |h| baseline_jpeg(WIDTH, h, 1), 1),
+        ("baseline RGB JPEG", |h| baseline_jpeg(WIDTH, h, 3), 3),
+        (
+            "progressive gray JPEG",
+            |h| progressive_jpeg(WIDTH, h, &[0x11]),
+            1 + 2,
+        ),
+        (
+            "progressive 4:4:4 JPEG",
+            |h| progressive_jpeg(WIDTH, h, &[0x11; 3]),
+            3 + 6,
+        ),
+        (
+            "progressive 4:2:0 JPEG",
+            |h| progressive_jpeg(WIDTH, h, &[0x22, 0x11, 0x11]),
+            3 + 3,
+        ),
+        (
+            "progressive 1x4 luma JPEG",
+            |h| progressive_jpeg(WIDTH, h, &[0x14, 0x11, 0x11]),
+            3 + 3,
+        ),
+        ("RGBA PNG", rgba_png, 4),
+    ];
+    for (name, fixture, counted_per_pixel) in cases {
+        let short = uncounted(name, &fixture(SHORT), SHORT, counted_per_pixel);
+        let tall = uncounted(name, &fixture(TALL), TALL, counted_per_pixel);
+        println!("{name}: {short} bytes uncounted at {SHORT} rows, {tall} at {TALL}");
+        assert!(
+            tall <= short + NOISE,
+            "{name}: the uncounted buffers grow with the height: {short} bytes at {SHORT} rows, {tall} at {TALL}"
+        );
+    }
+}
