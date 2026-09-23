@@ -48,16 +48,13 @@ enum PatternMode {
 
 /// Everything `parse_abr_with` produces: the pack itself plus the bookkeeping
 /// only the deferred mode uses. In `Tips::Eager` every tip vector holds
-/// `None` and `samp_blocks` is empty.
-struct ParsedAbr<'a> {
+/// `None`.
+struct ParsedAbr {
     pack: AbrPack,
     /// Aligned with `pack.brushes`.
     tips: Vec<Option<DeferredTip>>,
     /// Aligned with `pack.dropped_tip_details`.
     dropped_tips: Vec<Option<DeferredTip>>,
-    /// The `samp` block payloads, in block order, borrowed from the input.
-    /// For a v1/v2 pack with a deferred tip, the one block is the whole input.
-    samp_blocks: Vec<&'a [u8]>,
     /// Every `dual_brush_uuid` any preset names, sampled or computed. Filled
     /// only in `Tips::Deferred(Defer::Paired)`, the one mode that reads it.
     dual_uuids: HashSet<String>,
@@ -70,11 +67,7 @@ enum Tips {
     Deferred(Defer),
 }
 
-fn parse_abr_with(
-    bytes: &[u8],
-    tips: Tips,
-    patterns: PatternMode,
-) -> Result<ParsedAbr<'_>, AbrError> {
+fn parse_abr_with(bytes: &[u8], tips: Tips, patterns: PatternMode) -> Result<ParsedAbr, AbrError> {
     let mut cursor = Cursor::new(bytes);
     let (version, subversion) = read_header(&mut cursor)?;
 
@@ -89,16 +82,16 @@ fn parse_abr_with(
     let blocks = read_blocks(&mut cursor, patterns)?;
 
     let mut bitmaps: Vec<Option<SampEntry>> = Vec::new();
-    let mut samp_index = 0usize;
     for block in &blocks {
         if block.block_type == "samp" {
             let block_mode = match tips {
                 Tips::Eager => TipMode::Eager,
-                Tips::Deferred(_) => TipMode::Deferred { block: samp_index },
+                Tips::Deferred(_) => TipMode::Deferred {
+                    block_start: block.start,
+                },
             };
             let entries = parse_samp_block(block.data, version, subversion, block_mode);
             bitmaps.extend(entries);
-            samp_index += 1;
         }
     }
 
@@ -151,15 +144,6 @@ fn parse_abr_with(
         Tips::Eager | Tips::Deferred(Defer::All) => HashSet::new(),
     };
 
-    let samp_blocks: Vec<&[u8]> = match tips {
-        Tips::Eager => Vec::new(),
-        Tips::Deferred(_) => blocks
-            .into_iter()
-            .filter(|b| b.block_type == "samp")
-            .map(|b| b.data)
-            .collect(),
-    };
-
     let valid_bitmaps: Vec<SampEntry> = bitmaps.into_iter().flatten().collect();
     let PairedBrushes {
         brushes,
@@ -206,17 +190,16 @@ fn parse_abr_with(
         },
         tips,
         dropped_tips,
-        samp_blocks,
         dual_uuids,
     })
 }
 
 /// Whether `parse_samp_block` decodes a tip's pixels now or records where to
-/// find them. `block` is the tip's index into `ParsedAbr::samp_blocks`.
+/// find them. `block_start` is the input offset of the samp block's payload.
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum TipMode {
     Eager,
-    Deferred { block: usize },
+    Deferred { block_start: usize },
 }
 
 /// One sampled tip whose pixels are still compressed inside a samp block, or
@@ -228,10 +211,8 @@ enum TipMode {
 /// eager parse would have decoded.
 #[derive(Debug, Clone)]
 pub struct DeferredTip {
-    /// Index into `DeferredPack::samp_blocks`.
-    block: usize,
-    /// The samp entry's bytes inside that block. For a v1/v2 tip, its rect
-    /// through its last pixel byte.
+    /// The samp entry's bytes in the input. For a v1/v2 tip, its rect through
+    /// its last pixel byte.
     entry: Range<usize>,
     header: BitmapHeader,
     /// `width * height * bytes_per_pixel` — what `decode_tip` will allocate.
@@ -260,7 +241,7 @@ pub struct DeferredTip {
 pub struct DeferredPack<'a> {
     pub pack: AbrPack,
     tips: Vec<Option<DeferredTip>>,
-    samp_blocks: Vec<&'a [u8]>,
+    input: &'a [u8],
 }
 
 impl DeferredPack<'_> {
@@ -281,14 +262,14 @@ impl DeferredPack<'_> {
     /// in `brushes[i].tip`; clones the already-decoded tip for an eager brush.
     pub fn decode_tip(&self, i: usize) -> Result<TipBitmap, AbrError> {
         match self.tips.get(i).and_then(Option::as_ref) {
-            Some(tip) => decode_deferred_tip(&self.samp_blocks, tip),
+            Some(tip) => decode_deferred_tip(self.input, tip),
             None => Ok(self.pack.brushes[i].tip.clone()),
         }
     }
 }
 
-fn decode_deferred_tip(samp_blocks: &[&[u8]], tip: &DeferredTip) -> Result<TipBitmap, AbrError> {
-    decode_bitmap(&samp_blocks[tip.block][tip.entry.clone()], &tip.header)
+fn decode_deferred_tip(input: &[u8], tip: &DeferredTip) -> Result<TipBitmap, AbrError> {
+    decode_bitmap(&input[tip.entry.clone()], &tip.header)
 }
 
 /// Parse a pack without decoding its sampled tips, so a caller can hold the
@@ -341,14 +322,13 @@ fn parse_abr_deferred_with(
         mut pack,
         mut tips,
         dropped_tips,
-        samp_blocks,
         dual_uuids,
     } = parse_abr_with(bytes, Tips::Deferred(defer), patterns)?;
 
     if defer == Defer::Paired {
         for (detail, deferred) in pack.dropped_tip_details.iter_mut().zip(&dropped_tips) {
             if let Some(tip) = deferred {
-                detail.bitmap = decode_deferred_tip(&samp_blocks, tip)?;
+                detail.bitmap = decode_deferred_tip(bytes, tip)?;
             }
         }
 
@@ -357,7 +337,7 @@ fn parse_abr_deferred_with(
                 continue;
             }
             if let Some(tip) = tips[i].take() {
-                brush.tip = decode_deferred_tip(&samp_blocks, &tip)?;
+                brush.tip = decode_deferred_tip(bytes, &tip)?;
             }
         }
     }
@@ -365,7 +345,7 @@ fn parse_abr_deferred_with(
     Ok(DeferredPack {
         pack,
         tips,
-        samp_blocks,
+        input: bytes,
     })
 }
 
@@ -534,16 +514,15 @@ fn pair_brushes(valid_bitmaps: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> 
 /// a Unicode name between `spacing` and `anti_aliasing` and v1 has no name
 /// field at all.
 ///
-/// With `defer`, every tip with pixels is deferred into the whole input,
-/// which becomes samp block 0. An entry's rect, depth and compression have the
-/// samp bitmap header layout, so a `BitmapHeader` with `rect_offset` 0 decodes
-/// it.
-fn parse_legacy<'a>(
-    cursor: &mut Cursor<&'a [u8]>,
+/// With `defer`, every tip with pixels is deferred as a range of the input.
+/// An entry's rect, depth and compression have the samp bitmap header layout,
+/// so a `BitmapHeader` with `rect_offset` 0 decodes it.
+fn parse_legacy(
+    cursor: &mut Cursor<&[u8]>,
     brush_count: u16,
     version: AbrVersion,
     defer: bool,
-) -> Result<ParsedAbr<'a>, AbrError> {
+) -> Result<ParsedAbr, AbrError> {
     let mut brushes = Vec::new();
     let mut tips = Vec::new();
 
@@ -690,7 +669,6 @@ fn parse_legacy<'a>(
                 compression,
             };
             let tip = DeferredTip {
-                block: 0,
                 entry: rect_start..pixel_end as usize,
                 header,
                 decoded_len: expected,
@@ -716,12 +694,6 @@ fn parse_legacy<'a>(
 
     brushes.reverse();
     tips.reverse();
-    // The one samp block `block: 0` above points into.
-    let samp_blocks = if tips.iter().any(Option::is_some) {
-        vec![*cursor.get_ref()]
-    } else {
-        Vec::new()
-    };
     let pack = AbrPack {
         version,
         brushes,
@@ -745,7 +717,6 @@ fn parse_legacy<'a>(
         pack,
         tips,
         dropped_tips: Vec::new(),
-        samp_blocks,
         dual_uuids: HashSet::new(),
     })
 }
@@ -802,6 +773,8 @@ fn read_header(cursor: &mut Cursor<&[u8]>) -> Result<(AbrVersion, u16), AbrError
 #[derive(Debug)]
 struct Block<'a> {
     block_type: String,
+    /// Input offset of `data`.
+    start: usize,
     data: &'a [u8],
 }
 
@@ -856,8 +829,13 @@ fn read_blocks<'a>(
 
         let omit = patterns == PatternMode::Skip && block_type == "patt";
         if !omit {
-            let data = &input[data_start as usize..(data_start + data_len) as usize];
-            blocks.push(Block { block_type, data });
+            let start = data_start as usize;
+            let data = &input[start..start + data_len as usize];
+            blocks.push(Block {
+                block_type,
+                start,
+                data,
+            });
         }
 
         // 8BIM blocks are 4-byte aligned: Photoshop writes 0-3 zero padding
@@ -1191,7 +1169,6 @@ fn bitmap_geometry(data: &[u8], header: &BitmapHeader) -> Result<BitmapGeometry,
 fn defer_bitmap(
     data: &[u8],
     header: &BitmapHeader,
-    block: usize,
     entry: Range<usize>,
 ) -> Result<(TipBitmap, DeferredTip), AbrError> {
     let geom = bitmap_geometry(data, header)?;
@@ -1203,7 +1180,6 @@ fn defer_bitmap(
             data: Vec::new(),
         },
         DeferredTip {
-            block,
             entry,
             header: header.clone(),
             decoded_len: geom.expected,
@@ -1211,9 +1187,9 @@ fn defer_bitmap(
     ))
 }
 
-/// `entry` is the samp entry's absolute range inside its block's payload, which
-/// is what `DeferredPack::decode_tip` re-slices; `data` is that same range,
-/// already sliced.
+/// `entry` is the samp entry's range inside its block's payload; `data` is that
+/// same range, already sliced. A deferred tip shifts it by the block's input
+/// offset, which is what `DeferredPack::decode_tip` re-slices.
 fn read_entry_bitmap(
     data: &[u8],
     header: &BitmapHeader,
@@ -1222,8 +1198,9 @@ fn read_entry_bitmap(
 ) -> Result<(TipBitmap, Option<DeferredTip>), AbrError> {
     match mode {
         TipMode::Eager => Ok((decode_bitmap(data, header)?, None)),
-        TipMode::Deferred { block } => {
-            let (bitmap, deferred) = defer_bitmap(data, header, block, entry)?;
+        TipMode::Deferred { block_start } => {
+            let entry = block_start + entry.start..block_start + entry.end;
+            let (bitmap, deferred) = defer_bitmap(data, header, entry)?;
             Ok((bitmap, Some(deferred)))
         }
     }
@@ -2371,10 +2348,6 @@ mod tests {
             parse_abr_deferred(&d).unwrap(),
             parse_abr_all_deferred_without_patterns(&d).unwrap(),
         ] {
-            assert_eq!(deferred.samp_blocks.len(), 2);
-            for block in &deferred.samp_blocks {
-                assert!(d.as_ptr_range().contains(&block.as_ptr()));
-            }
             assert!(deferred.is_deferred(0) && deferred.is_deferred(1));
             assert_tips_match_eager(&deferred, &eager);
         }
@@ -3011,7 +2984,6 @@ mod tests {
                 assert!(brush.tip.data.is_empty(), "v{version}: brush {i}");
                 assert_eq!(all.tip_decoded_len(i), eager.brushes[i].tip.data.len());
             }
-            assert!(std::ptr::eq(all.samp_blocks[0], d.as_slice()));
 
             let (_, one) = decodes(|| all.decode_tip(0).unwrap());
             assert_eq!(one, 1, "v{version}");
