@@ -72,7 +72,8 @@ fn shape_png(bytes: &[u8]) -> GrayscaleBitmap {
 
 /// Each decoder's peak is the decoded image, `bytes_per_pixel` wide, plus the
 /// decoder's fixed slack: the tip is converted inside the decoded buffer. A
-/// progressive JPEG also holds its DCT coefficients, 2 bytes per sample.
+/// progressive JPEG also holds its DCT coefficients, 2 bytes per sample of
+/// each component: 4:2:0 subsamples two of three by 4.
 #[test]
 fn tip_decoders_hold_no_copy_of_the_decoded_image() {
     let gray = png(ImageBuffer::from_pixel(SIDE, SIDE, Luma([0x40u8])).into());
@@ -90,10 +91,11 @@ fn tip_decoders_hold_no_copy_of_the_decoded_image() {
         ImageFormat::Jpeg,
     );
     let gray_noise_jpeg = noise_jpeg();
-    let gray_progressive_jpeg = progressive_jpeg(SIDE, SIDE, 1, 0x11);
-    let rgb_progressive_jpeg = progressive_jpeg(SIDE, SIDE, 3, 0x11);
+    let gray_progressive_jpeg = progressive_jpeg(SIDE, SIDE, &[0x11]);
+    let rgb_progressive_jpeg = progressive_jpeg(SIDE, SIDE, &[0x11; 3]);
+    let rgb_420_progressive_jpeg = progressive_jpeg(SIDE, SIDE, &[0x22, 0x11, 0x11]);
 
-    let cases: [(&str, Decode, &[u8], usize); 20] = [
+    let cases: [(&str, Decode, &[u8], usize); 21] = [
         ("decode_tip_image gray", tip_image, &gray, 1),
         ("decode_tip_image gray+alpha", tip_image, &gray_alpha, 2),
         ("decode_tip_image RGB", tip_image, &rgb, 3),
@@ -130,6 +132,12 @@ fn tip_decoders_hold_no_copy_of_the_decoded_image() {
             tip_image,
             &rgb_progressive_jpeg,
             3 + 3 * 2,
+        ),
+        (
+            "decode_tip_image RGB 4:2:0 progressive JPEG",
+            tip_image,
+            &rgb_420_progressive_jpeg,
+            3 + 3,
         ),
         ("decode_tip_png gray", shape_png, &gray, 1),
         ("decode_tip_png gray+alpha", shape_png, &gray_alpha, 2),

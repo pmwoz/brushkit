@@ -213,14 +213,18 @@ fn progressive_jpeg_over_the_budget_with_its_coefficients_is_too_large() {
     // coefficients a progressive decode holds, 2 bytes per sample: gray
     // 256 + 512 MiB, RGB 192 + 384 MiB. The last one is over by 340 KiB only
     // because a vertical sampling factor of 3 pads its height to 16368 rows.
-    for (width, height, components, sampling) in [
-        (MAX_IMPORT_DIMENSION, MAX_IMPORT_DIMENSION, 1, 0x11),
-        (MAX_IMPORT_DIMENSION / 2, MAX_IMPORT_DIMENSION / 2, 3, 0x11),
-        (3648, 16352, 3, 0x13),
+    for (width, height, sampling) in [
+        (MAX_IMPORT_DIMENSION, MAX_IMPORT_DIMENSION, &[0x11][..]),
+        (
+            MAX_IMPORT_DIMENSION / 2,
+            MAX_IMPORT_DIMENSION / 2,
+            &[0x11; 3],
+        ),
+        (3648, 16352, &[0x13; 3]),
     ] {
-        let name = format!("{width}x{height} {components} components {sampling:#x}");
+        let name = format!("{width}x{height} sampling {sampling:x?}");
         // A decoded tip is not printed: at this size it is hundreds of MiB.
-        match decode_tip_image(&progressive_jpeg(width, height, components, sampling)) {
+        match decode_tip_image(&progressive_jpeg(width, height, sampling)) {
             Err(TipImageError::TooLarge {
                 width: w,
                 height: h,
@@ -230,5 +234,52 @@ fn progressive_jpeg_over_the_budget_with_its_coefficients_is_too_large() {
             Err(err) => panic!("{name}: expected TooLarge, got {err:?}"),
             Ok(_) => panic!("{name}: an over-budget progressive JPEG decoded"),
         }
+    }
+}
+
+#[test]
+fn progressive_420_jpeg_is_held_to_the_budget_by_its_real_coefficients() {
+    // 4:2:0 codes six blocks per 16x16 MCU, so its coefficients take 3 bytes
+    // per pixel next to 3 bytes of RGB. 512 MiB is 5461.3 such rows of 16384.
+    let sampling = [0x22, 0x11, 0x11];
+    let tip = decode_tip_image(&progressive_jpeg(MAX_IMPORT_DIMENSION, 5456, &sampling))
+        .expect("a 4:2:0 JPEG within the budget decodes");
+    assert_eq!((tip.width, tip.height), (MAX_IMPORT_DIMENSION, 5456));
+
+    match decode_tip_image(&progressive_jpeg(MAX_IMPORT_DIMENSION, 5472, &sampling)) {
+        Err(TipImageError::TooLarge { width, height }) => {
+            assert_eq!((width, height), (MAX_IMPORT_DIMENSION, 5472));
+        }
+        Err(err) => panic!("expected TooLarge, got {err:?}"),
+        Ok(_) => panic!("a 4:2:0 JPEG over the budget decoded"),
+    }
+}
+
+#[test]
+fn progressive_jpeg_with_a_second_frame_header_counts_the_larger_one() {
+    // The 4:2:0 image that fits the budget above, with a comment after its
+    // frame header holding a 4:4:4 frame header of the same size. zune-jpeg
+    // skips the comment, but the coefficient count cannot tell which header
+    // it parsed, so every component counts at full resolution: 6 bytes per
+    // pixel of coefficients.
+    let (width, height) = (MAX_IMPORT_DIMENSION, 5456);
+    let mut jpeg = progressive_jpeg(width, height, &[0x22, 0x11, 0x11]);
+    let mut comment = vec![0xFF, 0xFE, 0x00, 21, 0xFF, 0xC2, 0x00, 17, 8];
+    comment.extend_from_slice(&(height as u16).to_be_bytes());
+    comment.extend_from_slice(&(width as u16).to_be_bytes());
+    comment.extend_from_slice(&[3, 1, 0x22, 0, 2, 0x22, 0, 3, 0x22, 0]);
+    let huffman_tables = jpeg
+        .windows(2)
+        .position(|marker| marker == [0xFF, 0xC4])
+        .expect("the fixture has a DHT segment");
+    jpeg.splice(huffman_tables..huffman_tables, comment);
+
+    match decode_tip_image(&jpeg) {
+        Err(TipImageError::TooLarge {
+            width: w,
+            height: h,
+        }) => assert_eq!((w, h), (width, height)),
+        Err(err) => panic!("expected TooLarge, got {err:?}"),
+        Ok(_) => panic!("the smaller frame header was counted"),
     }
 }
