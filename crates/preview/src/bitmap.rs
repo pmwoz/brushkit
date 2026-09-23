@@ -98,8 +98,8 @@ pub fn decode_tip_image(bytes: &[u8]) -> Result<GrayscaleBitmap, TipImageError> 
     let (width, height) = img.dimensions();
 
     let data: Vec<u8> = match img {
-        image::DynamicImage::ImageRgba8(rgba) => rgba.pixels().map(|p| p.0[3]).collect(),
-        img if img.color().has_alpha() => img.into_luma_alpha8().pixels().map(|p| p.0[1]).collect(),
+        image::DynamicImage::ImageRgba8(rgba) => alpha_in_place(rgba.into_raw(), 4),
+        img if img.color().has_alpha() => alpha_in_place(img.into_luma_alpha8().into_raw(), 2),
         img => {
             let mut data = img.into_luma8().into_raw();
             data.iter_mut().for_each(|v| *v = 255 - *v);
@@ -112,6 +112,18 @@ pub fn decode_tip_image(bytes: &[u8]) -> Result<GrayscaleBitmap, TipImageError> 
         height,
         data,
     })
+}
+
+/// The last byte of each `channels`-byte pixel, moved to the front of `raw`,
+/// so the tip reuses the decoded buffer instead of allocating a second one.
+fn alpha_in_place(mut raw: Vec<u8>, channels: usize) -> Vec<u8> {
+    let pixels = raw.len() / channels;
+    for i in 0..pixels {
+        raw[i] = raw[i * channels + channels - 1];
+    }
+    raw.truncate(pixels);
+    raw.shrink_to_fit();
+    raw
 }
 
 /// Why `decode_guarded` returned no image.
