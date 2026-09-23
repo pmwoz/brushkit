@@ -9,4 +9,3 @@ readme.workspace = true
 
 [dependencies]
 byteorder.workspace = true
-png017 = { package = "png", version = "0.17" }
