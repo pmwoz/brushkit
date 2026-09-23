@@ -139,7 +139,7 @@ fn png_at_the_dimension_limit_decodes() {
 
 #[test]
 fn depth_bomb_brushset_plist_is_rejected_not_recursed() {
-    let zip_bytes = zip_with(&[("brushset.plist", &depth_bomb_plist_xml())]);
+    let zip_bytes = zip_with(&[("brushset.plist", &depth_bomb_plist_xml(10_000))]);
 
     let err = preview_brushset(&zip_bytes, PreviewOptions { max_cell: 8 })
         .expect_err("depth bomb must be rejected");
@@ -149,7 +149,7 @@ fn depth_bomb_brushset_plist_is_rejected_not_recursed() {
 #[test]
 fn depth_bomb_brush_archive_is_rejected_not_recursed() {
     let zip_bytes = zip_with(&[
-        ("Brush.archive", &depth_bomb_plist_xml()),
+        ("Brush.archive", &depth_bomb_plist_xml(10_000)),
         ("Shape.png", &real_4x4_png()),
     ]);
 

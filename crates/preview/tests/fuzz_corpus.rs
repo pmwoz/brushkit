@@ -1,8 +1,10 @@
 mod common;
 
+use brushkit_preview::procreate::MAX_PLIST_DEPTH;
 use brushkit_preview::{
     preview_abr, preview_abr_first_available, preview_brush, preview_brush_first_available,
     preview_brushset, preview_brushset_first_available, PreviewOptions, TipPreview,
+    UnavailableReason,
 };
 use common::{
     brush_archive, brushset_plist, depth_bomb_plist_xml, dimension_bomb_png, gray_png, zip_with,
@@ -12,6 +14,9 @@ use std::io::{Cursor, Read};
 use std::path::PathBuf;
 
 const OPTIONS: PreviewOptions = PreviewOptions { max_cell: 8 };
+/// Past the guard but small, so the fuzzer does not spend mutations on
+/// thousands of nesting bytes the reader never reaches.
+const SEED_DEPTH: usize = 2 * MAX_PLIST_DEPTH;
 /// A 64x32 8-bit grayscale PNG written once with Python's zlib at level 9, one
 /// IDAT holding one dynamic Huffman block. Row `y` uses filter `y % 5`. The
 /// pixels vary, but every 8x8 block averages 200, so its 8x4 preview matches
@@ -107,7 +112,7 @@ fn generated_seeds() -> Vec<(&'static str, &'static str, Vec<u8>)> {
         (
             "deep_archive",
             vec![
-                ("Brush.archive", depth_bomb_plist_xml()),
+                ("Brush.archive", depth_bomb_plist_xml(SEED_DEPTH)),
                 ("Shape.png", shape.clone()),
             ],
         ),
@@ -149,7 +154,7 @@ fn generated_seeds() -> Vec<(&'static str, &'static str, Vec<u8>)> {
         (
             "preview_brushset",
             "deep_metadata",
-            zip_with(&[("brushset.plist", &depth_bomb_plist_xml())]),
+            zip_with(&[("brushset.plist", &depth_bomb_plist_xml(SEED_DEPTH))]),
         ),
     ]);
     seeds
@@ -232,6 +237,23 @@ fn valid_seeds_decode_names_order_and_downsampled_tips() {
     };
     assert_eq!((tip.width, tip.height), (8, 4));
     assert_eq!(tip.data, vec![200; 32]);
+}
+
+#[test]
+fn depth_seeds_reach_the_depth_guard() {
+    let bytes = std::fs::read(corpus("preview_brush").join("deep_archive")).unwrap();
+    let set = preview_brush(&bytes, OPTIONS).expect("brush reads");
+    let [entry] = set.entries.as_slice() else {
+        panic!("expected one entry, got {}", set.entries.len());
+    };
+    let TipPreview::Unavailable(UnavailableReason::Corrupt(msg)) = &entry.tip else {
+        panic!("expected Corrupt, got {:?}", entry.tip);
+    };
+    assert!(msg.contains("depth"), "deep_archive: {msg}");
+
+    let bytes = std::fs::read(corpus("preview_brushset").join("deep_metadata")).unwrap();
+    let err = preview_brushset(&bytes, OPTIONS).expect_err("depth bomb must be rejected");
+    assert!(err.0.contains("depth"), "deep_metadata: {err}");
 }
 
 /// `root_brush_deflated` is a committed file, not generated, so a deflate
