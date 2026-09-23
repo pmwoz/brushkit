@@ -1,12 +1,14 @@
 mod common;
 mod counting_alloc;
 
-use std::io::Cursor;
+use std::io::{Cursor, Write};
 
 use brushkit_preview::procreate::decode_tip_png;
 use brushkit_preview::{decode_tip_image, GrayscaleBitmap};
-use common::progressive_jpeg;
+use common::{crc32, progressive_jpeg};
 use counting_alloc::{live, peak, reset_peak};
+use flate2::write::ZlibEncoder;
+use flate2::Compression;
 use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, ImageBuffer, ImageFormat, Luma, LumaA, Rgb, Rgba};
 
@@ -61,6 +63,25 @@ fn gain_map_jpeg() -> Vec<u8> {
     );
     jpeg.splice(2..2, segment.repeat(100));
     jpeg
+}
+
+/// `png` with an iCCP chunk after IHDR whose profile inflates to 64 MiB of
+/// zeros. The tip never reads the profile, and it outweighs
+/// `PIXELS + DECODER_SLACK`, so inflating it breaks the bound.
+fn iccp_png(png: &[u8]) -> Vec<u8> {
+    let mut zlib = ZlibEncoder::new(b"icc\0\0".to_vec(), Compression::best());
+    zlib.write_all(&vec![0; 64 * 1024 * 1024])
+        .expect("compress profile");
+    let data = zlib.finish().expect("compress profile");
+    let mut chunk = (data.len() as u32).to_be_bytes().to_vec();
+    chunk.extend_from_slice(b"iCCP");
+    chunk.extend_from_slice(&data);
+    chunk.extend_from_slice(&crc32(&chunk[4..]).to_be_bytes());
+    // The signature and IHDR take 33 bytes.
+    let mut out = png[..33].to_vec();
+    out.extend_from_slice(&chunk);
+    out.extend_from_slice(&png[33..]);
+    out
 }
 
 /// The peak growth of `decode`, after checking that the tip it returns holds
@@ -173,6 +194,19 @@ fn tip_decoders_hold_no_copy_of_the_decoded_image() {
         assert!(
             growth <= bytes_per_pixel * PIXELS + DECODER_SLACK,
             "{name} must hold only the decoded image: {growth} bytes"
+        );
+    }
+
+    let iccp = iccp_png(&gray);
+    for (name, decode) in [
+        ("decode_tip_image gray PNG with iCCP", tip_image as Decode),
+        ("decode_tip_png gray PNG with iCCP", shape_png),
+    ] {
+        let growth = measure(name, || decode(&iccp));
+        println!("{name}: {growth} bytes");
+        assert!(
+            growth <= PIXELS + DECODER_SLACK,
+            "{name} must not inflate the profile: {growth} bytes"
         );
     }
 

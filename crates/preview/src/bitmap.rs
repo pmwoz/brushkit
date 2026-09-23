@@ -262,31 +262,21 @@ pub(crate) enum GuardedDecodeError {
 /// for the whole image, counted by `coefficient_bytes`. The decoder's row
 /// buffers, which grow with the width only, are not counted. Oversize is
 /// decided from the header before any pixels are decoded. A JPEG is decoded
-/// from `bytes`, and only its metadata segments are copied.
+/// from `bytes`, and only its metadata segments are copied. A PNG's iCCP
+/// profile is skipped.
 pub(crate) fn decode_guarded(
     bytes: &[u8],
     max_side: u32,
     max_bytes: u64,
 ) -> Result<DecodedImage, GuardedDecodeError> {
-    if image::guess_format(bytes).ok() == Some(image::ImageFormat::Jpeg) {
-        return decode_jpeg(bytes, max_side, max_bytes);
+    match image::guess_format(bytes).ok() {
+        Some(image::ImageFormat::Jpeg) => return decode_jpeg(bytes, max_side, max_bytes),
+        Some(image::ImageFormat::Png) => return decode_png(bytes, max_side, max_bytes),
+        _ => {}
     }
     if let Some((width, height)) = header_dimensions(bytes) {
         if width > max_side || height > max_side {
             return Err(GuardedDecodeError::TooLarge { width, height });
-        }
-    }
-    // On 32-bit targets `png` rejects an output buffer over `isize::MAX` while
-    // `image` builds its decoder, so an over-budget PNG is sized from IHDR first.
-    // IHDR undercounts indexed color, which `image` expands to RGB or RGBA.
-    if let Some(info) = png_header(bytes) {
-        let min_decoded =
-            u64::from(info.width) * u64::from(info.height) * info.bytes_per_pixel() as u64;
-        if min_decoded > max_bytes {
-            return Err(GuardedDecodeError::TooLarge {
-                width: info.width,
-                height: info.height,
-            });
         }
     }
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
@@ -309,14 +299,8 @@ pub(crate) fn decode_guarded(
         .map_err(GuardedDecodeError::Decode)?;
     let (width, height) = decoder.dimensions();
     let color = decoder.color_type();
-    let format = PixelFormat::of(color).ok_or_else(|| {
-        GuardedDecodeError::Decode(image::ImageError::Unsupported(
-            image::error::UnsupportedError::from_format_and_kind(
-                image::error::ImageFormatHint::Unknown,
-                image::error::UnsupportedErrorKind::Color(color.into()),
-            ),
-        ))
-    })?;
+    let format = PixelFormat::of(color)
+        .ok_or_else(|| unsupported_color(image::error::ImageFormatHint::Unknown, color.into()))?;
     // One buffer in the decoder's own format, so a converting tip reuses it.
     let total_bytes = usize::try_from(decoder.total_bytes())
         .map_err(|_| GuardedDecodeError::TooLarge { width, height })?;
@@ -329,6 +313,108 @@ pub(crate) fn decode_guarded(
         height,
         format,
         bytes,
+    })
+}
+
+fn unsupported_color(
+    format: image::error::ImageFormatHint,
+    color: image::ExtendedColorType,
+) -> GuardedDecodeError {
+    GuardedDecodeError::Decode(image::ImageError::Unsupported(
+        image::error::UnsupportedError::from_format_and_kind(
+            format,
+            image::error::UnsupportedErrorKind::Color(color),
+        ),
+    ))
+}
+
+/// `decode_guarded` for a PNG. Through `image`'s PNG decoder, `png` inflates
+/// an iCCP profile up to the whole budget before the output buffer is
+/// reserved, and keeps it while the image decodes. The tip never reads the
+/// profile, so `png` decodes here with iCCP skipped. The transformation,
+/// output formats and errors are those of `image` 0.25.
+fn decode_png(
+    bytes: &[u8],
+    max_side: u32,
+    max_bytes: u64,
+) -> Result<DecodedImage, GuardedDecodeError> {
+    use png::{BitDepth, ColorType as Png};
+    let limits = png::Limits {
+        bytes: usize::try_from(max_bytes).unwrap_or(usize::MAX),
+    };
+    let mut decoder = png::Decoder::new_with_limits(Cursor::new(bytes), limits);
+    decoder.set_ignore_iccp_chunk(true);
+    decoder.set_transformations(png::Transformations::EXPAND);
+    let info = decoder.read_header_info().map_err(png_error)?;
+    let (width, height) = (info.width, info.height);
+    if width > max_side || height > max_side {
+        return Err(GuardedDecodeError::TooLarge { width, height });
+    }
+    // On 32-bit targets `png` rejects an output buffer over `isize::MAX` in
+    // `read_info`, so an over-budget PNG is sized from IHDR first. IHDR
+    // undercounts indexed color, which EXPAND turns into RGB or RGBA.
+    let min_decoded = u64::from(width) * u64::from(height) * info.bytes_per_pixel() as u64;
+    if min_decoded > max_bytes {
+        return Err(GuardedDecodeError::TooLarge { width, height });
+    }
+    let mut reader = decoder.read_info().map_err(png_error)?;
+    let (color, depth) = reader.output_color_type();
+    let format = match (color, depth) {
+        (Png::Grayscale, BitDepth::Eight) => PixelFormat::L8,
+        (Png::GrayscaleAlpha, BitDepth::Eight) => PixelFormat::La8,
+        (Png::Rgb, BitDepth::Eight) => PixelFormat::Rgb8,
+        (Png::Rgba, BitDepth::Eight) => PixelFormat::Rgba8,
+        (Png::Grayscale, BitDepth::Sixteen) => PixelFormat::L16,
+        (Png::GrayscaleAlpha, BitDepth::Sixteen) => PixelFormat::La16,
+        (Png::Rgb, BitDepth::Sixteen) => PixelFormat::Rgb16,
+        (Png::Rgba, BitDepth::Sixteen) => PixelFormat::Rgba16,
+        // EXPAND widens every other pair to one of the above.
+        (_, bits) => {
+            return Err(unsupported_color(
+                image::ImageFormat::Png.into(),
+                image::ExtendedColorType::Unknown(bits as u8),
+            ))
+        }
+    };
+    let total_bytes = u64::from(width) * u64::from(height) * format.bytes_per_pixel() as u64;
+    if total_bytes > max_bytes {
+        return Err(GuardedDecodeError::TooLarge { width, height });
+    }
+    let total_bytes =
+        usize::try_from(total_bytes).map_err(|_| GuardedDecodeError::TooLarge { width, height })?;
+    let mut bytes = vec![0; total_bytes];
+    reader.next_frame(&mut bytes).map_err(png_error)?;
+    if depth == BitDepth::Sixteen {
+        for sample in bytes.as_chunks_mut::<2>().0 {
+            *sample = u16::from_be_bytes(*sample).to_ne_bytes();
+        }
+    }
+    Ok(DecodedImage {
+        width,
+        height,
+        format,
+        bytes,
+    })
+}
+
+/// `image`'s own mapping of a `png` error.
+fn png_error(err: png::DecodingError) -> GuardedDecodeError {
+    use image::error::{
+        DecodingError, ImageFormatHint, LimitError, LimitErrorKind, ParameterError,
+        ParameterErrorKind,
+    };
+    GuardedDecodeError::Decode(match err {
+        png::DecodingError::IoError(err) => image::ImageError::IoError(err),
+        err @ png::DecodingError::Format(_) => image::ImageError::Decoding(DecodingError::new(
+            ImageFormatHint::Exact(image::ImageFormat::Png),
+            err,
+        )),
+        err @ png::DecodingError::Parameter(_) => image::ImageError::Parameter(
+            ParameterError::from_kind(ParameterErrorKind::Generic(err.to_string())),
+        ),
+        png::DecodingError::LimitsExceeded => {
+            image::ImageError::Limits(LimitError::from_kind(LimitErrorKind::InsufficientMemory))
+        }
     })
 }
 
@@ -814,6 +900,62 @@ mod tip_image_tests {
             panic!("a truncated JPEG must not decode");
         };
         assert_eq!(err.to_string(), expected.to_string());
+    }
+
+    /// `decode_guarded` decodes PNG with `png` directly, so it must return the
+    /// pixels and errors `image` returns for the same bytes, including the
+    /// color types and bit depths EXPAND widens.
+    #[test]
+    fn png_decodes_as_image_does() {
+        use png::{BitDepth, ColorType};
+        let (width, height) = (37, 23);
+        let cases: [(ColorType, BitDepth, u32, &[u8]); 5] = [
+            (ColorType::Grayscale, BitDepth::One, 1, &[]),
+            (ColorType::Grayscale, BitDepth::Four, 4, &[0, 3]),
+            (ColorType::Indexed, BitDepth::Eight, 8, &[0, 64, 128, 192]),
+            (ColorType::Rgb, BitDepth::Sixteen, 48, &[0, 7, 0, 7, 0, 7]),
+            (ColorType::Rgba, BitDepth::Sixteen, 64, &[]),
+        ];
+        let mut last = Vec::new();
+        for (color, depth, bits_per_pixel, trns) in cases {
+            let len = (width * bits_per_pixel).div_ceil(8) * height;
+            let data: Vec<u8> = (0..len)
+                .map(|i| (i.wrapping_mul(0x9E37_79B9) >> 24) as u8)
+                .collect();
+            let mut png = Vec::new();
+            let mut encoder = png::Encoder::new(&mut png, width, height);
+            encoder.set_color(color);
+            encoder.set_depth(depth);
+            if color == ColorType::Indexed {
+                encoder.set_palette((0..=255u8).flat_map(|i| [i, !i, i / 2]).collect::<Vec<_>>());
+            }
+            if !trns.is_empty() {
+                encoder.set_trns(trns);
+            }
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&data).unwrap();
+            writer.finish().unwrap();
+
+            let name = format!("{color:?} {depth:?}");
+            let expected = image::load_from_memory(&png).unwrap();
+            let Ok(decoded) = decode_guarded(&png, 64, u64::MAX) else {
+                panic!("{name} PNG must decode");
+            };
+            assert_eq!((decoded.width, decoded.height), (width, height), "{name}");
+            assert_eq!(decoded.format.color_type(), expected.color(), "{name}");
+            assert_eq!(decoded.bytes, expected.as_bytes(), "{name}");
+            last = png;
+        }
+
+        let mut bad_crc = last.clone();
+        bad_crc[29] ^= 1;
+        for (name, broken) in [("truncated", &last[..20]), ("bad IHDR CRC", &bad_crc[..])] {
+            let expected = image::load_from_memory(broken).unwrap_err();
+            let Err(GuardedDecodeError::Decode(err)) = decode_guarded(broken, 64, u64::MAX) else {
+                panic!("a PNG with {name} must not decode");
+            };
+            assert_eq!(err.to_string(), expected.to_string(), "{name}");
+        }
     }
 
     #[test]
