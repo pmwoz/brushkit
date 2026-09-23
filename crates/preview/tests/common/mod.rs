@@ -117,10 +117,11 @@ pub fn dimension_bomb_png(w: u32, h: u32) -> Vec<u8> {
     png
 }
 
-/// A [`dimension_bomb_png`] whose IHDR declares 8-bit RGBA, so each pixel
-/// decodes to four bytes.
-pub fn rgba_dimension_bomb_png(w: u32, h: u32) -> Vec<u8> {
+/// A [`dimension_bomb_png`] whose IHDR declares RGBA at `bit_depth` 8 or 16,
+/// so each pixel decodes to four or eight bytes.
+pub fn rgba_dimension_bomb_png(w: u32, h: u32, bit_depth: u8) -> Vec<u8> {
     let mut png = dimension_bomb_png(w, h);
+    png[24] = bit_depth;
     png[25] = 6; // IHDR color type
     let crc = crc32(&png[12..29]);
     png[29..33].copy_from_slice(&crc.to_be_bytes());
@@ -133,6 +134,7 @@ pub fn rgba_dimension_bomb_png(w: u32, h: u32) -> Vec<u8> {
 /// Each Huffman table holds one 1-bit code: every block is a zero DC and an
 /// immediate end-of-block.
 pub fn baseline_jpeg(width: u32, height: u32, components: u8) -> Vec<u8> {
+    assert!(matches!(components, 1 | 3), "grayscale or YCbCr only");
     let width = u16::try_from(width).expect("JPEG width is 16-bit");
     let height = u16::try_from(height).expect("JPEG height is 16-bit");
     let mut jpeg = vec![0xFF, 0xD8];

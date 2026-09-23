@@ -92,9 +92,15 @@ fn jpeg_dimension_bomb_is_rejected_not_allocated() {
 #[test]
 fn image_within_the_dimension_limit_over_the_memory_budget_is_too_large() {
     // 9000x9000 RGBA8 decodes to about 324 MB and 12000x12000 RGB to 432 MB,
-    // both over the 256 MiB budget with each side under MAX_PNG_DIMENSION.
+    // over the 256 MiB budget with each side under MAX_PNG_DIMENSION. RGBA16
+    // at the limit is 2 GiB, past isize::MAX on 32-bit targets.
     for (shape, width, height) in [
-        (rgba_dimension_bomb_png(9000, 9000), 9000, 9000),
+        (rgba_dimension_bomb_png(9000, 9000, 8), 9000, 9000),
+        (
+            rgba_dimension_bomb_png(MAX_PNG_DIMENSION, MAX_PNG_DIMENSION, 16),
+            MAX_PNG_DIMENSION,
+            MAX_PNG_DIMENSION,
+        ),
         (baseline_jpeg(12000, 12000, 3), 12000, 12000),
     ] {
         let zip_bytes = zip_with(&[
