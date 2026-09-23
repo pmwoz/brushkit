@@ -1,0 +1,11 @@
+name: Single-copy crates
+description: Fail when the dependency graph holds more than one version of a crate that two dependents must share.
+runs:
+  using: composite
+  steps:
+    - name: The JPEG decoder and image share one zune-jpeg
+      shell: bash
+      run: cargo tree --invert zune-jpeg --depth 0
+    - name: The PNG decoder and image share one png
+      shell: bash
+      run: cargo tree --invert png --depth 0
