@@ -64,7 +64,7 @@ pub fn adler32(data: &[u8]) -> u32 {
     (b << 16) | a
 }
 
-/// An 8-bit grayscale PNG written by hand, with stored DEFLATE blocks. The
+/// An 8-bit grayscale PNG written by hand, with one stored DEFLATE block. The
 /// fuzz seeds embed these bytes, so they must not change when the png encoder
 /// does.
 pub fn gray_png(width: u32, height: u32, fill: u8) -> Vec<u8> {
@@ -73,14 +73,11 @@ pub fn gray_png(width: u32, height: u32, fill: u8) -> Vec<u8> {
         scanlines.push(0);
         scanlines.extend(std::iter::repeat_n(fill, width as usize));
     }
-    let mut zlib = vec![0x78, 0x01];
-    let mut blocks = scanlines.chunks(u16::MAX as usize).peekable();
-    while let Some(block) = blocks.next() {
-        zlib.push(u8::from(blocks.peek().is_none()));
-        zlib.extend_from_slice(&(block.len() as u16).to_le_bytes());
-        zlib.extend_from_slice(&(!(block.len() as u16)).to_le_bytes());
-        zlib.extend_from_slice(block);
-    }
+    let len = u16::try_from(scanlines.len()).expect("scanlines fit one stored block");
+    let mut zlib = vec![0x78, 0x01, 1];
+    zlib.extend_from_slice(&len.to_le_bytes());
+    zlib.extend_from_slice(&(!len).to_le_bytes());
+    zlib.extend_from_slice(&scanlines);
     zlib.extend_from_slice(&adler32(&scanlines).to_be_bytes());
 
     let mut ihdr = Vec::new();
