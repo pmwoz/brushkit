@@ -33,23 +33,23 @@ fn tip_decoders_hold_no_copy_of_the_decoded_image() {
     let gray_alpha = png(GrayAlphaImage::from_pixel(SIDE, SIDE, LumaA([0x40, 0xC0])).into());
     let rgba = png(RgbaImage::from_pixel(SIDE, SIDE, Rgba([0x10, 0x20, 0x30, 0xC0])).into());
 
-    // The decoded four-byte image plus the one-byte alpha plane.
+    // The decoded four-byte image, its alpha compacted in place into the tip.
     let (growth, bitmap) = measure(|| decode_tip_image(&rgba).expect("RGBA tip decodes"));
     assert_eq!(bitmap.data, vec![0xC0; PIXELS], "alpha is the tip");
     println!("decode_tip_image RGBA: {growth} bytes");
     assert!(
-        growth <= 5 * PIXELS + DECODER_SLACK,
-        "decode_tip_image must read RGBA alpha without a converted copy: {growth} bytes"
+        growth <= 4 * PIXELS + DECODER_SLACK,
+        "decode_tip_image must extract RGBA alpha inside the decoded buffer: {growth} bytes"
     );
 
-    // The decoded two-byte image plus the one-byte alpha plane.
+    // The decoded two-byte image, its alpha compacted in place into the tip.
     let (growth, bitmap) =
         measure(|| decode_tip_image(&gray_alpha).expect("gray+alpha tip decodes"));
     assert_eq!(bitmap.data, vec![0xC0; PIXELS], "alpha is the tip");
     println!("decode_tip_image gray+alpha: {growth} bytes");
     assert!(
-        growth <= 3 * PIXELS + DECODER_SLACK,
-        "decode_tip_image must not expand gray+alpha to RGBA: {growth} bytes"
+        growth <= 2 * PIXELS + DECODER_SLACK,
+        "decode_tip_image must extract gray+alpha alpha inside the decoded buffer: {growth} bytes"
     );
 
     // The decoded gray plane, inverted in place into the tip.
