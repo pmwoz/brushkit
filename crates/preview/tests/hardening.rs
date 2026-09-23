@@ -72,13 +72,9 @@ fn jpeg_dimension_bomb_is_rejected_not_allocated() {
         (MAX_PNG_DIMENSION + 1, 1),
         (1, MAX_PNG_DIMENSION + 1),
     ] {
-        let jpeg = gray_jpeg(
-            u16::try_from(width).expect("JPEG width is 16-bit"),
-            u16::try_from(height).expect("JPEG height is 16-bit"),
-        );
         let zip_bytes = zip_with(&[
             ("Brush.archive", &brush_archive("bomb")),
-            ("Shape.png", &jpeg),
+            ("Shape.png", &gray_jpeg(width, height)),
         ]);
 
         let set = preview_brush(&zip_bytes, PreviewOptions { max_cell: 8 }).expect("brush reads");

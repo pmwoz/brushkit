@@ -118,10 +118,12 @@ pub fn dimension_bomb_png(w: u32, h: u32) -> Vec<u8> {
 }
 
 /// A grayscale baseline JPEG written by hand that declares `width` x `height`
-/// and holds one 8x8 block of scan data, so it decodes to mid-gray at 8x8.
-/// Each Huffman table holds one 1-bit code: the block is a zero DC and an
-/// immediate end-of-block.
-pub fn gray_jpeg(width: u16, height: u16) -> Vec<u8> {
+/// and holds one 8x8 block of scan data. At 8x8 or smaller it decodes to solid
+/// mid-gray. Each Huffman table holds one 1-bit code: the block is a zero DC
+/// and an immediate end-of-block.
+pub fn gray_jpeg(width: u32, height: u32) -> Vec<u8> {
+    let width = u16::try_from(width).expect("JPEG width is 16-bit");
+    let height = u16::try_from(height).expect("JPEG height is 16-bit");
     let mut jpeg = vec![0xFF, 0xD8];
     jpeg.extend_from_slice(&[0xFF, 0xDB, 0x00, 0x43, 0x00]);
     jpeg.extend_from_slice(&[1; 64]);
