@@ -27,4 +27,8 @@ require one, it is the wrong change.
   such a test reads `BRUSHKIT_CORPUS_DIR` and is skipped when it is unset.
   Keep the synthetic fixture for the mechanics.
 - Public API changes follow semver. Consumers pin a tag.
+- A pull request does not change the version. A release is its own commit,
+  `chore: release X.Y.Z`, which bumps the version, and is followed by the tag
+  `vX.Y.Z` and `cargo publish`. Release when a consumer needs the changes, not
+  after every pull request.
 - No conversion or writing of brush files. This workspace reads and renders.
