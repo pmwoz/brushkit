@@ -4,8 +4,8 @@ use brushkit_preview::procreate::MAX_PNG_DIMENSION;
 use brushkit_preview::{preview_brush, preview_brushset, PreviewOptions, TipPreview};
 use brushkit_preview::{PreviewSet, UnavailableReason};
 use common::{
-    brush_archive, depth_bomb_plist_xml, dimension_bomb_png, gray_jpeg, gray_png, real_4x4_png,
-    zip_with,
+    baseline_jpeg, brush_archive, depth_bomb_plist_xml, dimension_bomb_png, gray_png, real_4x4_png,
+    rgba_dimension_bomb_png, zip_with,
 };
 use std::io::{self, Cursor, Read};
 
@@ -74,7 +74,7 @@ fn jpeg_dimension_bomb_is_rejected_not_allocated() {
     ] {
         let zip_bytes = zip_with(&[
             ("Brush.archive", &brush_archive("bomb")),
-            ("Shape.png", &gray_jpeg(width, height)),
+            ("Shape.png", &baseline_jpeg(width, height, 1)),
         ]);
 
         let set = preview_brush(&zip_bytes, PreviewOptions { max_cell: 8 }).expect("brush reads");
@@ -85,6 +85,37 @@ fn jpeg_dimension_bomb_is_rejected_not_allocated() {
             *reason,
             UnavailableReason::TooLarge { width, height },
             "the declared dimensions must be reported, not allocated"
+        );
+    }
+}
+
+#[test]
+fn image_within_the_dimension_limit_over_the_memory_budget_is_too_large() {
+    // 9000x9000 RGBA8 decodes to about 324 MB and 12000x12000 RGB to 432 MB,
+    // over the 256 MiB budget with each side under MAX_PNG_DIMENSION. RGBA16
+    // at the limit is 2 GiB, past isize::MAX on 32-bit targets.
+    for (shape, width, height) in [
+        (rgba_dimension_bomb_png(9000, 9000, 8), 9000, 9000),
+        (
+            rgba_dimension_bomb_png(MAX_PNG_DIMENSION, MAX_PNG_DIMENSION, 16),
+            MAX_PNG_DIMENSION,
+            MAX_PNG_DIMENSION,
+        ),
+        (baseline_jpeg(12000, 12000, 3), 12000, 12000),
+    ] {
+        let zip_bytes = zip_with(&[
+            ("Brush.archive", &brush_archive("budget")),
+            ("Shape.png", &shape),
+        ]);
+
+        let set = preview_brush(&zip_bytes, PreviewOptions { max_cell: 8 }).expect("brush reads");
+        let TipPreview::Unavailable(reason) = only_tip(&set) else {
+            panic!("expected Unavailable, got {:?}", only_tip(&set));
+        };
+        assert_eq!(
+            *reason,
+            UnavailableReason::TooLarge { width, height },
+            "an image over the memory budget is too large, not corrupt"
         );
     }
 }

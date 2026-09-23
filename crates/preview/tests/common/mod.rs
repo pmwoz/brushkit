@@ -116,27 +116,48 @@ pub fn dimension_bomb_png(w: u32, h: u32) -> Vec<u8> {
     png
 }
 
-/// A grayscale baseline JPEG written by hand that declares `width` x `height`
-/// and holds one 8x8 block of scan data. At 8x8 or smaller it decodes to solid
-/// mid-gray. Each Huffman table holds one 1-bit code: the block is a zero DC
-/// and an immediate end-of-block.
-pub fn gray_jpeg(width: u32, height: u32) -> Vec<u8> {
+/// A [`dimension_bomb_png`] whose IHDR declares RGBA at `bit_depth` 8 or 16,
+/// so each pixel decodes to four or eight bytes.
+pub fn rgba_dimension_bomb_png(w: u32, h: u32, bit_depth: u8) -> Vec<u8> {
+    let mut png = dimension_bomb_png(w, h);
+    png[24] = bit_depth;
+    png[25] = 6; // IHDR color type
+    let crc = crc32(&png[12..29]);
+    png[29..33].copy_from_slice(&crc.to_be_bytes());
+    png
+}
+
+/// A baseline JPEG written by hand that declares `width` x `height` with
+/// `components` channels (1 is grayscale, 3 is YCbCr) and holds one 8x8 block
+/// of scan data per channel. At 8x8 or smaller it decodes to solid mid-gray.
+/// Each Huffman table holds one 1-bit code: every block is a zero DC and an
+/// immediate end-of-block.
+pub fn baseline_jpeg(width: u32, height: u32, components: u8) -> Vec<u8> {
+    assert!(matches!(components, 1 | 3), "grayscale or YCbCr only");
     let width = u16::try_from(width).expect("JPEG width is 16-bit");
     let height = u16::try_from(height).expect("JPEG height is 16-bit");
     let mut jpeg = vec![0xFF, 0xD8];
     jpeg.extend_from_slice(&[0xFF, 0xDB, 0x00, 0x43, 0x00]);
     jpeg.extend_from_slice(&[1; 64]);
-    jpeg.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x0B, 8]);
+    jpeg.extend_from_slice(&[0xFF, 0xC0, 0x00, 8 + 3 * components, 8]);
     jpeg.extend_from_slice(&height.to_be_bytes());
     jpeg.extend_from_slice(&width.to_be_bytes());
-    jpeg.extend_from_slice(&[1, 1, 0x11, 0]);
+    jpeg.push(components);
+    for id in 1..=components {
+        jpeg.extend_from_slice(&[id, 0x11, 0]);
+    }
     for class in [0x00, 0x10] {
         jpeg.extend_from_slice(&[0xFF, 0xC4, 0x00, 0x14, class, 1]);
         jpeg.extend_from_slice(&[0; 15]);
         jpeg.push(0);
     }
-    jpeg.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x08, 1, 1, 0x00, 0, 0x3F, 0]);
-    jpeg.extend_from_slice(&[0x3F, 0xFF, 0xD9]);
+    jpeg.extend_from_slice(&[0xFF, 0xDA, 0x00, 6 + 2 * components, components]);
+    for id in 1..=components {
+        jpeg.extend_from_slice(&[id, 0x00]);
+    }
+    jpeg.extend_from_slice(&[0, 0x3F, 0]);
+    // Two zero bits per block, padded with one bits to the byte.
+    jpeg.extend_from_slice(&[0xFF >> (2 * components), 0xFF, 0xD9]);
     jpeg
 }
 

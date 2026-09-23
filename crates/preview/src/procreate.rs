@@ -6,6 +6,7 @@
 //! is checked against a ceiling before anything is allocated.
 
 use crate::GrayscaleBitmap;
+use image::ImageDecoder;
 use std::io::{Cursor, Read};
 
 /// Defensive ceilings for untrusted archives: anything above them is treated
@@ -66,7 +67,12 @@ pub fn parse_plist_guarded(bytes: &[u8], label: &str) -> Result<plist::Value, St
 /// Why a `Shape.png` did not decode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShapePngError {
-    TooLarge { width: u32, height: u32 },
+    /// A side over `MAX_PNG_DIMENSION`, or a decoded buffer, in the image's
+    /// own pixel format, over `MAX_ENTRY_BYTES`.
+    TooLarge {
+        width: u32,
+        height: u32,
+    },
     Corrupt(String),
 }
 
@@ -75,7 +81,8 @@ impl std::fmt::Display for ShapePngError {
         match self {
             ShapePngError::TooLarge { width, height } => write!(
                 f,
-                "Shape.png is {width}x{height}px; the maximum supported brush-tip dimension is {MAX_PNG_DIMENSION}px"
+                "Shape.png is {width}x{height}px; a brush tip must be at most {MAX_PNG_DIMENSION}px per side and {} MiB decoded in its own pixel format",
+                MAX_ENTRY_BYTES / (1024 * 1024)
             ),
             ShapePngError::Corrupt(msg) => f.write_str(msg),
         }
@@ -85,14 +92,29 @@ impl std::fmt::Display for ShapePngError {
 impl std::error::Error for ShapePngError {}
 
 /// Decode a Procreate `Shape.png` into a grayscale tip. White is stamp
-/// coverage, so the luminance is taken as-is. Oversize is decided from the
-/// header, before any pixels are decoded.
+/// coverage, so the luminance is taken as-is. Oversize, by either dimension
+/// or decoded size, is decided from the header before any pixels are decoded.
 pub fn decode_tip_png(bytes: &[u8]) -> Result<GrayscaleBitmap, ShapePngError> {
     if let Some((width, height)) = header_dimensions(bytes) {
         if width > MAX_PNG_DIMENSION || height > MAX_PNG_DIMENSION {
             return Err(ShapePngError::TooLarge { width, height });
         }
     }
+    // On 32-bit targets `png` rejects an output buffer over `isize::MAX` while
+    // `image` builds its decoder, so an over-budget PNG is sized from IHDR first.
+    // IHDR undercounts indexed color, which `image` expands to RGB or RGBA.
+    if let Some(info) = png_header(bytes) {
+        let min_decoded =
+            u64::from(info.width) * u64::from(info.height) * info.bytes_per_pixel() as u64;
+        if min_decoded > MAX_ENTRY_BYTES as u64 {
+            return Err(ShapePngError::TooLarge {
+                width: info.width,
+                height: info.height,
+            });
+        }
+    }
+    let corrupt =
+        |e: image::ImageError| ShapePngError::Corrupt(format!("failed to decode Shape.png: {e}"));
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| ShapePngError::Corrupt(format!("failed to sniff Shape.png: {e}")))?;
@@ -100,10 +122,17 @@ pub fn decode_tip_png(bytes: &[u8]) -> Result<GrayscaleBitmap, ShapePngError> {
     limits.max_image_width = Some(MAX_PNG_DIMENSION);
     limits.max_image_height = Some(MAX_PNG_DIMENSION);
     limits.max_alloc = Some(MAX_ENTRY_BYTES as u64);
-    reader.limits(limits);
-    let luma = reader
-        .decode()
-        .map_err(|e| ShapePngError::Corrupt(format!("failed to decode Shape.png: {e}")))?
+    reader.limits(limits.clone());
+    let mut decoder = reader.into_decoder().map_err(corrupt)?;
+    // What `ImageReader::decode` does, with the budget failure reported as
+    // `TooLarge`: the output buffer is reserved and the decoder keeps the rest.
+    if limits.reserve(decoder.total_bytes()).is_err() {
+        let (width, height) = decoder.dimensions();
+        return Err(ShapePngError::TooLarge { width, height });
+    }
+    decoder.set_limits(limits).map_err(corrupt)?;
+    let luma = image::DynamicImage::from_decoder(decoder)
+        .map_err(corrupt)?
         .to_luma8();
     Ok(GrayscaleBitmap {
         width: luma.width(),
@@ -117,8 +146,7 @@ pub fn decode_tip_png(bytes: &[u8]) -> Result<GrayscaleBitmap, ShapePngError> {
 /// before it reports dimensions, which fails on 32-bit targets for large ones.
 pub(crate) fn header_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     if image::guess_format(bytes).ok()? == image::ImageFormat::Png {
-        let mut decoder = png::Decoder::new(Cursor::new(bytes));
-        let info = decoder.read_header_info().ok()?;
+        let info = png_header(bytes)?;
         return Some((info.width, info.height));
     }
     image::ImageReader::new(Cursor::new(bytes))
@@ -126,6 +154,18 @@ pub(crate) fn header_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
         .ok()?
         .into_dimensions()
         .ok()
+}
+
+/// A PNG's IHDR, parsed without allocating pixels. `None` for other formats
+/// and for a PNG whose header does not parse.
+fn png_header(bytes: &[u8]) -> Option<png::Info<'static>> {
+    if image::guess_format(bytes).ok()? != image::ImageFormat::Png {
+        return None;
+    }
+    png::Decoder::new(Cursor::new(bytes))
+        .read_header_info()
+        .ok()
+        .cloned()
 }
 
 /// The set name and the member uuids a `brushset.plist` declares, in its order.
