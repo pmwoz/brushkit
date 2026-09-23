@@ -15,6 +15,10 @@ jobs:
       - run: cargo test --workspace
       - name: The JPEG decoder and image share one zune-jpeg
         run: cargo tree --invert zune-jpeg --depth 0
+      - name: Only the tests enable image's JPEG decoder
+        run: |
+          cargo tree -e features,no-dev -p brushkit-preview -i image > image-features.txt
+          ! grep -F 'image feature "jpeg"' image-features.txt
       - run: cargo test -p brushkit --no-default-features
       - run: cargo build --workspace --target wasm32-unknown-unknown
       - name: Fixture crate stays independent of the crates under test

@@ -18,9 +18,10 @@ byteorder = "1"
 flate2 = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 plist = { version = "~1.8", features = ["enable_unstable_features_that_may_break_with_minor_version_bumps"] } # tilde pin: the streaming API is unstable across plist minor bumps
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 ab_glyph = "0.2"
 png = "0.18"
-# Decodes a JPEG the way `image` 0.25 does, without its copy of the input. Must
-# resolve to the copy `image` uses, which CI checks.
+# Decodes a JPEG the way `image` 0.25 does, without its copy of the input. The
+# tests compare it with image's JPEG decoder, so it must resolve to the copy
+# `image` uses, which CI checks.
 zune-jpeg = "0.5"
