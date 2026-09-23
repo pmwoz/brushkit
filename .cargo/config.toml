@@ -1,0 +1,3 @@
+[target.wasm32-wasip1]
+# Tests open files by absolute host path and read CARGO_MANIFEST_DIR at runtime.
+runner = ["wasmtime", "run", "--dir=/", "--env", "CARGO_MANIFEST_DIR"]
