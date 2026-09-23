@@ -65,23 +65,36 @@ fn gain_map_jpeg() -> Vec<u8> {
     jpeg
 }
 
-/// `png` with an iCCP chunk after IHDR whose profile inflates to 64 MiB of
-/// zeros. The tip never reads the profile, and it outweighs
-/// `PIXELS + DECODER_SLACK`, so inflating it breaks the bound.
-fn iccp_png(png: &[u8]) -> Vec<u8> {
-    let mut zlib = ZlibEncoder::new(b"icc\0\0".to_vec(), Compression::best());
-    zlib.write_all(&vec![0; 64 * 1024 * 1024])
-        .expect("compress profile");
-    let data = zlib.finish().expect("compress profile");
+/// `png` with a `kind` chunk holding `data` after IHDR.
+fn with_chunk(png: &[u8], kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
     let mut chunk = (data.len() as u32).to_be_bytes().to_vec();
-    chunk.extend_from_slice(b"iCCP");
-    chunk.extend_from_slice(&data);
+    chunk.extend_from_slice(kind);
+    chunk.extend_from_slice(data);
     chunk.extend_from_slice(&crc32(&chunk[4..]).to_be_bytes());
     // The signature and IHDR take 33 bytes.
     let mut out = png[..33].to_vec();
     out.extend_from_slice(&chunk);
     out.extend_from_slice(&png[33..]);
     out
+}
+
+/// `png` with an iCCP chunk whose profile inflates to 64 MiB of zeros. The
+/// tip never reads the profile, and it outweighs `PIXELS + DECODER_SLACK`, so
+/// inflating it breaks the bound.
+fn iccp_png(png: &[u8]) -> Vec<u8> {
+    let mut zlib = ZlibEncoder::new(b"icc\0\0".to_vec(), Compression::best());
+    zlib.write_all(&vec![0; 64 * 1024 * 1024])
+        .expect("compress profile");
+    with_chunk(png, b"iCCP", &zlib.finish().expect("compress profile"))
+}
+
+/// `png` with a `kind` chunk of 16 MiB: the fields before the text or EXIF
+/// data, then filler. The tip never reads the chunk, and it outweighs
+/// `PIXELS + DECODER_SLACK`, so keeping it breaks the bound.
+fn metadata_png(png: &[u8], kind: &[u8; 4], fields: &[u8]) -> Vec<u8> {
+    let mut data = fields.to_vec();
+    data.resize(16 * 1024 * 1024, b'x');
+    with_chunk(png, kind, &data)
 }
 
 /// The peak growth of `decode`, after checking that the tip it returns holds
@@ -209,6 +222,58 @@ fn tip_decoders_hold_no_copy_of_the_decoded_image() {
             "{name} must not inflate the profile: {growth} bytes"
         );
     }
+
+    for (kind, fields) in [
+        (b"tEXt", &b"Comment\0"[..]),
+        (b"zTXt", b"Comment\0\0"),
+        (b"iTXt", b"XML:com.adobe.xmp\0\0\0\0\0"),
+    ] {
+        let text = metadata_png(&gray, kind, fields);
+        let kind = std::str::from_utf8(kind).expect("ASCII chunk type");
+        for (name, decode) in [
+            ("decode_tip_image", tip_image as Decode),
+            ("decode_tip_png", shape_png),
+        ] {
+            let name = format!("{name} gray PNG with {kind}");
+            let growth = measure(&name, || decode(&text));
+            println!("{name}: {growth} bytes");
+            assert!(
+                growth <= PIXELS + DECODER_SLACK,
+                "{name} must not keep the text: {growth} bytes"
+            );
+        }
+    }
+
+    // `png` keeps an eXIf chunk whatever its options, in its chunk buffer and
+    // in a copy. One of the 64 KiB a JPEG's EXIF holds decodes, and one of
+    // 16 MiB does not.
+    const EXIF: usize = 64 * 1024;
+    let exif = with_chunk(&gray, b"eXIf", &[b'x'; EXIF]);
+    let large_exif = metadata_png(&gray, b"eXIf", b"MM\0*");
+    for (name, decode) in [
+        ("decode_tip_image", tip_image as Decode),
+        ("decode_tip_png", shape_png),
+    ] {
+        let name = format!("{name} gray PNG with eXIf");
+        let growth = measure(&name, || decode(&exif));
+        println!("{name}: {growth} bytes");
+        assert!(
+            growth <= PIXELS + DECODER_SLACK + 2 * EXIF,
+            "{name} must hold at most two copies of the eXIf: {growth} bytes"
+        );
+    }
+    let before = live();
+    reset_peak();
+    let image = decode_tip_image(&large_exif);
+    let png = decode_tip_png(&large_exif);
+    let growth = peak() - before;
+    println!("gray PNG with a 16 MiB eXIf: {growth} bytes");
+    assert!(image.is_err(), "decode_tip_image must reject a 16 MiB eXIf");
+    assert!(png.is_err(), "decode_tip_png must reject a 16 MiB eXIf");
+    assert!(
+        growth <= DECODER_SLACK,
+        "a rejected eXIf must not be kept: {growth} bytes"
+    );
 
     let name = "decode_tip_image gray JPEG with gain-map segments";
     let jpeg = gain_map_jpeg();
