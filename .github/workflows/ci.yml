@@ -17,6 +17,8 @@ jobs:
       - run: cargo test --workspace
       - name: The JPEG decoder and image share one zune-jpeg
         run: cargo tree --invert zune-jpeg --depth 0
+      - name: The PNG decoder and image share one png
+        run: cargo tree --invert png --depth 0
       - name: Only the tests enable image's JPEG decoder
         run: test "$(cargo tree -e no-dev --workspace -i image -f '{f}' --depth 0 --all-features --target all)" = png
       - run: cargo test -p brushkit --no-default-features
