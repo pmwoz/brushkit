@@ -5,7 +5,7 @@
 //! Every entry here parses untrusted bytes, so each size, count and dimension
 //! is checked against a ceiling before anything is allocated.
 
-use crate::bitmap::{decode_guarded, GuardedDecodeError};
+use crate::bitmap::{decode_guarded, tip_plane, GuardedDecodeError, TipSample};
 use crate::GrayscaleBitmap;
 use std::io::{Cursor, Read};
 
@@ -95,20 +95,19 @@ impl std::error::Error for ShapePngError {}
 /// coverage, so the luminance is taken as-is. Oversize, by either dimension
 /// or decoded size, is decided from the header before any pixels are decoded.
 pub fn decode_tip_png(bytes: &[u8]) -> Result<GrayscaleBitmap, ShapePngError> {
-    let luma = decode_guarded(bytes, MAX_PNG_DIMENSION, MAX_ENTRY_BYTES as u64)
-        .map_err(|e| match e {
+    let image =
+        decode_guarded(bytes, MAX_PNG_DIMENSION, MAX_ENTRY_BYTES as u64).map_err(|e| match e {
             GuardedDecodeError::TooLarge { width, height } => {
                 ShapePngError::TooLarge { width, height }
             }
             GuardedDecodeError::Decode(e) => {
                 ShapePngError::Corrupt(format!("failed to decode Shape.png: {e}"))
             }
-        })?
-        .into_luma8();
+        })?;
     Ok(GrayscaleBitmap {
-        width: luma.width(),
-        height: luma.height(),
-        data: luma.into_raw(),
+        width: image.width,
+        height: image.height,
+        data: tip_plane(image, TipSample::Luma),
     })
 }
 

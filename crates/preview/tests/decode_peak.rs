@@ -5,7 +5,7 @@ use std::io::Cursor;
 use brushkit_preview::procreate::decode_tip_png;
 use brushkit_preview::{decode_tip_image, GrayscaleBitmap};
 use counting_alloc::{live, peak, reset_peak};
-use image::{DynamicImage, GrayAlphaImage, GrayImage, ImageFormat, Luma, LumaA, Rgba, RgbaImage};
+use image::{DynamicImage, ImageBuffer, ImageFormat, Luma, LumaA, Rgb, Rgba};
 
 /// Large enough that shrinking the decoded buffer to the tip stays in place.
 /// macOS moves a 4 MiB block shrunk to 1 MiB.
@@ -14,68 +14,96 @@ const PIXELS: usize = (SIDE * SIDE) as usize;
 /// Room for the PNG decoder's own buffers, which do not grow with the image.
 const DECODER_SLACK: usize = 512 * 1024;
 
-fn png(image: DynamicImage) -> Vec<u8> {
+fn encode(image: DynamicImage, format: ImageFormat) -> Vec<u8> {
     let mut bytes = Cursor::new(Vec::new());
-    image
-        .write_to(&mut bytes, ImageFormat::Png)
-        .expect("encode fixture");
+    image.write_to(&mut bytes, format).expect("encode fixture");
     bytes.into_inner()
 }
 
+fn png(image: DynamicImage) -> Vec<u8> {
+    encode(image, ImageFormat::Png)
+}
+
 /// The peak growth of `decode`, after checking that the tip it returns holds
-/// one byte per pixel and nothing of the decoded image.
-fn measure(decode: impl FnOnce() -> GrayscaleBitmap) -> (usize, GrayscaleBitmap) {
+/// one byte per pixel and nothing of the decoded image. Pixel values are
+/// checked by the unit tests in `bitmap.rs`.
+fn measure(name: &str, decode: impl FnOnce() -> GrayscaleBitmap) -> usize {
     let before = live();
     reset_peak();
     let bitmap = decode();
     let retained = live() - before;
+    assert_eq!(bitmap.data.len(), PIXELS, "{name}: one byte per pixel");
     assert!(
         retained <= PIXELS,
-        "the tip must hold only its own plane: {retained} bytes"
+        "{name}: the tip must hold only its own plane: {retained} bytes"
     );
-    (peak() - before, bitmap)
+    peak() - before
 }
 
+type Decode = fn(&[u8]) -> GrayscaleBitmap;
+
+fn tip_image(bytes: &[u8]) -> GrayscaleBitmap {
+    decode_tip_image(bytes).expect("tip decodes")
+}
+
+fn shape_png(bytes: &[u8]) -> GrayscaleBitmap {
+    decode_tip_png(bytes).expect("Shape.png decodes")
+}
+
+/// Each decoder's peak is the decoded image, `bytes_per_pixel` wide, plus the
+/// decoder's fixed slack: the tip is converted inside the decoded buffer.
 #[test]
 fn tip_decoders_hold_no_copy_of_the_decoded_image() {
-    let gray = png(GrayImage::from_pixel(SIDE, SIDE, Luma([0x40])).into());
-    let gray_alpha = png(GrayAlphaImage::from_pixel(SIDE, SIDE, LumaA([0x40, 0xC0])).into());
-    let rgba = png(RgbaImage::from_pixel(SIDE, SIDE, Rgba([0x10, 0x20, 0x30, 0xC0])).into());
-
-    // The decoded four-byte image, its alpha compacted in place into the tip.
-    let (growth, bitmap) = measure(|| decode_tip_image(&rgba).expect("RGBA tip decodes"));
-    assert_eq!(bitmap.data, vec![0xC0; PIXELS], "alpha is the tip");
-    println!("decode_tip_image RGBA: {growth} bytes");
-    assert!(
-        growth <= 4 * PIXELS + DECODER_SLACK,
-        "decode_tip_image must extract RGBA alpha inside the decoded buffer: {growth} bytes"
+    let gray = png(ImageBuffer::from_pixel(SIDE, SIDE, Luma([0x40u8])).into());
+    let gray_alpha = png(ImageBuffer::from_pixel(SIDE, SIDE, LumaA([0x40u8, 0xC0])).into());
+    let rgb = png(ImageBuffer::from_pixel(SIDE, SIDE, Rgb([0x10u8, 0x20, 0x30])).into());
+    let rgba = png(ImageBuffer::from_pixel(SIDE, SIDE, Rgba([0x10u8, 0x20, 0x30, 0xC0])).into());
+    let gray16 = png(ImageBuffer::from_pixel(SIDE, SIDE, Luma([0x4040u16])).into());
+    let gray_alpha16 = png(ImageBuffer::from_pixel(SIDE, SIDE, LumaA([0x4040u16, 0xC0C0])).into());
+    let rgb16 = png(ImageBuffer::from_pixel(SIDE, SIDE, Rgb([0x1010u16, 0x2020, 0x3030])).into());
+    let rgba16 =
+        png(ImageBuffer::from_pixel(SIDE, SIDE, Rgba([0x1010u16, 0x2020, 0x3030, 0xC0C0])).into());
+    // `image` encodes baseline JPEG only.
+    let rgb_baseline_jpeg = encode(
+        ImageBuffer::from_pixel(SIDE, SIDE, Rgb([0x10u8, 0x20, 0x30])).into(),
+        ImageFormat::Jpeg,
     );
 
-    // The decoded two-byte image, its alpha compacted in place into the tip.
-    let (growth, bitmap) =
-        measure(|| decode_tip_image(&gray_alpha).expect("gray+alpha tip decodes"));
-    assert_eq!(bitmap.data, vec![0xC0; PIXELS], "alpha is the tip");
-    println!("decode_tip_image gray+alpha: {growth} bytes");
-    assert!(
-        growth <= 2 * PIXELS + DECODER_SLACK,
-        "decode_tip_image must extract gray+alpha alpha inside the decoded buffer: {growth} bytes"
-    );
-
-    // The decoded gray plane, inverted in place into the tip.
-    let (growth, bitmap) = measure(|| decode_tip_image(&gray).expect("gray tip decodes"));
-    assert_eq!(bitmap.data, vec![0xBF; PIXELS], "gray is inverted");
-    println!("decode_tip_image gray: {growth} bytes");
-    assert!(
-        growth <= PIXELS + DECODER_SLACK,
-        "decode_tip_image must not copy a gray image: {growth} bytes"
-    );
-
-    // The decoded gray plane, returned as the tip.
-    let (growth, bitmap) = measure(|| decode_tip_png(&gray).expect("gray Shape.png decodes"));
-    assert_eq!(bitmap.data, vec![0x40; PIXELS], "gray is the tip");
-    println!("decode_tip_png gray: {growth} bytes");
-    assert!(
-        growth <= PIXELS + DECODER_SLACK,
-        "decode_tip_png must not copy a gray image: {growth} bytes"
-    );
+    let cases: [(&str, Decode, &[u8], usize); 17] = [
+        ("decode_tip_image gray", tip_image, &gray, 1),
+        ("decode_tip_image gray+alpha", tip_image, &gray_alpha, 2),
+        ("decode_tip_image RGB", tip_image, &rgb, 3),
+        ("decode_tip_image RGBA", tip_image, &rgba, 4),
+        ("decode_tip_image gray 16", tip_image, &gray16, 2),
+        (
+            "decode_tip_image gray+alpha 16",
+            tip_image,
+            &gray_alpha16,
+            4,
+        ),
+        ("decode_tip_image RGB 16", tip_image, &rgb16, 6),
+        ("decode_tip_image RGBA 16", tip_image, &rgba16, 8),
+        (
+            "decode_tip_image RGB baseline JPEG",
+            tip_image,
+            &rgb_baseline_jpeg,
+            3,
+        ),
+        ("decode_tip_png gray", shape_png, &gray, 1),
+        ("decode_tip_png gray+alpha", shape_png, &gray_alpha, 2),
+        ("decode_tip_png RGB", shape_png, &rgb, 3),
+        ("decode_tip_png RGBA", shape_png, &rgba, 4),
+        ("decode_tip_png gray 16", shape_png, &gray16, 2),
+        ("decode_tip_png gray+alpha 16", shape_png, &gray_alpha16, 4),
+        ("decode_tip_png RGB 16", shape_png, &rgb16, 6),
+        ("decode_tip_png RGBA 16", shape_png, &rgba16, 8),
+    ];
+    for (name, decode, bytes, bytes_per_pixel) in cases {
+        let growth = measure(name, || decode(bytes));
+        println!("{name}: {growth} bytes");
+        assert!(
+            growth <= bytes_per_pixel * PIXELS + DECODER_SLACK,
+            "{name} must convert inside the decoded buffer: {growth} bytes"
+        );
+    }
 }
