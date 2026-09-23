@@ -1,7 +1,3 @@
-//! EXACTLY ONE `#[test]` lives in this file. The allocator is global and cargo
-//! runs a binary's tests on parallel threads, so a second test here would
-//! allocate underneath the measurement and corrupt every peak.
-
 mod counting_alloc;
 
 use brushkit_abr::{parse_abr, parse_abr_deferred};
