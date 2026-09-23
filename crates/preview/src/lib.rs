@@ -84,8 +84,9 @@ pub enum UnavailableReason {
     Corrupt(String),
     /// A side over `procreate::MAX_PNG_DIMENSION`, or a decode over
     /// `procreate::MAX_ENTRY_BYTES`: the image in its own pixel format, plus
-    /// the DCT coefficients of a progressive JPEG. The decoder's row buffers,
-    /// which grow with the width only, are not counted.
+    /// the DCT coefficients of a progressive JPEG or of a baseline JPEG whose
+    /// first scan leaves out a component. The decoder's row buffers, which
+    /// grow with the width only, are not counted.
     TooLarge {
         width: u32,
         height: u32,
