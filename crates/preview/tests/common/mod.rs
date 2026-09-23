@@ -55,16 +55,46 @@ pub fn crc32(data: &[u8]) -> u32 {
     !crc
 }
 
+pub fn adler32(data: &[u8]) -> u32 {
+    let (mut a, mut b) = (1u32, 0u32);
+    for &byte in data {
+        a = (a + byte as u32) % 65521;
+        b = (b + a) % 65521;
+    }
+    (b << 16) | a
+}
+
+/// An 8-bit grayscale PNG written by hand, with one stored DEFLATE block. The
+/// fuzz seeds embed these bytes, so they must not change when the png encoder
+/// does.
 pub fn gray_png(width: u32, height: u32, fill: u8) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut enc = png::Encoder::new(&mut out, width, height);
-    enc.set_color(png::ColorType::Grayscale);
-    enc.set_depth(png::BitDepth::Eight);
-    let mut w = enc.write_header().expect("png header");
-    w.write_image_data(&vec![fill; (width * height) as usize])
-        .expect("png image data");
-    w.finish().expect("png finish");
-    out
+    let mut scanlines = Vec::new();
+    for _ in 0..height {
+        scanlines.push(0);
+        scanlines.extend(std::iter::repeat_n(fill, width as usize));
+    }
+    let len = u16::try_from(scanlines.len()).expect("scanlines fit one stored block");
+    let mut zlib = vec![0x78, 0x01, 1];
+    zlib.extend_from_slice(&len.to_le_bytes());
+    zlib.extend_from_slice(&(!len).to_le_bytes());
+    zlib.extend_from_slice(&scanlines);
+    zlib.extend_from_slice(&adler32(&scanlines).to_be_bytes());
+
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 0, 0, 0, 0]);
+
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    for (kind, data) in [(b"IHDR", ihdr), (b"IDAT", zlib), (b"IEND", Vec::new())] {
+        png.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        let start = png.len();
+        png.extend_from_slice(kind);
+        png.extend_from_slice(&data);
+        let crc = crc32(&png[start..]);
+        png.extend_from_slice(&crc.to_be_bytes());
+    }
+    png
 }
 
 pub fn real_4x4_png() -> Vec<u8> {
@@ -73,12 +103,12 @@ pub fn real_4x4_png() -> Vec<u8> {
 
 pub fn dimension_bomb_png(w: u32, h: u32) -> Vec<u8> {
     let mut png = real_4x4_png();
-    // IHDR is always the first chunk: 8-byte signature, 4-byte length, 4-byte
-    // type, then width and height as the first 8 bytes of its 13-byte payload.
+    // IHDR is the first chunk: 8-byte signature, 4-byte length, 4-byte type,
+    // then width and height as the first 8 bytes of its 13-byte payload.
     assert_eq!(
         &png[12..16],
         b"IHDR",
-        "the png crate must emit IHDR first for these offsets to be right"
+        "gray_png must write IHDR first for these offsets to be right"
     );
     png[16..20].copy_from_slice(&w.to_be_bytes());
     png[20..24].copy_from_slice(&h.to_be_bytes());
