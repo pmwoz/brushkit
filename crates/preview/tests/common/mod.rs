@@ -161,8 +161,9 @@ pub fn progressive_jpeg(width: u32, height: u32, sampling: &[u8]) -> Vec<u8> {
     hand_written_jpeg(0xC2, width, height, sampling, components)
 }
 
-/// A JPEG whose one scan holds the first `scan` components of the frame.
-fn hand_written_jpeg(sof: u8, width: u32, height: u32, sampling: &[u8], scan: u8) -> Vec<u8> {
+/// A JPEG whose frame header has marker `sof` (0xC0, 0xC1 or 0xC2) and whose
+/// one scan holds the first `scan` components of the frame.
+pub fn hand_written_jpeg(sof: u8, width: u32, height: u32, sampling: &[u8], scan: u8) -> Vec<u8> {
     let components = u8::try_from(sampling.len()).expect("a few components");
     assert!(matches!(components, 1 | 3), "grayscale or YCbCr only");
     let progressive = sof == 0xC2;

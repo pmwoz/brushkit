@@ -6,7 +6,7 @@ use brushkit_preview::{preview_brush, preview_brushset, PreviewOptions, TipPrevi
 use brushkit_preview::{PreviewSet, UnavailableReason};
 use common::{
     baseline_jpeg, brush_archive, depth_bomb_plist_xml, dimension_bomb_png, gray_png,
-    partial_scan_jpeg, progressive_jpeg, real_4x4_png, rgba_dimension_bomb_png, zip_with,
+    hand_written_jpeg, progressive_jpeg, real_4x4_png, rgba_dimension_bomb_png, zip_with,
 };
 use std::io::{self, Cursor, Read};
 
@@ -251,12 +251,17 @@ fn baseline_jpeg_with_a_partial_first_scan_counts_its_coefficients() {
         .expect("a baseline JPEG with every component in its first scan decodes");
     assert_eq!((tip.width, tip.height), (side, side));
 
-    match decode_tip_image(&partial_scan_jpeg(side, side, &[0x11; 3], 1)) {
-        Err(TipImageError::TooLarge { width, height }) => {
-            assert_eq!((width, height), (side, side));
+    // zune-jpeg parses 0xFFC1 as baseline too.
+    for sof in [0xC0, 0xC1] {
+        match decode_tip_image(&hand_written_jpeg(sof, side, side, &[0x11; 3], 1)) {
+            Err(TipImageError::TooLarge { width, height }) => {
+                assert_eq!((width, height), (side, side), "SOF {sof:x}");
+            }
+            Err(err) => panic!("SOF {sof:x}: expected TooLarge, got {err:?}"),
+            Ok(_) => {
+                panic!("SOF {sof:x}: a partial first scan decoded without its coefficients counted")
+            }
         }
-        Err(err) => panic!("expected TooLarge, got {err:?}"),
-        Ok(_) => panic!("a partial first scan decoded without its coefficients counted"),
     }
 }
 
@@ -317,6 +322,60 @@ fn progressive_jpeg_with_a_second_frame_header_counts_the_larger_one() {
         Err(err) => panic!("expected TooLarge, got {err:?}"),
         Ok(_) => panic!("the smaller frame header was counted"),
     }
+}
+
+#[test]
+fn progressive_frame_header_in_a_skipped_segment_of_a_baseline_jpeg_is_not_counted() {
+    // An 8192x8192 RGB baseline JPEG of 192 MiB, which holds no coefficients,
+    // with a comment holding a progressive frame header of the same size.
+    // zune-jpeg skips the comment. Counted, the header's 384 MiB of
+    // coefficients would put the decode over the budget.
+    let side = MAX_IMPORT_DIMENSION / 2;
+    let mut jpeg = baseline_jpeg(side, side, 3);
+    let mut comment = vec![0xFF, 0xFE, 0x00, 21, 0xFF, 0xC2, 0x00, 17, 8];
+    comment.extend_from_slice(&(side as u16).to_be_bytes());
+    comment.extend_from_slice(&(side as u16).to_be_bytes());
+    comment.extend_from_slice(&[3, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0]);
+    jpeg.splice(2..2, comment);
+
+    let tip = decode_tip_image(&jpeg).expect("the skipped frame header is not counted");
+    assert_eq!((tip.width, tip.height), (side, side));
+}
+
+#[test]
+fn baseline_frame_header_in_a_progressive_jpeg_is_not_counted() {
+    // `progressive_jpeg_with_a_second_frame_header_counts_the_larger_one`
+    // with a first scan of one component and a baseline 4:4:4 frame header in
+    // the comment. A baseline frame with a partial first scan would hold its
+    // coefficients, but zune-jpeg parses the progressive frame header, so only
+    // the 4:2:0 one counts, and the image fits the budget.
+    let (width, height) = (MAX_IMPORT_DIMENSION, 5456);
+    let mut jpeg = hand_written_jpeg(0xC2, width, height, &[0x22, 0x11, 0x11], 1);
+    let mut comment = vec![0xFF, 0xFE, 0x00, 21, 0xFF, 0xC0, 0x00, 17, 8];
+    comment.extend_from_slice(&(height as u16).to_be_bytes());
+    comment.extend_from_slice(&(width as u16).to_be_bytes());
+    comment.extend_from_slice(&[3, 1, 0x22, 0, 2, 0x22, 0, 3, 0x22, 0]);
+    jpeg.splice(2..2, comment);
+
+    let tip = decode_tip_image(&jpeg).expect("the baseline frame header is not counted");
+    assert_eq!((tip.width, tip.height), (width, height));
+}
+
+#[test]
+fn frame_header_with_other_components_than_the_parsed_one_is_not_counted() {
+    // A 16384x8192 gray progressive JPEG: 128 MiB of pixels and 256 MiB of
+    // coefficients. A comment holds a three-component progressive frame header
+    // of the same size, whose 768 MiB of coefficients would not fit.
+    let (width, height) = (MAX_IMPORT_DIMENSION, MAX_IMPORT_DIMENSION / 2);
+    let mut jpeg = progressive_jpeg(width, height, &[0x11]);
+    let mut comment = vec![0xFF, 0xFE, 0x00, 21, 0xFF, 0xC2, 0x00, 17, 8];
+    comment.extend_from_slice(&(height as u16).to_be_bytes());
+    comment.extend_from_slice(&(width as u16).to_be_bytes());
+    comment.extend_from_slice(&[3, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0]);
+    jpeg.splice(2..2, comment);
+
+    let tip = decode_tip_image(&jpeg).expect("the three-component header is not counted");
+    assert_eq!((tip.width, tip.height), (width, height));
 }
 
 #[test]

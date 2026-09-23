@@ -4,6 +4,7 @@ use std::io::Cursor;
 use zune_core::bytestream::{ZByteIoError, ZByteReaderTrait, ZCursor, ZSeekFrom};
 use zune_core::colorspace::ColorSpace;
 use zune_core::options::DecoderOptions;
+use zune_jpeg::ImageInfo;
 
 #[derive(Debug, Clone)]
 pub struct GrayscaleBitmap {
@@ -615,16 +616,14 @@ fn jpeg_header(bytes: &[u8]) -> Result<JpegHeader, zune_jpeg::errors::DecodeErro
     let mut cursor = Cursor::new(bytes);
     let mut decoder = jpeg_decoder(&mut cursor, ColorSpace::RGB);
     decoder.decode_headers()?;
-    let (width, height) = decoder.dimensions().expect("headers were decoded");
+    let frame = decoder.info().expect("headers were decoded");
     let input_color = decoder.input_colorspace().expect("headers were decoded");
-    let side = |side: usize| u32::try_from(side).expect("zune-jpeg frame sides are u16");
-    let (width, height) = (side(width), side(height));
     let scan_end = usize::try_from(cursor.position()).expect("within the input");
     Ok(JpegHeader {
-        width,
-        height,
+        width: frame.width.into(),
+        height: frame.height.into(),
         input_color,
-        coefficient_bytes: coefficient_bytes(&bytes[..scan_end], width, height),
+        coefficient_bytes: coefficient_bytes(&bytes[..scan_end], &frame),
     })
 }
 
@@ -663,23 +662,23 @@ pub(crate) fn header_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 /// first scan, the one whose header ends `to_first_scan`, leaves out a
 /// component.
 ///
-/// The frame header is read from the bytes, not from `JpegDecoder::info`,
-/// whose `SampleRatios` is too coarse for the count, so every frame header (0xFFC0, 0xFFC1 or 0xFFC2) in `to_first_scan` that zune-jpeg would
-/// accept at the size it reports is a candidate, and the largest count wins.
-/// A baseline candidate counts only when the first scan holds fewer
-/// components than it. zune-jpeg parses one frame header, before the first
-/// scan header, and allocates coefficients only after it, so the count is
-/// never below zune-jpeg's. A candidate zune-jpeg never parses, such as one
-/// inside a skipped segment, counts too.
-fn coefficient_bytes(to_first_scan: &[u8], width: u32, height: u32) -> u64 {
+/// `frame` is what zune-jpeg parsed, which gives the frame type and the
+/// component count. Its `SampleRatios` is too coarse for the count, so the
+/// sampling factors are read from the bytes. Every frame header of that type
+/// in `to_first_scan` that zune-jpeg would accept at the parsed size and
+/// component count is read, and the largest count wins. zune-jpeg parses one
+/// of them, so the count is never below zune-jpeg's.
+fn coefficient_bytes(to_first_scan: &[u8], frame: &ImageInfo) -> u64 {
     let bytes = to_first_scan;
-    let first_scan = scan_components(bytes);
+    let progressive = frame.sof.is_progressive();
+    if !progressive && scan_components(bytes) >= frame.components {
+        return 0;
+    }
+    // zune-jpeg parses 0xFFC0 and 0xFFC1 as baseline, and 0xFFC2 as progressive.
+    let markers: &[u8] = if progressive { &[0xC2] } else { &[0xC0, 0xC1] };
     (1..bytes.len())
-        .filter(|&i| bytes[i - 1] == 0xFF && matches!(bytes[i], 0xC0..=0xC2))
-        .filter_map(|i| {
-            let (components, coefficients) = frame_coefficients(&bytes[i + 1..], width, height)?;
-            (bytes[i] == 0xC2 || first_scan < components).then_some(coefficients)
-        })
+        .filter(|&i| bytes[i - 1] == 0xFF && markers.contains(&bytes[i]))
+        .filter_map(|i| frame_coefficients(&bytes[i + 1..], frame))
         .max()
         .unwrap_or(0)
 }
@@ -698,21 +697,21 @@ fn scan_components(bytes: &[u8]) -> u8 {
         .unwrap_or(1)
 }
 
-/// The component count of a frame header zune-jpeg would accept at `width` x
-/// `height`, and its coefficients: 64 two-byte coefficients for each block of
-/// every MCU, with each side padded to whole MCUs. The blocks per MCU are the
-/// sum of each component's sampling factors multiplied.
-fn frame_coefficients(header: &[u8], width: u32, height: u32) -> Option<(u8, u64)> {
+/// The coefficients of a frame header that matches `frame` and that zune-jpeg
+/// would accept: 64 two-byte coefficients for each block of every MCU, with
+/// each side padded to whole MCUs. The blocks per MCU are the sum of each
+/// component's sampling factors multiplied.
+fn frame_coefficients(header: &[u8], frame: &ImageInfo) -> Option<u64> {
     // Length, precision, height, width, component count, then an id, the
     // sampling factors and a table per component.
     let fixed = header.get(..8)?;
-    let field = |at: usize| u32::from(u16::from_be_bytes([fixed[at], fixed[at + 1]]));
+    let field = |at: usize| u16::from_be_bytes([fixed[at], fixed[at + 1]]);
     let components = fixed[7];
     let length = 8 + 3 * usize::from(components);
-    if !(1..=4).contains(&components)
-        || field(0) as usize != length
-        || field(3) != height
-        || field(5) != width
+    if components != frame.components
+        || usize::from(field(0)) != length
+        || field(3) != frame.height
+        || field(5) != frame.width
     {
         return None;
     }
@@ -730,11 +729,9 @@ fn frame_coefficients(header: &[u8], width: u32, height: u32) -> Option<(u8, u64
     let (h_max, v_max) = factors
         .clone()
         .fold((1, 1), |(h, v), (hi, vi)| (h.max(hi), v.max(vi)));
-    let mcus = u64::from(width).div_ceil(8 * h_max) * u64::from(height).div_ceil(8 * v_max);
-    Some((
-        components,
-        2 * 64 * mcus * factors.map(|(h, v)| h * v).sum::<u64>(),
-    ))
+    let mcus =
+        u64::from(frame.width).div_ceil(8 * h_max) * u64::from(frame.height).div_ceil(8 * v_max);
+    Some(2 * 64 * mcus * factors.map(|(h, v)| h * v).sum::<u64>())
 }
 
 /// A PNG's IHDR, parsed without allocating pixels. `None` for other formats
