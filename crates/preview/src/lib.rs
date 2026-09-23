@@ -149,7 +149,7 @@ struct Row {
 /// presets are synthesized from their geometry; a preset that declares neither
 /// is reported as an unsupported tip kind. A sampled tip whose pixels fail to
 /// decode is a `Corrupt` entry, not an error for the whole preview. The
-/// exception is a raw v1 or v2 tip whose pixels run past the end of the input,
+/// exception is a raw v1 or v2 tip whose pixels run past the end of its entry,
 /// which fails the whole preview.
 ///
 /// Embedded pattern payloads are neither copied nor decoded.

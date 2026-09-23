@@ -649,7 +649,7 @@ fn parse_legacy<'a>(
         let pixel_end = match compression {
             0 => {
                 let end = pixel_start + expected as u64;
-                if end > input.len() as u64 {
+                if end > entry_end {
                     return Err(AbrError::Decompression("truncated raw data".into()));
                 }
                 end
@@ -660,7 +660,7 @@ fn parse_legacy<'a>(
                 continue;
             }
         };
-        cursor.set_position(pixel_end);
+        cursor.set_position(entry_end);
         let pixels = &input[pixel_start as usize..pixel_end as usize];
 
         let (pixel_data, deferred) = if !defer {
