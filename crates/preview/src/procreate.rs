@@ -6,6 +6,7 @@
 //! is checked against a ceiling before anything is allocated.
 
 use crate::GrayscaleBitmap;
+use image::ImageDecoder;
 use std::io::{Cursor, Read};
 
 /// Defensive ceilings for untrusted archives: anything above them is treated
@@ -75,7 +76,8 @@ impl std::fmt::Display for ShapePngError {
         match self {
             ShapePngError::TooLarge { width, height } => write!(
                 f,
-                "Shape.png is {width}x{height}px; the maximum supported brush-tip dimension is {MAX_PNG_DIMENSION}px"
+                "Shape.png is {width}x{height}px; a brush tip must be at most {MAX_PNG_DIMENSION}px per side and {} MiB decoded",
+                MAX_ENTRY_BYTES / (1024 * 1024)
             ),
             ShapePngError::Corrupt(msg) => f.write_str(msg),
         }
@@ -85,14 +87,16 @@ impl std::fmt::Display for ShapePngError {
 impl std::error::Error for ShapePngError {}
 
 /// Decode a Procreate `Shape.png` into a grayscale tip. White is stamp
-/// coverage, so the luminance is taken as-is. Oversize is decided from the
-/// header, before any pixels are decoded.
+/// coverage, so the luminance is taken as-is. Oversize, by either dimension
+/// or decoded size, is decided from the header before any pixels are decoded.
 pub fn decode_tip_png(bytes: &[u8]) -> Result<GrayscaleBitmap, ShapePngError> {
     if let Some((width, height)) = header_dimensions(bytes) {
         if width > MAX_PNG_DIMENSION || height > MAX_PNG_DIMENSION {
             return Err(ShapePngError::TooLarge { width, height });
         }
     }
+    let corrupt =
+        |e: image::ImageError| ShapePngError::Corrupt(format!("failed to decode Shape.png: {e}"));
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| ShapePngError::Corrupt(format!("failed to sniff Shape.png: {e}")))?;
@@ -101,9 +105,13 @@ pub fn decode_tip_png(bytes: &[u8]) -> Result<GrayscaleBitmap, ShapePngError> {
     limits.max_image_height = Some(MAX_PNG_DIMENSION);
     limits.max_alloc = Some(MAX_ENTRY_BYTES as u64);
     reader.limits(limits);
-    let luma = reader
-        .decode()
-        .map_err(|e| ShapePngError::Corrupt(format!("failed to decode Shape.png: {e}")))?
+    let decoder = reader.into_decoder().map_err(corrupt)?;
+    if decoder.total_bytes() > MAX_ENTRY_BYTES as u64 {
+        let (width, height) = decoder.dimensions();
+        return Err(ShapePngError::TooLarge { width, height });
+    }
+    let luma = image::DynamicImage::from_decoder(decoder)
+        .map_err(corrupt)?
         .to_luma8();
     Ok(GrayscaleBitmap {
         width: luma.width(),
