@@ -67,12 +67,9 @@ pub fn parse_plist_guarded(bytes: &[u8], label: &str) -> Result<plist::Value, St
 /// Why a `Shape.png` did not decode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShapePngError {
-    /// A side over `MAX_PNG_DIMENSION`, or a decode over `MAX_ENTRY_BYTES`:
-    /// the image in its own pixel format, plus the DCT coefficients of a
-    /// progressive JPEG or of a baseline JPEG whose first scan leaves out a
-    /// component. The decoder's row buffers, which grow with the width only,
-    /// are not counted. Neither is a PNG's eXIf chunk of at most 64 KiB,
-    /// which the decoder holds twice, up to 128 KiB.
+    /// A side over `MAX_PNG_DIMENSION`, or a decode over `MAX_ENTRY_BYTES`,
+    /// counted as [`TipImageError::TooLarge`](crate::TipImageError::TooLarge)
+    /// describes.
     TooLarge { width: u32, height: u32 },
     /// The bytes did not decode, or a PNG carries an eXIf chunk over 64 KiB
     /// before the image data.
