@@ -98,8 +98,8 @@ pub fn decode_tip_image(bytes: &[u8]) -> Result<GrayscaleBitmap, TipImageError> 
     let (width, height) = img.dimensions();
 
     let data: Vec<u8> = match img {
-        image::DynamicImage::ImageRgba8(rgba) => rgba.pixels().map(|p| p.0[3]).collect(),
-        img if img.color().has_alpha() => img.into_luma_alpha8().pixels().map(|p| p.0[1]).collect(),
+        image::DynamicImage::ImageRgba8(rgba) => alpha_in_place(rgba),
+        img if img.color().has_alpha() => alpha_in_place(img.into_luma_alpha8()),
         img => {
             let mut data = img.into_luma8().into_raw();
             data.iter_mut().for_each(|v| *v = 255 - *v);
@@ -112,6 +112,21 @@ pub fn decode_tip_image(bytes: &[u8]) -> Result<GrayscaleBitmap, TipImageError> 
         height,
         data,
     })
+}
+
+/// Each pixel's last channel, moved to the front of the image's own buffer,
+/// so the tip allocates no second buffer. The final shrink is a `realloc`,
+/// which macOS and glibc do in place for blocks this large.
+fn alpha_in_place<P: image::Pixel<Subpixel = u8>>(image: ImageBuffer<P, Vec<u8>>) -> Vec<u8> {
+    let channels = usize::from(P::CHANNEL_COUNT);
+    let mut raw = image.into_raw();
+    let pixels = raw.len() / channels;
+    for i in 0..pixels {
+        raw[i] = raw[i * channels + channels - 1];
+    }
+    raw.truncate(pixels);
+    raw.shrink_to_fit();
+    raw
 }
 
 /// Why `decode_guarded` returned no image.
