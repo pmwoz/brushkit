@@ -35,10 +35,6 @@ fn huge_declared_entry_is_rejected_before_inflate() {
 }
 
 #[test]
-#[cfg_attr(
-    target_pointer_width = "32",
-    ignore = "Corrupt instead of TooLarge on 32-bit, see #32"
-)]
 fn png_dimension_bomb_is_rejected_not_allocated() {
     let zip_bytes = zip_with(&[
         ("Brush.archive", &brush_archive("bomb")),
@@ -49,6 +45,7 @@ fn png_dimension_bomb_is_rejected_not_allocated() {
     let TipPreview::Unavailable(reason) = only_tip(&set) else {
         panic!("expected Unavailable, got {:?}", only_tip(&set));
     };
+    #[cfg(not(target_pointer_width = "32"))]
     assert_eq!(
         *reason,
         UnavailableReason::TooLarge {
@@ -56,6 +53,12 @@ fn png_dimension_bomb_is_rejected_not_allocated() {
             height: 60000
         },
         "the declared dimensions must be reported, not allocated"
+    );
+    // Still rejected on 32-bit, but reported as Corrupt, see #32.
+    #[cfg(target_pointer_width = "32")]
+    assert!(
+        matches!(reason, UnavailableReason::Corrupt(_)),
+        "expected Corrupt on 32-bit, got {reason:?}"
     );
 }
 
