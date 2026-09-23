@@ -9,9 +9,11 @@ use counting_alloc::{live, peak, reset_peak};
 use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba};
 
 const WIDTH: u32 = 4096;
-const SHORT: u32 = 256;
+/// Large enough that shrinking the decoded buffer to the tip stays in place.
+/// macOS moves a 3 MiB block shrunk to 1 MiB.
+const SHORT: u32 = 1024;
 const TALL: u32 = 2048;
-/// Under 0.01 byte per pixel the tall image adds, so a buffer that grows with
+/// Under 0.02 byte per pixel the tall image adds, so a buffer that grows with
 /// the height fails the check.
 const NOISE: usize = 64 * 1024;
 
@@ -35,7 +37,9 @@ fn uncounted(name: &str, bytes: &[u8], height: u32, counted_per_pixel: usize) ->
     let bitmap = decode_tip_image(bytes).expect("tip decodes");
     let growth = peak() - before;
     assert_eq!((bitmap.width, bitmap.height), (WIDTH, height), "{name}");
-    growth - counted_per_pixel * (WIDTH * height) as usize
+    growth
+        .checked_sub(counted_per_pixel * (WIDTH * height) as usize)
+        .unwrap_or_else(|| panic!("{name}: the peak is below the counted bytes: {growth}"))
 }
 
 /// The budget counts the decoded image and a progressive JPEG's coefficients.
@@ -75,8 +79,8 @@ fn uncounted_decode_buffers_do_not_grow_with_the_height() {
         let tall = uncounted(name, &fixture(TALL), TALL, counted_per_pixel);
         println!("{name}: {short} bytes uncounted at {SHORT} rows, {tall} at {TALL}");
         assert!(
-            tall <= short + NOISE,
-            "{name}: the uncounted buffers grow with the height: {short} bytes at {SHORT} rows, {tall} at {TALL}"
+            short.abs_diff(tall) <= NOISE,
+            "{name}: the uncounted buffers depend on the height: {short} bytes at {SHORT} rows, {tall} at {TALL}"
         );
     }
 }
