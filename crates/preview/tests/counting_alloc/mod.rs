@@ -32,6 +32,10 @@ unsafe impl GlobalAlloc for Counting {
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let new_ptr = unsafe { System.realloc(ptr, layout, new_size) };
         if !new_ptr.is_null() {
+            if new_ptr != ptr {
+                // A moved block is copied while the old one is still live.
+                record(CURRENT.load(Ordering::Relaxed) + new_size);
+            }
             if new_size >= layout.size() {
                 let grew = new_size - layout.size();
                 record(CURRENT.fetch_add(grew, Ordering::Relaxed) + grew);
