@@ -9,6 +9,10 @@ use common::{
 };
 use std::io::{self, Cursor, Read};
 
+/// Deep enough that a tree parse would overflow the stack on `Drop`, so the
+/// depth guard must fire before the tree is built.
+const STACK_BUSTING_DEPTH: usize = 10_000;
+
 fn only_tip(set: &PreviewSet) -> &TipPreview {
     assert_eq!(set.entries.len(), 1, "expected a single entry");
     &set.entries[0].tip
@@ -139,7 +143,7 @@ fn png_at_the_dimension_limit_decodes() {
 
 #[test]
 fn depth_bomb_brushset_plist_is_rejected_not_recursed() {
-    let zip_bytes = zip_with(&[("brushset.plist", &depth_bomb_plist_xml(10_000))]);
+    let zip_bytes = zip_with(&[("brushset.plist", &depth_bomb_plist_xml(STACK_BUSTING_DEPTH))]);
 
     let err = preview_brushset(&zip_bytes, PreviewOptions { max_cell: 8 })
         .expect_err("depth bomb must be rejected");
@@ -149,7 +153,7 @@ fn depth_bomb_brushset_plist_is_rejected_not_recursed() {
 #[test]
 fn depth_bomb_brush_archive_is_rejected_not_recursed() {
     let zip_bytes = zip_with(&[
-        ("Brush.archive", &depth_bomb_plist_xml(10_000)),
+        ("Brush.archive", &depth_bomb_plist_xml(STACK_BUSTING_DEPTH)),
         ("Shape.png", &real_4x4_png()),
     ]);
 

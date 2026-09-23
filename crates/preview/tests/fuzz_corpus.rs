@@ -14,9 +14,9 @@ use std::io::{Cursor, Read};
 use std::path::PathBuf;
 
 const OPTIONS: PreviewOptions = PreviewOptions { max_cell: 8 };
-/// Past the guard but small, so the fuzzer does not spend mutations on
-/// thousands of nesting bytes the reader never reaches.
-const SEED_DEPTH: usize = 2 * MAX_PLIST_DEPTH;
+/// The first depth the guard rejects. Deleting one `<array>` takes a mutant
+/// below the guard, so the fuzzer explores both sides of the limit.
+const SEED_DEPTH: usize = MAX_PLIST_DEPTH + 1;
 /// A 64x32 8-bit grayscale PNG written once with Python's zlib at level 9, one
 /// IDAT holding one dynamic Huffman block. Row `y` uses filter `y % 5`. The
 /// pixels vary, but every 8x8 block averages 200, so its 8x4 preview matches
