@@ -317,7 +317,7 @@ pub fn parse_abr_deferred_without_patterns(bytes: &[u8]) -> Result<DeferredPack<
 /// `pack.dropped_tip_details[*].bitmap` has correct dimensions and empty data.
 /// A tip whose pixels fail to decode fails its [`DeferredPack::decode_tip`]
 /// call, not the parse. The exception is a raw v1/v2 tip whose pixels run past
-/// the end of its entry, which fails the parse as in [`parse_abr`]. See
+/// the end of the input, which fails the parse as in [`parse_abr`]. See
 /// [`DeferredPack`].
 pub fn parse_abr_all_deferred_without_patterns(bytes: &[u8]) -> Result<DeferredPack<'_>, AbrError> {
     parse_abr_deferred_with(bytes, PatternMode::Skip, Defer::All)
@@ -649,7 +649,7 @@ fn parse_legacy<'a>(
         let pixel_end = match compression {
             0 => {
                 let end = pixel_start + expected as u64;
-                if end > entry_end {
+                if end > input.len() as u64 {
                     return Err(AbrError::Decompression("truncated raw data".into()));
                 }
                 end
@@ -660,7 +660,10 @@ fn parse_legacy<'a>(
                 continue;
             }
         };
-        cursor.set_position(entry_end);
+        // A raw entry may declare more or fewer bytes than its pixels. GIMP
+        // ignores the declared length of a sampled entry, so a short one still
+        // reads its pixels and the next entry starts after them.
+        cursor.set_position(entry_end.max(pixel_end));
         let pixels = &input[pixel_start as usize..pixel_end as usize];
 
         let (pixel_data, deferred) = if !defer {
@@ -2860,7 +2863,7 @@ mod tests {
     }
 
     fn v2_stream_with_depth(depth: u16) -> Vec<u8> {
-        legacy_stream(2, &[legacy_entry(2, 8, 8, depth, 0, &[0u8; 64], None)])
+        legacy_stream(2, &[legacy_entry(2, 8, 8, depth, 0, &[0u8; 64], Some(64))])
     }
 
     #[test]
@@ -3046,28 +3049,33 @@ mod tests {
     }
 
     #[test]
-    fn raw_legacy_entry_ends_at_its_declared_length() {
+    fn raw_legacy_entry_ends_after_its_declared_length_or_its_pixels() {
         for version in [1, 2] {
             let pixels = tip_rows(3, 2, 0x70).concat();
-            let padded_len = legacy_entry(version, 3, 2, 8, 0, &pixels, None).len() as u32 - 6 + 5;
-            let d = legacy_stream(
-                version,
-                &[
-                    [
-                        legacy_entry(version, 3, 2, 8, 0, &pixels, Some(padded_len)),
-                        vec![0xEE; 5],
-                    ]
-                    .concat(),
-                    legacy_entry(version, 1, 1, 8, 0, &[0x42], None),
-                ],
-            );
-            let pack = parse_abr(&d).unwrap();
-            let tips: Vec<_> = pack
-                .brushes
-                .iter()
-                .map(|b| (b.tip.width, b.tip.height, b.tip.data.clone()))
-                .collect();
-            assert_eq!(tips, [(1, 1, vec![0x42]), (3, 2, pixels)], "v{version}");
+            let exact_len = legacy_entry(version, 3, 2, 8, 0, &pixels, None).len() as u32 - 6;
+            let padded = [
+                legacy_entry(version, 3, 2, 8, 0, &pixels, Some(exact_len + 5)),
+                vec![0xEE; 5],
+            ]
+            .concat();
+            let short = legacy_entry(version, 3, 2, 8, 0, &pixels, Some(exact_len - 6));
+            for (case, raw_entry) in [("padded", padded), ("short", short)] {
+                let d = legacy_stream(
+                    version,
+                    &[raw_entry, legacy_entry(version, 1, 1, 8, 0, &[0x42], None)],
+                );
+                let pack = parse_abr(&d).unwrap();
+                let tips: Vec<_> = pack
+                    .brushes
+                    .iter()
+                    .map(|b| (b.tip.width, b.tip.height, b.tip.data.clone()))
+                    .collect();
+                assert_eq!(
+                    tips,
+                    [(1, 1, vec![0x42]), (3, 2, pixels.clone())],
+                    "v{version} {case}"
+                );
+            }
         }
     }
 
@@ -3088,22 +3096,21 @@ mod tests {
     }
 
     #[test]
-    fn raw_legacy_pixels_past_the_entry_are_rejected() {
-        // The entry length covers the header only. With `[1, 2, 3]` the pixels
-        // also run past the input, with `[1, 2, 3, 4]` they are all present.
+    fn all_deferred_parse_rejects_raw_legacy_pixels_past_the_input() {
+        // The entry length covers the header, so only the pixel read overruns.
         let header_len = legacy_entry(2, 2, 2, 8, 0, &[], None).len() as u32 - 6;
-        for pixels in [&[1, 2, 3][..], &[1, 2, 3, 4]] {
-            let d = legacy_stream(2, &[legacy_entry(2, 2, 2, 8, 0, pixels, Some(header_len))]);
-            for result in [
-                parse_abr(&d).map(|_| ()),
-                parse_abr_all_deferred_without_patterns(&d).map(|_| ()),
-            ] {
-                assert!(
-                    matches!(&result, Err(AbrError::Decompression(msg)) if msg == "truncated raw data"),
-                    "{} pixel bytes: got {result:?}",
-                    pixels.len()
-                );
-            }
+        let d = legacy_stream(
+            2,
+            &[legacy_entry(2, 2, 2, 8, 0, &[1, 2, 3], Some(header_len))],
+        );
+        for result in [
+            parse_abr(&d).map(|_| ()),
+            parse_abr_all_deferred_without_patterns(&d).map(|_| ()),
+        ] {
+            assert!(
+                matches!(&result, Err(AbrError::Decompression(msg)) if msg == "truncated raw data"),
+                "got {result:?}"
+            );
         }
     }
 
