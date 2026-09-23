@@ -7,10 +7,12 @@ use brushkit_preview::{
 use common::{
     brush_archive, brushset_plist, depth_bomb_plist_xml, dimension_bomb_png, gray_png, zip_with,
 };
-use std::io::Cursor;
+use std::collections::BTreeSet;
+use std::io::{Cursor, Read};
 use std::path::PathBuf;
 
 const OPTIONS: PreviewOptions = PreviewOptions { max_cell: 8 };
+const FILTERED_SHAPE: &[u8] = include_bytes!("fixtures/filtered_shape.png");
 const ABR_SEEDS: [&str; 9] = [
     "patt_long_gray",
     "patt_oversized_channel",
@@ -105,6 +107,13 @@ fn generated_seeds() -> Vec<(&'static str, &'static str, Vec<u8>)> {
                 ("Shape.png", shape.clone()),
             ],
         ),
+        (
+            "filtered_shape",
+            vec![
+                ("Brush.archive", archive_a.clone()),
+                ("Shape.png", FILTERED_SHAPE.to_vec()),
+            ],
+        ),
     ] {
         let entries: Vec<_> = entries
             .iter()
@@ -172,6 +181,7 @@ fn valid_seeds_decode_names_order_and_downsampled_tips() {
     for (target, name, expected_set_name, expected_names) in [
         ("preview_brush", "root_brush", None, vec!["A"]),
         ("preview_brush", "root_brush_deflated", None, vec!["A"]),
+        ("preview_brush", "filtered_shape", None, vec!["A"]),
         (
             "preview_brushset",
             "ordered_set",
@@ -222,7 +232,7 @@ fn valid_seeds_decode_names_order_and_downsampled_tips() {
 
 /// `root_brush_deflated` is a committed file, not generated, so a deflate
 /// backend change does not move it. Every generated seed is stored, so this is
-/// the one seed that takes the reader through inflate.
+/// the one seed that takes the zip reader through inflate.
 #[test]
 fn deflated_seed_stays_deflated() {
     let bytes = std::fs::read(corpus("preview_brush").join("root_brush_deflated")).unwrap();
@@ -236,6 +246,33 @@ fn deflated_seed_stays_deflated() {
             entry.name()
         );
     }
+}
+
+/// `filtered_shape.png` is a committed file, not encoded at test time, so a png
+/// encoder change does not move it. It is the one seed whose Shape.png takes
+/// the decoder through a Huffman-coded IDAT and every row filter.
+#[test]
+fn filtered_shape_stays_compressed_and_filtered() {
+    let mut chunks = &FILTERED_SHAPE[8..];
+    let mut idat = Vec::new();
+    while let [a, b, c, d, rest @ ..] = chunks {
+        let len = u32::from_be_bytes([*a, *b, *c, *d]) as usize;
+        if &rest[..4] == b"IDAT" {
+            idat.extend_from_slice(&rest[4..4 + len]);
+        }
+        chunks = &rest[len + 8..];
+    }
+    assert_eq!(
+        (idat[2] >> 1) & 3,
+        2,
+        "first DEFLATE block is dynamic Huffman"
+    );
+    let mut rows = Vec::new();
+    flate2::read::ZlibDecoder::new(idat.as_slice())
+        .read_to_end(&mut rows)
+        .unwrap();
+    let filters: BTreeSet<u8> = rows.iter().step_by(65).copied().collect();
+    assert_eq!(filters, BTreeSet::from([0, 1, 2, 3, 4]));
 }
 
 #[test]
