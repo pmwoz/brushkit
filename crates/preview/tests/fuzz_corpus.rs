@@ -12,6 +12,10 @@ use std::io::{Cursor, Read};
 use std::path::PathBuf;
 
 const OPTIONS: PreviewOptions = PreviewOptions { max_cell: 8 };
+/// A 64x32 8-bit grayscale PNG written once with Python's zlib at level 9, one
+/// IDAT holding one dynamic Huffman block. Row `y` uses filter `y % 5`. The
+/// pixels vary, but every 8x8 block averages 200, so its 8x4 preview matches
+/// the other valid seeds.
 const FILTERED_SHAPE: &[u8] = include_bytes!("fixtures/filtered_shape.png");
 const ABR_SEEDS: [&str; 9] = [
     "patt_long_gray",
@@ -248,29 +252,31 @@ fn deflated_seed_stays_deflated() {
     }
 }
 
-/// `filtered_shape.png` is a committed file, not encoded at test time, so a png
-/// encoder change does not move it. It is the one seed whose Shape.png takes
+/// `filtered_shape.png` is a committed file, not encoded at test time, so a
+/// compressor change does not move it. It is the one seed whose Shape.png takes
 /// the decoder through a Huffman-coded IDAT and every row filter.
 #[test]
 fn filtered_shape_stays_compressed_and_filtered() {
-    let mut chunks = &FILTERED_SHAPE[8..];
-    let mut idat = Vec::new();
-    while let [a, b, c, d, rest @ ..] = chunks {
-        let len = u32::from_be_bytes([*a, *b, *c, *d]) as usize;
-        if &rest[..4] == b"IDAT" {
-            idat.extend_from_slice(&rest[4..4 + len]);
-        }
-        chunks = &rest[len + 8..];
-    }
+    let at = FILTERED_SHAPE
+        .windows(4)
+        .position(|b| b == b"IDAT")
+        .unwrap();
+    let len = u32::from_be_bytes(FILTERED_SHAPE[at - 4..at].try_into().unwrap()) as usize;
+    let idat = &FILTERED_SHAPE[at + 4..at + 4 + len];
     assert_eq!(
         (idat[2] >> 1) & 3,
         2,
         "first DEFLATE block is dynamic Huffman"
     );
     let mut rows = Vec::new();
-    flate2::read::ZlibDecoder::new(idat.as_slice())
+    flate2::read::ZlibDecoder::new(idat)
         .read_to_end(&mut rows)
         .unwrap();
+    assert_eq!(
+        rows.len(),
+        32 * 65,
+        "32 rows of a filter byte and 64 pixels"
+    );
     let filters: BTreeSet<u8> = rows.iter().step_by(65).copied().collect();
     assert_eq!(filters, BTreeSet::from([0, 1, 2, 3, 4]));
 }
