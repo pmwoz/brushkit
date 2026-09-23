@@ -7,6 +7,7 @@ use brushkit_preview::{
 use common::{
     brush_archive, brushset_plist, depth_bomb_plist_xml, dimension_bomb_png, gray_png, zip_with,
 };
+use std::io::Cursor;
 use std::path::PathBuf;
 
 const OPTIONS: PreviewOptions = PreviewOptions { max_cell: 8 };
@@ -170,6 +171,7 @@ fn committed_seeds_match_generated_bytes() {
 fn valid_seeds_decode_names_order_and_downsampled_tips() {
     for (target, name, expected_set_name, expected_names) in [
         ("preview_brush", "root_brush", None, vec!["A"]),
+        ("preview_brush", "root_brush_deflated", None, vec!["A"]),
         (
             "preview_brushset",
             "ordered_set",
@@ -216,6 +218,24 @@ fn valid_seeds_decode_names_order_and_downsampled_tips() {
     };
     assert_eq!((tip.width, tip.height), (8, 4));
     assert_eq!(tip.data, vec![200; 32]);
+}
+
+/// `root_brush_deflated` is a committed file, not generated, so a deflate
+/// backend change does not move it. Every generated seed is stored, so this is
+/// the one seed that takes the reader through inflate.
+#[test]
+fn deflated_seed_stays_deflated() {
+    let bytes = std::fs::read(corpus("preview_brush").join("root_brush_deflated")).unwrap();
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).expect("seed is a zip");
+    for index in 0..zip.len() {
+        let entry = zip.by_index(index).unwrap();
+        assert_eq!(
+            entry.compression(),
+            zip::CompressionMethod::Deflated,
+            "{}",
+            entry.name()
+        );
+    }
 }
 
 #[test]
