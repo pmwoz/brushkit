@@ -631,7 +631,7 @@ fn parse_legacy<'a>(
             .filter(|&n| n <= MAX_TIP_DECODED_BYTES)
             .ok_or_else(|| entry_err(cursor.position(), "bitmap byte size out of range"))?;
 
-        if entry_end as usize > cursor.get_ref().len() {
+        if entry_end > cursor.get_ref().len() as u64 {
             return Err(entry_err(
                 cursor.position(),
                 "samp entry length exceeds buffer",
@@ -660,7 +660,10 @@ fn parse_legacy<'a>(
                 continue;
             }
         };
-        cursor.set_position(pixel_end);
+        // A raw entry may declare more or fewer bytes than its pixels. GIMP
+        // ignores the declared length of a sampled entry, so a short one still
+        // reads its pixels and the next entry starts after them.
+        cursor.set_position(entry_end.max(pixel_end));
         let pixels = &input[pixel_start as usize..pixel_end as usize];
 
         let (pixel_data, deferred) = if !defer {
@@ -2905,21 +2908,24 @@ mod tests {
             .collect()
     }
 
-    /// Three RLE tips and one raw tip. The raw tip's declared entry length
-    /// stops short of its pixels, which the parser reads past.
+    /// Three RLE tips and one raw tip whose entry is padded past its pixels.
     fn legacy_multi_tip_stream(version: u16) -> Vec<u8> {
         let rle_entry = |w: usize, h: usize, seed: u8| {
             let packed = rle_literal_rows(&tip_rows(w, h, seed));
             legacy_entry(version, w as i32, h as i32, 8, 1, &packed, None)
         };
         let raw_pixels: Vec<u8> = tip_rows(3, 2, 0x70).concat();
-        let raw_header_len = legacy_entry(version, 3, 2, 8, 0, &[], None).len() as u32 - 6;
+        let padded_len = legacy_entry(version, 3, 2, 8, 0, &raw_pixels, None).len() as u32 - 6 + 4;
         legacy_stream(
             version,
             &[
                 rle_entry(3, 2, 0x10),
                 rle_entry(5, 4, 0x30),
-                legacy_entry(version, 3, 2, 8, 0, &raw_pixels, Some(raw_header_len)),
+                [
+                    legacy_entry(version, 3, 2, 8, 0, &raw_pixels, Some(padded_len)),
+                    vec![0xEE; 4],
+                ]
+                .concat(),
                 rle_entry(1, 1, 0x90),
             ],
         )
@@ -3040,6 +3046,53 @@ mod tests {
         let tip = all.decode_tip(0).unwrap();
         assert_eq!((tip.width, tip.height, tip.depth), (0, 3, 8));
         assert!(tip.data.is_empty());
+    }
+
+    #[test]
+    fn raw_legacy_entry_ends_after_its_declared_length_or_its_pixels() {
+        for version in [1, 2] {
+            let pixels = tip_rows(3, 2, 0x70).concat();
+            let exact_len = legacy_entry(version, 3, 2, 8, 0, &pixels, None).len() as u32 - 6;
+            let padded = [
+                legacy_entry(version, 3, 2, 8, 0, &pixels, Some(exact_len + 5)),
+                vec![0xEE; 5],
+            ]
+            .concat();
+            let short = legacy_entry(version, 3, 2, 8, 0, &pixels, Some(exact_len - 6));
+            for (case, raw_entry) in [("padded", padded), ("short", short)] {
+                let d = legacy_stream(
+                    version,
+                    &[raw_entry, legacy_entry(version, 1, 1, 8, 0, &[0x42], None)],
+                );
+                let pack = parse_abr(&d).unwrap();
+                let tips: Vec<_> = pack
+                    .brushes
+                    .iter()
+                    .map(|b| (b.tip.width, b.tip.height, b.tip.data.clone()))
+                    .collect();
+                assert_eq!(
+                    tips,
+                    [(1, 1, vec![0x42]), (3, 2, pixels.clone())],
+                    "v{version} {case}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_entry_length_past_usize_is_rejected() {
+        // On 32-bit targets this `entry_end` truncates to a small `usize`.
+        for compression in [0, 1] {
+            let d = legacy_stream(
+                1,
+                &[legacy_entry(1, 1, 1, 8, compression, &[], Some(u32::MAX))],
+            );
+            assert!(parse_abr(&d).is_err(), "compression {compression}");
+            assert!(
+                parse_abr_all_deferred_without_patterns(&d).is_err(),
+                "compression {compression}"
+            );
+        }
     }
 
     #[test]
