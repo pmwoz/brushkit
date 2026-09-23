@@ -98,9 +98,11 @@ pub fn decode_tip_image(bytes: &[u8]) -> Result<GrayscaleBitmap, TipImageError> 
     let (width, height) = img.dimensions();
 
     let data: Vec<u8> = if img.color().has_alpha() {
-        img.to_rgba8().pixels().map(|p| p.0[3]).collect()
+        img.into_luma_alpha8().pixels().map(|p| p.0[1]).collect()
     } else {
-        img.to_luma8().pixels().map(|p| 255 - p.0[0]).collect()
+        let mut data = img.into_luma8().into_raw();
+        data.iter_mut().for_each(|v| *v = 255 - *v);
+        data
     };
 
     Ok(GrayscaleBitmap {

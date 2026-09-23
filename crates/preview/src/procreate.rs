@@ -104,7 +104,7 @@ pub fn decode_tip_png(bytes: &[u8]) -> Result<GrayscaleBitmap, ShapePngError> {
                 ShapePngError::Corrupt(format!("failed to decode Shape.png: {e}"))
             }
         })?
-        .to_luma8();
+        .into_luma8();
     Ok(GrayscaleBitmap {
         width: luma.width(),
         height: luma.height(),
