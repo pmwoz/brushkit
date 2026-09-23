@@ -21,3 +21,5 @@ plist = { version = "~1.8", features = ["enable_unstable_features_that_may_break
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 ab_glyph = "0.2"
 png = "0.18"
+# Reads a JPEG frame header the way `image` 0.25 does. Same major as its dependency.
+zune-jpeg = "0.5"

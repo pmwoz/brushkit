@@ -57,8 +57,8 @@ const MAX_IMPORT_DECODED_BYTES: u64 = 512 * 1024 * 1024;
 #[derive(Debug)]
 pub enum TipImageError {
     Decode(String),
-    /// A side over `MAX_IMPORT_DIMENSION`, or a decoded buffer, in the image's
-    /// own pixel format, over 512 MiB.
+    /// A side over `MAX_IMPORT_DIMENSION`, or a decode over 512 MiB: the image
+    /// in its own pixel format, plus the DCT coefficients of a progressive JPEG.
     TooLarge {
         width: u32,
         height: u32,
@@ -71,7 +71,7 @@ impl std::fmt::Display for TipImageError {
             TipImageError::Decode(msg) => f.write_str(msg),
             TipImageError::TooLarge { width, height } => write!(
                 f,
-                "image is {width}x{height}px; a brush tip must be at most {MAX_IMPORT_DIMENSION}px per side and {} MiB decoded in its own pixel format",
+                "image is {width}x{height}px; a brush tip must be at most {MAX_IMPORT_DIMENSION}px per side and {} MiB to decode",
                 MAX_IMPORT_DECODED_BYTES / (1024 * 1024)
             ),
         }
@@ -243,7 +243,7 @@ fn convert_chunk(format: PixelFormat, alpha: bool, chunk: &[u8]) -> Vec<u8> {
 
 /// Why `decode_guarded` returned no image.
 pub(crate) enum GuardedDecodeError {
-    /// A side over `max_side`, or a decoded buffer over `max_bytes`.
+    /// A side over `max_side`, or a decode over `max_bytes`.
     TooLarge {
         width: u32,
         height: u32,
@@ -251,9 +251,10 @@ pub(crate) enum GuardedDecodeError {
     Decode(image::ImageError),
 }
 
-/// Decode an image of at most `max_side` px per side and `max_bytes` decoded
-/// in its own pixel format. Oversize is decided from the header before any
-/// pixels are decoded.
+/// Decode an image of at most `max_side` px per side and `max_bytes` decoded:
+/// the image in its own pixel format, plus the DCT coefficients of a
+/// progressive JPEG. Oversize is decided from the header before any pixels are
+/// decoded.
 pub(crate) fn decode_guarded(
     bytes: &[u8],
     max_side: u32,
@@ -288,7 +289,12 @@ pub(crate) fn decode_guarded(
     let mut decoder = reader.into_decoder().map_err(GuardedDecodeError::Decode)?;
     // What `ImageReader::decode` does, with the budget failure reported as
     // `TooLarge`: the output buffer is reserved and the decoder keeps the rest.
-    if limits.reserve(decoder.total_bytes()).is_err() {
+    // `image` does not pass the rest to zune-jpeg, so the coefficients of a
+    // progressive JPEG are reserved here too.
+    let decode_bytes = decoder
+        .total_bytes()
+        .saturating_add(progressive_jpeg_coefficient_bytes(bytes));
+    if limits.reserve(decode_bytes).is_err() {
         let (width, height) = decoder.dimensions();
         return Err(GuardedDecodeError::TooLarge { width, height });
     }
@@ -333,6 +339,34 @@ pub(crate) fn header_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
         .ok()?
         .into_dimensions()
         .ok()
+}
+
+/// The DCT coefficients zune-jpeg holds for a progressive JPEG until its last
+/// scan: 2 bytes per sample of every component. zune-jpeg does not report the
+/// sampling factors, so each side is padded to the largest MCU, 8 px times the
+/// largest factor, 4. 0 for any other image.
+fn progressive_jpeg_coefficient_bytes(bytes: &[u8]) -> u64 {
+    const LARGEST_MCU_SIDE: u64 = 8 * 4;
+    // The options `image` decodes with.
+    let options = zune_jpeg::zune_core::options::DecoderOptions::default()
+        .set_strict_mode(false)
+        .set_max_width(usize::MAX)
+        .set_max_height(usize::MAX);
+    let mut decoder = zune_jpeg::JpegDecoder::new_with_options(
+        zune_jpeg::zune_core::bytestream::ZCursor::new(bytes),
+        options,
+    );
+    if decoder.decode_headers().is_err() {
+        return 0;
+    }
+    let Some(info) = decoder.info() else {
+        return 0;
+    };
+    if !info.sof.is_progressive() {
+        return 0;
+    }
+    let padded = |side: u16| u64::from(side).div_ceil(LARGEST_MCU_SIDE) * LARGEST_MCU_SIDE;
+    2 * u64::from(info.components) * padded(info.width) * padded(info.height)
 }
 
 /// A PNG's IHDR, parsed without allocating pixels. `None` for other formats

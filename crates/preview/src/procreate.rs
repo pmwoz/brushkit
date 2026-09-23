@@ -67,8 +67,9 @@ pub fn parse_plist_guarded(bytes: &[u8], label: &str) -> Result<plist::Value, St
 /// Why a `Shape.png` did not decode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShapePngError {
-    /// A side over `MAX_PNG_DIMENSION`, or a decoded buffer, in the image's
-    /// own pixel format, over `MAX_ENTRY_BYTES`.
+    /// A side over `MAX_PNG_DIMENSION`, or a decode over `MAX_ENTRY_BYTES`:
+    /// the image in its own pixel format, plus the DCT coefficients of a
+    /// progressive JPEG.
     TooLarge {
         width: u32,
         height: u32,
@@ -81,7 +82,7 @@ impl std::fmt::Display for ShapePngError {
         match self {
             ShapePngError::TooLarge { width, height } => write!(
                 f,
-                "Shape.png is {width}x{height}px; a brush tip must be at most {MAX_PNG_DIMENSION}px per side and {} MiB decoded in its own pixel format",
+                "Shape.png is {width}x{height}px; a brush tip must be at most {MAX_PNG_DIMENSION}px per side and {} MiB to decode",
                 MAX_ENTRY_BYTES / (1024 * 1024)
             ),
             ShapePngError::Corrupt(msg) => f.write_str(msg),
