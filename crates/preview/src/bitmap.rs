@@ -1,9 +1,9 @@
 use brushkit_abr::TipBitmap;
 use image::{ColorType, ImageBuffer, ImageDecoder, Rgba, RgbaImage};
 use std::io::Cursor;
-use zune_jpeg::zune_core::bytestream::{ZByteReaderTrait, ZCursor};
-use zune_jpeg::zune_core::colorspace::ColorSpace;
-use zune_jpeg::zune_core::options::DecoderOptions;
+use zune_core::bytestream::{ZByteIoError, ZByteReaderTrait, ZCursor, ZSeekFrom};
+use zune_core::colorspace::ColorSpace;
+use zune_core::options::DecoderOptions;
 
 #[derive(Debug, Clone)]
 pub struct GrayscaleBitmap {
@@ -69,10 +69,10 @@ pub enum TipImageError {
     /// counted: up to a few hundred KiB at any width, more for wide images,
     /// whose row buffers grow with the width. Neither is a PNG's eXIf chunk of
     /// at most 64 KiB, which the decoder holds twice, up to 128 KiB. Nor is
-    /// zune-jpeg's copy of a JPEG's metadata segments. It adds a list entry
-    /// per segment and holds extended XMP twice while it joins the parts, so
-    /// it reaches up to twice the input size for large segments and about
-    /// five times for many small ones.
+    /// zune-jpeg's copy of a JPEG's metadata segments other than extended
+    /// XMP, which it never sees. It adds a list entry per segment, so it
+    /// reaches about the input size for large segments and about five times
+    /// for many small ones.
     TooLarge { width: u32, height: u32 },
 }
 
@@ -508,13 +508,77 @@ fn decode_jpeg(
 fn jpeg_decoder<R: ZByteReaderTrait>(
     reader: R,
     output_color: ColorSpace,
-) -> zune_jpeg::JpegDecoder<R> {
+) -> zune_jpeg::JpegDecoder<HideExtendedXmp<R>> {
     let options = DecoderOptions::default()
         .jpeg_set_out_colorspace(output_color)
         .set_strict_mode(false)
         .set_max_width(usize::MAX)
         .set_max_height(usize::MAX);
-    zune_jpeg::JpegDecoder::new_with_options(reader, options)
+    zune_jpeg::JpegDecoder::new_with_options(HideExtendedXmp(reader), options)
+}
+
+/// `reader` with every extended XMP part hidden from zune-jpeg, which the tip
+/// never reads. Before the first scan, zune-jpeg sorts and walks the parts it
+/// holds after every marker, so parts that never complete make the header
+/// parse quadratic. zune-jpeg recognizes a part by peeking its 35-byte
+/// namespace, so this reader changes that peek and zune-jpeg skips the part
+/// as an unknown APP1 segment. A part too short for its 40-byte header stays
+/// visible, so zune-jpeg rejects it as `image` does.
+struct HideExtendedXmp<R>(R);
+
+const EXTENDED_XMP_NAMESPACE: &[u8; 35] = b"http://ns.adobe.com/xmp/extension/\0";
+
+impl<R: ZByteReaderTrait> HideExtendedXmp<R> {
+    /// Whether the APP1 segment whose length field ends at the cursor holds
+    /// the namespace and a 40-byte part header.
+    fn holds_part_header(&mut self) -> Result<bool, ZByteIoError> {
+        self.0.z_seek(ZSeekFrom::Current(-2))?;
+        let mut length = [0; 2];
+        self.0.read_exact_bytes(&mut length)?;
+        Ok(usize::from(u16::from_be_bytes(length)) >= 2 + EXTENDED_XMP_NAMESPACE.len() + 40)
+    }
+}
+
+impl<R: ZByteReaderTrait> ZByteReaderTrait for HideExtendedXmp<R> {
+    fn read_byte_no_error(&mut self) -> u8 {
+        self.0.read_byte_no_error()
+    }
+
+    fn read_exact_bytes(&mut self, buf: &mut [u8]) -> Result<(), ZByteIoError> {
+        self.0.read_exact_bytes(buf)
+    }
+
+    fn read_bytes(&mut self, buf: &mut [u8]) -> Result<usize, ZByteIoError> {
+        self.0.read_bytes(buf)
+    }
+
+    fn peek_bytes(&mut self, buf: &mut [u8]) -> Result<usize, ZByteIoError> {
+        self.0.peek_bytes(buf)
+    }
+
+    fn peek_exact_bytes(&mut self, buf: &mut [u8]) -> Result<(), ZByteIoError> {
+        self.0.peek_exact_bytes(buf)?;
+        if buf == EXTENDED_XMP_NAMESPACE && self.holds_part_header()? {
+            buf[0] = 0;
+        }
+        Ok(())
+    }
+
+    fn z_seek(&mut self, from: ZSeekFrom) -> Result<u64, ZByteIoError> {
+        self.0.z_seek(from)
+    }
+
+    fn is_eof(&mut self) -> Result<bool, ZByteIoError> {
+        self.0.is_eof()
+    }
+
+    fn z_position(&mut self) -> Result<u64, ZByteIoError> {
+        self.0.z_position()
+    }
+
+    fn read_remaining(&mut self, sink: &mut Vec<u8>) -> Result<usize, ZByteIoError> {
+        self.0.read_remaining(sink)
+    }
 }
 
 /// What `decode_jpeg` needs from a JPEG's headers.
@@ -924,6 +988,10 @@ mod tip_image_tests {
             let i = y * 37 + x;
             image::Rgb([0, 1, 2].map(|c| ((i * 3 + c).wrapping_mul(0x9E37_79B9) >> 24) as u8))
         }));
+        let mut gray = std::io::Cursor::new(Vec::new());
+        base.to_luma8()
+            .write_to(&mut gray, image::ImageFormat::Jpeg)
+            .unwrap();
         for image in [base.to_luma8().into(), base] {
             let mut jpeg = std::io::Cursor::new(Vec::new());
             image.write_to(&mut jpeg, image::ImageFormat::Jpeg).unwrap();
@@ -942,6 +1010,34 @@ mod tip_image_tests {
             panic!("a truncated JPEG must not decode");
         };
         assert_eq!(err.to_string(), expected.to_string());
+
+        // An extended XMP part holds a 40-byte header after its namespace,
+        // and zune-jpeg rejects a part with a shorter one.
+        for header in [40, 39] {
+            let mut part = vec![0xFF, 0xE1];
+            let length = u16::try_from(2 + EXTENDED_XMP_NAMESPACE.len() + header).unwrap();
+            part.extend_from_slice(&length.to_be_bytes());
+            part.extend_from_slice(EXTENDED_XMP_NAMESPACE);
+            part.resize(part.len() + header, 0);
+            let mut jpeg = gray.get_ref().clone();
+            jpeg.splice(2..2, part);
+            match (
+                image::load_from_memory(&jpeg),
+                decode_guarded(&jpeg, 64, u64::MAX),
+            ) {
+                (Ok(expected), Ok(decoded)) if header == 40 => {
+                    assert_eq!(decoded.bytes, expected.as_bytes());
+                }
+                (Err(expected), Err(GuardedDecodeError::Decode(err))) if header == 39 => {
+                    assert_eq!(err.to_string(), expected.to_string());
+                }
+                (expected, decoded) => panic!(
+                    "a {header}-byte part header: image {:?}, decode_guarded {:?}",
+                    expected.is_ok(),
+                    decoded.is_ok()
+                ),
+            }
+        }
     }
 
     /// `decode_guarded` decodes PNG with `png` directly, so it must return the
