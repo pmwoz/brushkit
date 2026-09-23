@@ -17,7 +17,8 @@ ab_glyph = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Integration tests are their own crates, so the zip and plist builders they
-# use to construct inputs need their own dependency edges.
+# use to construct inputs, and flate2 for inspecting a PNG's IDAT, need their
+# own dependency edges.
 plist.workspace = true
 zip.workspace = true
 flate2.workspace = true
