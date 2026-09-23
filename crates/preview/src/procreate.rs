@@ -86,7 +86,7 @@ impl std::error::Error for ShapePngError {}
 
 /// Decode a Procreate `Shape.png` into a grayscale tip. White is stamp
 /// coverage, so the luminance is taken as-is. Oversize is decided from the
-/// header, before any decoder is built.
+/// header, before any pixels are decoded.
 pub fn decode_tip_png(bytes: &[u8]) -> Result<GrayscaleBitmap, ShapePngError> {
     if let Some((width, height)) = header_dimensions(bytes) {
         if width > MAX_PNG_DIMENSION || height > MAX_PNG_DIMENSION {

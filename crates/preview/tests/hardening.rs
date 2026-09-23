@@ -3,7 +3,9 @@ mod common;
 use brushkit_preview::procreate::MAX_PNG_DIMENSION;
 use brushkit_preview::{preview_brush, preview_brushset, PreviewOptions, TipPreview};
 use brushkit_preview::{PreviewSet, UnavailableReason};
-use common::{brush_archive, depth_bomb_plist_xml, dimension_bomb_png, real_4x4_png, zip_with};
+use common::{
+    brush_archive, depth_bomb_plist_xml, dimension_bomb_png, gray_png, real_4x4_png, zip_with,
+};
 use std::io::{self, Cursor, Read};
 
 fn only_tip(set: &PreviewSet) -> &TipPreview {
@@ -57,6 +59,23 @@ fn png_dimension_bomb_is_rejected_not_allocated() {
             *reason,
             UnavailableReason::TooLarge { width, height },
             "the declared dimensions must be reported, not allocated"
+        );
+    }
+}
+
+#[test]
+fn png_at_the_dimension_limit_decodes() {
+    for (width, height) in [(MAX_PNG_DIMENSION, 1), (1, MAX_PNG_DIMENSION)] {
+        let zip_bytes = zip_with(&[
+            ("Brush.archive", &brush_archive("edge")),
+            ("Shape.png", &gray_png(width, height, 255)),
+        ]);
+
+        let set = preview_brush(&zip_bytes, PreviewOptions { max_cell: 8 }).expect("brush reads");
+        assert!(
+            matches!(only_tip(&set), TipPreview::Available(_)),
+            "a {width}x{height} tip is within the limit, got {:?}",
+            only_tip(&set)
         );
     }
 }
