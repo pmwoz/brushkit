@@ -261,6 +261,18 @@ fn baseline_jpeg_with_a_partial_first_scan_counts_its_coefficients() {
 }
 
 #[test]
+fn frame_header_after_the_first_scan_is_not_counted() {
+    // A gray JPEG of 256 MiB followed by a color JPEG of the same size, as an
+    // MPF secondary image is stored. zune-jpeg parses one frame header, before
+    // the first scan, so the color frame's 1.5 GiB of coefficients never exist.
+    let side = MAX_IMPORT_DIMENSION;
+    let mut jpeg = baseline_jpeg(side, side, 1);
+    jpeg.extend_from_slice(&baseline_jpeg(side, side, 3));
+    let tip = decode_tip_image(&jpeg).expect("the gray JPEG fits the budget");
+    assert_eq!((tip.width, tip.height), (side, side));
+}
+
+#[test]
 fn progressive_420_jpeg_is_held_to_the_budget_by_its_real_coefficients() {
     // 4:2:0 codes six blocks per 16x16 MCU, so its coefficients take 3 bytes
     // per pixel next to 3 bytes of RGB. 512 MiB is 5461.3 such rows of 16384.
