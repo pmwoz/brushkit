@@ -7,6 +7,7 @@ use brushkit_preview::procreate::decode_tip_png;
 use brushkit_preview::{decode_tip_image, GrayscaleBitmap};
 use common::progressive_jpeg;
 use counting_alloc::{live, peak, reset_peak};
+use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, ImageBuffer, ImageFormat, Luma, LumaA, Rgb, Rgba};
 
 /// Large enough that shrinking the decoded buffer to the tip stays in place.
@@ -24,6 +25,23 @@ fn encode(image: DynamicImage, format: ImageFormat) -> Vec<u8> {
 
 fn png(image: DynamicImage) -> Vec<u8> {
     encode(image, ImageFormat::Png)
+}
+
+/// Gray noise at quality 100, so the encoded bytes are most of the decoded
+/// size and a copy of them shows in the peak.
+fn noise_jpeg() -> Vec<u8> {
+    let mut state = 0x2545_F491u32;
+    let noise = ImageBuffer::from_fn(SIDE, SIDE, |_, _| {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        Luma([state as u8])
+    });
+    let mut bytes = Vec::new();
+    JpegEncoder::new_with_quality(&mut bytes, 100)
+        .encode_image(&noise)
+        .expect("encode fixture");
+    bytes
 }
 
 /// The peak growth of `decode`, after checking that the tip it returns holds
@@ -71,10 +89,11 @@ fn tip_decoders_hold_no_copy_of_the_decoded_image() {
         ImageBuffer::from_pixel(SIDE, SIDE, Rgb([0x10u8, 0x20, 0x30])).into(),
         ImageFormat::Jpeg,
     );
+    let gray_noise_jpeg = noise_jpeg();
     let gray_progressive_jpeg = progressive_jpeg(SIDE, SIDE, 1, 0x11);
     let rgb_progressive_jpeg = progressive_jpeg(SIDE, SIDE, 3, 0x11);
 
-    let cases: [(&str, Decode, &[u8], usize); 19] = [
+    let cases: [(&str, Decode, &[u8], usize); 20] = [
         ("decode_tip_image gray", tip_image, &gray, 1),
         ("decode_tip_image gray+alpha", tip_image, &gray_alpha, 2),
         ("decode_tip_image RGB", tip_image, &rgb, 3),
@@ -93,6 +112,12 @@ fn tip_decoders_hold_no_copy_of_the_decoded_image() {
             tip_image,
             &rgb_baseline_jpeg,
             3,
+        ),
+        (
+            "decode_tip_image gray noise JPEG",
+            tip_image,
+            &gray_noise_jpeg,
+            1,
         ),
         (
             "decode_tip_image gray progressive JPEG",
@@ -120,7 +145,7 @@ fn tip_decoders_hold_no_copy_of_the_decoded_image() {
         println!("{name}: {growth} bytes");
         assert!(
             growth <= bytes_per_pixel * PIXELS + DECODER_SLACK,
-            "{name} must convert inside the decoded buffer: {growth} bytes"
+            "{name} must hold only the decoded image: {growth} bytes"
         );
     }
 }

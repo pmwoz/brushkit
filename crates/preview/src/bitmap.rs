@@ -1,7 +1,10 @@
 use brushkit_abr::TipBitmap;
 use image::{ColorType, ImageBuffer, ImageDecoder, Rgba, RgbaImage};
 use std::io::Cursor;
-use zune_jpeg::SampleRatios;
+use zune_jpeg::zune_core::bytestream::ZCursor;
+use zune_jpeg::zune_core::colorspace::ColorSpace;
+use zune_jpeg::zune_core::options::DecoderOptions;
+use zune_jpeg::{ImageInfo, SampleRatios};
 
 #[derive(Debug, Clone)]
 pub struct GrayscaleBitmap {
@@ -255,12 +258,16 @@ pub(crate) enum GuardedDecodeError {
 /// Decode an image of at most `max_side` px per side and `max_bytes` decoded:
 /// the image in its own pixel format, plus the DCT coefficients of a
 /// progressive JPEG. Oversize is decided from the header before any pixels are
-/// decoded.
+/// decoded. A JPEG is decoded from `bytes`, and only its metadata segments
+/// are copied.
 pub(crate) fn decode_guarded(
     bytes: &[u8],
     max_side: u32,
     max_bytes: u64,
 ) -> Result<DecodedImage, GuardedDecodeError> {
+    if image::guess_format(bytes).ok() == Some(image::ImageFormat::Jpeg) {
+        return decode_jpeg(bytes, max_side, max_bytes);
+    }
     if let Some((width, height)) = header_dimensions(bytes) {
         if width > max_side || height > max_side {
             return Err(GuardedDecodeError::TooLarge { width, height });
@@ -290,12 +297,7 @@ pub(crate) fn decode_guarded(
     let mut decoder = reader.into_decoder().map_err(GuardedDecodeError::Decode)?;
     // What `ImageReader::decode` does, with the budget failure reported as
     // `TooLarge`: the output buffer is reserved and the decoder keeps the rest.
-    // `image` does not pass the rest to zune-jpeg, so the coefficients of a
-    // progressive JPEG are reserved here too.
-    let decode_bytes = decoder
-        .total_bytes()
-        .saturating_add(progressive_jpeg_coefficient_bytes(bytes));
-    if limits.reserve(decode_bytes).is_err() {
+    if limits.reserve(decoder.total_bytes()).is_err() {
         let (width, height) = decoder.dimensions();
         return Err(GuardedDecodeError::TooLarge { width, height });
     }
@@ -327,44 +329,116 @@ pub(crate) fn decode_guarded(
     })
 }
 
+/// `decode_guarded` for a JPEG. `image`'s JPEG decoder copies its whole input
+/// before it decodes, so zune-jpeg decodes the borrowed bytes here, with the
+/// options and output color `image` uses.
+fn decode_jpeg(
+    bytes: &[u8],
+    max_side: u32,
+    max_bytes: u64,
+) -> Result<DecodedImage, GuardedDecodeError> {
+    let JpegHeader {
+        width,
+        height,
+        input_color,
+        coefficient_bytes,
+    } = jpeg_header(bytes).map_err(jpeg_error)?;
+    if width > max_side || height > max_side {
+        return Err(GuardedDecodeError::TooLarge { width, height });
+    }
+    // `image` decodes a color space it has no pixel format for to RGB.
+    let (output_color, format) = match input_color {
+        ColorSpace::Luma => (ColorSpace::Luma, PixelFormat::L8),
+        ColorSpace::LumaA => (ColorSpace::LumaA, PixelFormat::La8),
+        ColorSpace::RGBA => (ColorSpace::RGBA, PixelFormat::Rgba8),
+        _ => (ColorSpace::RGB, PixelFormat::Rgb8),
+    };
+    let total_bytes = u64::from(width) * u64::from(height) * output_color.num_components() as u64;
+    if total_bytes.saturating_add(coefficient_bytes) > max_bytes {
+        return Err(GuardedDecodeError::TooLarge { width, height });
+    }
+    let total_bytes =
+        usize::try_from(total_bytes).map_err(|_| GuardedDecodeError::TooLarge { width, height })?;
+    let mut pixels = vec![0; total_bytes];
+    // A second decoder, because zune-jpeg picks its color conversion while it
+    // reads the headers.
+    jpeg_decoder(bytes, output_color)
+        .decode_into(&mut pixels)
+        .map_err(jpeg_error)?;
+    Ok(DecodedImage {
+        width,
+        height,
+        format,
+        bytes: pixels,
+    })
+}
+
+/// zune-jpeg over the borrowed bytes, with the options `image` decodes with.
+fn jpeg_decoder(bytes: &[u8], output_color: ColorSpace) -> zune_jpeg::JpegDecoder<ZCursor<&[u8]>> {
+    let options = DecoderOptions::default()
+        .jpeg_set_out_colorspace(output_color)
+        .set_strict_mode(false)
+        .set_max_width(usize::MAX)
+        .set_max_height(usize::MAX);
+    zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(bytes), options)
+}
+
+/// What `decode_jpeg` needs from a JPEG's headers. zune-jpeg's `ImageInfo`
+/// also holds copies of the metadata segments, so it is not kept.
+struct JpegHeader {
+    width: u32,
+    height: u32,
+    input_color: ColorSpace,
+    coefficient_bytes: u64,
+}
+
+fn jpeg_header(bytes: &[u8]) -> Result<JpegHeader, zune_jpeg::errors::DecodeErrors> {
+    let mut decoder = jpeg_decoder(bytes, ColorSpace::RGB);
+    decoder.decode_headers()?;
+    let info = decoder.info().expect("headers were decoded");
+    Ok(JpegHeader {
+        width: u32::from(info.width),
+        height: u32::from(info.height),
+        input_color: decoder.input_colorspace().expect("headers were decoded"),
+        coefficient_bytes: progressive_coefficient_bytes(&info),
+    })
+}
+
+/// The `ImageError` `image` reports for a zune-jpeg error. `image` maps two
+/// more variants, which zune-jpeg 0.5.15 never returns.
+fn jpeg_error(err: zune_jpeg::errors::DecodeErrors) -> GuardedDecodeError {
+    GuardedDecodeError::Decode(image::ImageError::Decoding(
+        image::error::DecodingError::new(image::ImageFormat::Jpeg.into(), err),
+    ))
+}
+
 /// Reads header dimensions without allocating pixels or applying decode limits.
 /// PNG goes through the `png` header alone: `image` sizes the output buffer
 /// before it reports dimensions, which fails on 32-bit targets for large ones.
+/// JPEG goes through zune-jpeg, which reads the borrowed bytes.
 pub(crate) fn header_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
-    if image::guess_format(bytes).ok()? == image::ImageFormat::Png {
-        let info = png_header(bytes)?;
-        return Some((info.width, info.height));
+    match image::guess_format(bytes).ok()? {
+        image::ImageFormat::Png => {
+            let info = png_header(bytes)?;
+            Some((info.width, info.height))
+        }
+        image::ImageFormat::Jpeg => {
+            let header = jpeg_header(bytes).ok()?;
+            Some((header.width, header.height))
+        }
+        _ => image::ImageReader::new(Cursor::new(bytes))
+            .with_guessed_format()
+            .ok()?
+            .into_dimensions()
+            .ok(),
     }
-    image::ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .ok()?
-        .into_dimensions()
-        .ok()
 }
 
 /// The DCT coefficients zune-jpeg holds for a progressive JPEG until its last
 /// scan: 2 bytes per sample, with each side padded to whole MCUs. zune-jpeg
 /// reports only the largest sampling factors, so every component is counted at
-/// full resolution, and 4:2:0 at twice its real size. 0 for any other image.
-fn progressive_jpeg_coefficient_bytes(bytes: &[u8]) -> u64 {
-    if image::guess_format(bytes).ok() != Some(image::ImageFormat::Jpeg) {
-        return 0;
-    }
-    // The options `image` decodes with.
-    let options = zune_jpeg::zune_core::options::DecoderOptions::default()
-        .set_strict_mode(false)
-        .set_max_width(usize::MAX)
-        .set_max_height(usize::MAX);
-    let mut decoder = zune_jpeg::JpegDecoder::new_with_options(
-        zune_jpeg::zune_core::bytestream::ZCursor::new(bytes),
-        options,
-    );
-    if decoder.decode_headers().is_err() {
-        return 0;
-    }
-    let Some(info) = decoder.info() else {
-        return 0;
-    };
+/// full resolution, and 4:2:0 at twice its real size. 0 for a baseline JPEG.
+fn progressive_coefficient_bytes(info: &ImageInfo) -> u64 {
     if !info.sof.is_progressive() {
         return 0;
     }
@@ -637,6 +711,34 @@ mod tip_image_tests {
                 );
             }
         }
+    }
+
+    /// `decode_guarded` decodes JPEG with zune-jpeg directly, so it must
+    /// return the pixels and errors `image` returns for the same bytes.
+    #[test]
+    fn jpeg_decodes_as_image_does() {
+        let base = image::DynamicImage::ImageRgb8(ImageBuffer::from_fn(37, 23, |x, y| {
+            let i = y * 37 + x;
+            image::Rgb([0, 1, 2].map(|c| ((i * 3 + c).wrapping_mul(0x9E37_79B9) >> 24) as u8))
+        }));
+        for image in [base.to_luma8().into(), base] {
+            let mut jpeg = std::io::Cursor::new(Vec::new());
+            image.write_to(&mut jpeg, image::ImageFormat::Jpeg).unwrap();
+            let jpeg = jpeg.into_inner();
+            let expected = image::load_from_memory(&jpeg).unwrap();
+            let Ok(decoded) = decode_guarded(&jpeg, 64, u64::MAX) else {
+                panic!("{:?} JPEG must decode", image.color());
+            };
+            assert_eq!((decoded.width, decoded.height), (37, 23));
+            assert_eq!(decoded.bytes, expected.as_bytes(), "{:?}", image.color());
+        }
+
+        let truncated = [0xFF, 0xD8, 0xFF, 0xDB, 0x00, 0x43, 0x00];
+        let expected = image::load_from_memory(&truncated).unwrap_err();
+        let Err(GuardedDecodeError::Decode(err)) = decode_guarded(&truncated, 64, u64::MAX) else {
+            panic!("a truncated JPEG must not decode");
+        };
+        assert_eq!(err.to_string(), expected.to_string());
     }
 
     #[test]
