@@ -67,7 +67,7 @@ pub fn parse_plist_guarded(bytes: &[u8], label: &str) -> Result<plist::Value, St
 /// Why a `Shape.png` did not decode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShapePngError {
-    /// A side over `MAX_PNG_DIMENSION`, or a decode over `MAX_ENTRY_BYTES`,
+    /// A side over [`MAX_PNG_DIMENSION`], or a decode over [`MAX_ENTRY_BYTES`],
     /// counted as [`TipImageError::TooLarge`](crate::TipImageError::TooLarge)
     /// describes.
     TooLarge { width: u32, height: u32 },

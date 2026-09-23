@@ -82,8 +82,8 @@ pub enum UnavailableReason {
     NoShapePng,
     UnsupportedTipKind(String),
     Corrupt(String),
-    /// A side over `procreate::MAX_PNG_DIMENSION`, or a decode over
-    /// `procreate::MAX_ENTRY_BYTES`, counted as [`TipImageError::TooLarge`]
+    /// A side over [`procreate::MAX_PNG_DIMENSION`], or a decode over
+    /// [`procreate::MAX_ENTRY_BYTES`], counted as [`TipImageError::TooLarge`]
     /// describes.
     TooLarge {
         width: u32,

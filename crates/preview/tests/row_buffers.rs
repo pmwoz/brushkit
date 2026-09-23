@@ -47,9 +47,9 @@ fn uncounted(name: &str, bytes: &[u8], height: u32, counted_per_pixel: usize) ->
 /// The budget counts the decoded image and the coefficients of a progressive
 /// JPEG or of a baseline JPEG whose first scan leaves out a component, but not
 /// those of a frame after the first scan, which zune-jpeg never allocates.
-/// What it leaves out, the decoder's row buffers, must not grow with the
-/// height. Heights are whole MCUs, so the coefficients are exact per pixel:
-/// 2 bytes per sample of each component.
+/// What it leaves out must not grow with the height. Heights are whole MCUs,
+/// so the coefficients are exact per pixel: 2 bytes per sample of each
+/// component.
 #[test]
 fn uncounted_decode_buffers_do_not_grow_with_the_height() {
     type Fixture = fn(u32) -> Vec<u8>;

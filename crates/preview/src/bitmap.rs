@@ -65,10 +65,10 @@ pub enum TipImageError {
     /// A side over [`MAX_IMPORT_DIMENSION`], or a decode over
     /// [`MAX_IMPORT_DECODED_BYTES`]: the image in its own pixel format, plus
     /// the DCT coefficients of a progressive JPEG or of a baseline JPEG whose
-    /// first scan leaves out a component. The decoder's own buffers are not
-    /// counted: a few hundred KiB at any width, plus row buffers that grow with
-    /// the width. Neither is a PNG's eXIf chunk of at most 64 KiB, which the
-    /// decoder holds twice, up to 128 KiB.
+    /// first scan leaves out a component. The decoder's other buffers are not
+    /// counted: up to a few hundred KiB at any width, more for wide images,
+    /// whose row buffers grow with the width. Neither is a PNG's eXIf chunk of
+    /// at most 64 KiB, which the decoder holds twice, up to 128 KiB.
     TooLarge { width: u32, height: u32 },
 }
 
@@ -260,12 +260,12 @@ pub(crate) enum GuardedDecodeError {
 
 /// Decode an image of at most `max_side` px per side and `max_bytes` decoded:
 /// the image in its own pixel format, plus the DCT coefficients zune-jpeg holds
-/// for the whole image, counted by `coefficient_bytes`. What it leaves out is
-/// listed on [`TipImageError::TooLarge`]. Oversize is decided from the header
-/// before any pixels are decoded. A JPEG is decoded from `bytes`, and only its
-/// metadata segments are copied. A PNG's iCCP profile and text chunks are
-/// skipped, and one with an eXIf chunk over [`MAX_PNG_EXIF_BYTES`] before the
-/// image data does not decode.
+/// for the whole image, counted by `coefficient_bytes`. The decoder's other
+/// buffers are not counted, as [`TipImageError::TooLarge`] describes. Oversize
+/// is decided from the header before any pixels are decoded. A JPEG is decoded
+/// from `bytes`, and only its metadata segments are copied. A PNG's iCCP
+/// profile and text chunks are skipped, and one with an eXIf chunk over
+/// [`MAX_PNG_EXIF_BYTES`] before the image data does not decode.
 pub(crate) fn decode_guarded(
     bytes: &[u8],
     max_side: u32,
