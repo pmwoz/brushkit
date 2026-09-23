@@ -4,7 +4,7 @@ mod counting_alloc;
 use std::io::Cursor;
 
 use brushkit_preview::decode_tip_image;
-use common::{baseline_jpeg, progressive_jpeg};
+use common::{baseline_jpeg, partial_scan_jpeg, progressive_jpeg};
 use counting_alloc::{live, peak, reset_peak};
 use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba};
 
@@ -44,16 +44,22 @@ fn uncounted(name: &str, bytes: &[u8], height: u32, counted_per_pixel: usize) ->
         .unwrap_or_else(|| panic!("{name}: the peak is below the counted bytes: {growth}"))
 }
 
-/// The budget counts the decoded image and a progressive JPEG's coefficients.
+/// The budget counts the decoded image and the coefficients of a progressive
+/// JPEG or of a baseline JPEG whose first scan leaves out a component.
 /// What it leaves out, the decoder's row buffers, must not grow with the
 /// height. Heights are whole MCUs, so the coefficients are exact per pixel:
 /// 2 bytes per sample of each component.
 #[test]
 fn uncounted_decode_buffers_do_not_grow_with_the_height() {
     type Fixture = fn(u32) -> Vec<u8>;
-    let cases: [(&str, Fixture, usize); 7] = [
+    let cases: [(&str, Fixture, usize); 8] = [
         ("baseline gray JPEG", |h| baseline_jpeg(WIDTH, h, 1), 1),
         ("baseline RGB JPEG", |h| baseline_jpeg(WIDTH, h, 3), 3),
+        (
+            "baseline RGB JPEG, one component in the first scan",
+            |h| partial_scan_jpeg(WIDTH, h, 3, 1),
+            3 + 6,
+        ),
         (
             "progressive gray JPEG",
             |h| progressive_jpeg(WIDTH, h, &[0x11]),
