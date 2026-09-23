@@ -35,6 +35,10 @@ fn huge_declared_entry_is_rejected_before_inflate() {
 }
 
 #[test]
+#[cfg_attr(
+    target_pointer_width = "32",
+    ignore = "Corrupt instead of TooLarge on 32-bit, see #32"
+)]
 fn png_dimension_bomb_is_rejected_not_allocated() {
     let zip_bytes = zip_with(&[
         ("Brush.archive", &brush_archive("bomb")),

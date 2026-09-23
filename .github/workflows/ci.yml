@@ -17,6 +17,19 @@ jobs:
       - run: cargo build --workspace --target wasm32-unknown-unknown
       - name: Fixture crate stays independent of the crates under test
         run: '! grep -nE "^\s*brushkit-(abr|preview)\s*=" crates/fixture/Cargo.toml'
+  test-wasip1:
+    runs-on: ubuntu-latest
+    env:
+      # Tests open files by absolute host path and read CARGO_MANIFEST_DIR at runtime.
+      CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime run --dir=${{ github.workspace }}::${{ github.workspace }} --env CARGO_MANIFEST_DIR
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: wasm32-wasip1 }
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with: { tool: wasmtime }
+      - run: cargo test --workspace --target wasm32-wasip1
   fuzz:
     runs-on: ubuntu-latest
     timeout-minutes: 15
