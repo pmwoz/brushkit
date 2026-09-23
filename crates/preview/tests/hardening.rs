@@ -4,7 +4,8 @@ use brushkit_preview::procreate::MAX_PNG_DIMENSION;
 use brushkit_preview::{preview_brush, preview_brushset, PreviewOptions, TipPreview};
 use brushkit_preview::{PreviewSet, UnavailableReason};
 use common::{
-    brush_archive, depth_bomb_plist_xml, dimension_bomb_png, gray_png, real_4x4_png, zip_with,
+    brush_archive, depth_bomb_plist_xml, dimension_bomb_png, gray_jpeg, gray_png, real_4x4_png,
+    zip_with,
 };
 use std::io::{self, Cursor, Read};
 
@@ -49,6 +50,31 @@ fn png_dimension_bomb_is_rejected_not_allocated() {
         let zip_bytes = zip_with(&[
             ("Brush.archive", &brush_archive("bomb")),
             ("Shape.png", &dimension_bomb_png(width, height)),
+        ]);
+
+        let set = preview_brush(&zip_bytes, PreviewOptions { max_cell: 8 }).expect("brush reads");
+        let TipPreview::Unavailable(reason) = only_tip(&set) else {
+            panic!("expected Unavailable, got {:?}", only_tip(&set));
+        };
+        assert_eq!(
+            *reason,
+            UnavailableReason::TooLarge { width, height },
+            "the declared dimensions must be reported, not allocated"
+        );
+    }
+}
+
+#[test]
+fn jpeg_dimension_bomb_is_rejected_not_allocated() {
+    // Shape.png is sniffed by content, so a JPEG under that name decodes too.
+    for (width, height) in [
+        (65535, 65535),
+        (MAX_PNG_DIMENSION + 1, 1),
+        (1, MAX_PNG_DIMENSION + 1),
+    ] {
+        let zip_bytes = zip_with(&[
+            ("Brush.archive", &brush_archive("bomb")),
+            ("Shape.png", &gray_jpeg(width, height)),
         ]);
 
         let set = preview_brush(&zip_bytes, PreviewOptions { max_cell: 8 }).expect("brush reads");
