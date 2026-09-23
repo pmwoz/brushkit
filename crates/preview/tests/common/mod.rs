@@ -63,18 +63,16 @@ pub fn adler32(data: &[u8]) -> u32 {
     (b << 16) | a
 }
 
+/// IHDR color types.
+const GRAY: u8 = 0;
+const RGBA: u8 = 6;
+
 /// A PNG written by hand whose IHDR declares `width` x `height` at `bit_depth`
 /// and `color_type`, and whose IDAT holds `scanlines` (filter bytes included)
 /// in one stored DEFLATE block. The declared size need not match the rows. The
 /// fuzz seeds embed these bytes, so they must not change when the png encoder
 /// does.
-fn png_file(
-    width: u32,
-    height: u32,
-    bit_depth: u8,
-    color_type: u8,
-    scanlines: &[u8],
-) -> Vec<u8> {
+fn png_file(width: u32, height: u32, bit_depth: u8, color_type: u8, scanlines: &[u8]) -> Vec<u8> {
     let len = u16::try_from(scanlines.len()).expect("scanlines fit one stored block");
     let mut zlib = vec![0x78, 0x01, 1];
     zlib.extend_from_slice(&len.to_le_bytes());
@@ -111,23 +109,27 @@ fn gray_scanlines(width: u32, height: u32, fill: u8) -> Vec<u8> {
 
 /// An 8-bit grayscale PNG of `width` x `height` pixels of `fill`.
 pub fn gray_png(width: u32, height: u32, fill: u8) -> Vec<u8> {
-    png_file(width, height, 8, 0, &gray_scanlines(width, height, fill))
+    png_file(width, height, 8, GRAY, &gray_scanlines(width, height, fill))
 }
 
 pub fn real_4x4_png() -> Vec<u8> {
     gray_png(4, 4, 128)
 }
 
-/// A grayscale PNG whose IHDR declares `w` x `h` but whose IDAT holds only
-/// 4 x 4 pixels.
+/// A PNG whose IHDR declares `w` x `h` at `bit_depth` and `color_type` but
+/// whose IDAT holds only 4 x 4 gray pixels.
+fn bomb_png(w: u32, h: u32, bit_depth: u8, color_type: u8) -> Vec<u8> {
+    png_file(w, h, bit_depth, color_type, &gray_scanlines(4, 4, 128))
+}
+
 pub fn dimension_bomb_png(w: u32, h: u32) -> Vec<u8> {
-    png_file(w, h, 8, 0, &gray_scanlines(4, 4, 128))
+    bomb_png(w, h, 8, GRAY)
 }
 
 /// A [`dimension_bomb_png`] whose IHDR declares RGBA at `bit_depth` 8 or 16,
 /// so each pixel decodes to four or eight bytes.
 pub fn rgba_dimension_bomb_png(w: u32, h: u32, bit_depth: u8) -> Vec<u8> {
-    png_file(w, h, bit_depth, 6, &gray_scanlines(4, 4, 128))
+    bomb_png(w, h, bit_depth, RGBA)
 }
 
 /// A baseline JPEG written by hand that declares `width` x `height` with
