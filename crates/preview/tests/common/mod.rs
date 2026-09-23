@@ -138,17 +138,31 @@ pub fn rgba_dimension_bomb_png(w: u32, h: u32, bit_depth: u8) -> Vec<u8> {
 /// Each Huffman table holds one 1-bit code: every block is a zero DC and an
 /// immediate end-of-block.
 pub fn baseline_jpeg(width: u32, height: u32, components: u8) -> Vec<u8> {
-    hand_written_jpeg(0xC0, width, height, &vec![0x11; usize::from(components)])
+    partial_scan_jpeg(
+        width,
+        height,
+        &vec![0x11; usize::from(components)],
+        components,
+    )
+}
+
+/// `baseline_jpeg` with one component per `sampling` byte (0xHV), whose one
+/// scan holds only the first `scan` of them, as a non-interleaved JPEG's first
+/// scan does.
+pub fn partial_scan_jpeg(width: u32, height: u32, sampling: &[u8], scan: u8) -> Vec<u8> {
+    hand_written_jpeg(0xC0, width, height, sampling, scan)
 }
 
 /// `baseline_jpeg` as a progressive JPEG with one component per `sampling`
 /// byte (0xHV): one DC scan whose blocks are each a zero DC, so it decodes to
 /// solid mid-gray at any size.
 pub fn progressive_jpeg(width: u32, height: u32, sampling: &[u8]) -> Vec<u8> {
-    hand_written_jpeg(0xC2, width, height, sampling)
+    let components = u8::try_from(sampling.len()).expect("a few components");
+    hand_written_jpeg(0xC2, width, height, sampling, components)
 }
 
-fn hand_written_jpeg(sof: u8, width: u32, height: u32, sampling: &[u8]) -> Vec<u8> {
+/// A JPEG whose one scan holds the first `scan` components of the frame.
+fn hand_written_jpeg(sof: u8, width: u32, height: u32, sampling: &[u8], scan: u8) -> Vec<u8> {
     let components = u8::try_from(sampling.len()).expect("a few components");
     assert!(matches!(components, 1 | 3), "grayscale or YCbCr only");
     let progressive = sof == 0xC2;
@@ -169,8 +183,8 @@ fn hand_written_jpeg(sof: u8, width: u32, height: u32, sampling: &[u8]) -> Vec<u
         jpeg.extend_from_slice(&[0; 15]);
         jpeg.push(0);
     }
-    jpeg.extend_from_slice(&[0xFF, 0xDA, 0x00, 6 + 2 * components, components]);
-    for id in 1..=components {
+    jpeg.extend_from_slice(&[0xFF, 0xDA, 0x00, 6 + 2 * scan, scan]);
+    for id in 1..=scan {
         jpeg.extend_from_slice(&[id, 0x00]);
     }
     let spectral_end = if progressive { 0 } else { 0x3F };
@@ -178,7 +192,7 @@ fn hand_written_jpeg(sof: u8, width: u32, height: u32, sampling: &[u8]) -> Vec<u
     // The first MCU: a zero bit per DC and, in a baseline scan, one per
     // end-of-block, padded with one bits to the byte.
     let bits_per_block = if progressive { 1 } else { 2 };
-    let blocks: u32 = sampling
+    let blocks: u32 = sampling[..usize::from(scan)]
         .iter()
         .map(|&factors| u32::from(factors >> 4) * u32::from(factors & 0xF))
         .sum();

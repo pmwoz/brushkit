@@ -6,7 +6,7 @@ use brushkit_preview::{preview_brush, preview_brushset, PreviewOptions, TipPrevi
 use brushkit_preview::{PreviewSet, UnavailableReason};
 use common::{
     baseline_jpeg, brush_archive, depth_bomb_plist_xml, dimension_bomb_png, gray_png,
-    progressive_jpeg, real_4x4_png, rgba_dimension_bomb_png, zip_with,
+    partial_scan_jpeg, progressive_jpeg, real_4x4_png, rgba_dimension_bomb_png, zip_with,
 };
 use std::io::{self, Cursor, Read};
 
@@ -234,6 +234,29 @@ fn progressive_jpeg_over_the_budget_with_its_coefficients_is_too_large() {
             Err(err) => panic!("{name}: expected TooLarge, got {err:?}"),
             Ok(_) => panic!("{name}: an over-budget progressive JPEG decoded"),
         }
+    }
+}
+
+#[test]
+fn baseline_jpeg_with_a_partial_first_scan_counts_its_coefficients() {
+    // zune-jpeg holds every coefficient of a baseline JPEG for the whole
+    // decode when its first scan leaves out a component. At 8192x8192 RGB is
+    // 192 MiB, which fits the budget, and with 384 MiB of coefficients does
+    // not. A gray JPEG after the end of the image, as a gain map is stored,
+    // holds a one-component scan that zune-jpeg never reads.
+    let side = MAX_IMPORT_DIMENSION / 2;
+    let mut jpeg = baseline_jpeg(side, side, 3);
+    jpeg.extend_from_slice(&baseline_jpeg(64, 64, 1));
+    let tip = decode_tip_image(&jpeg)
+        .expect("a baseline JPEG with every component in its first scan decodes");
+    assert_eq!((tip.width, tip.height), (side, side));
+
+    match decode_tip_image(&partial_scan_jpeg(side, side, &[0x11; 3], 1)) {
+        Err(TipImageError::TooLarge { width, height }) => {
+            assert_eq!((width, height), (side, side));
+        }
+        Err(err) => panic!("expected TooLarge, got {err:?}"),
+        Ok(_) => panic!("a partial first scan decoded without its coefficients counted"),
     }
 }
 
