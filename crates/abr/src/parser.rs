@@ -317,7 +317,7 @@ pub fn parse_abr_deferred_without_patterns(bytes: &[u8]) -> Result<DeferredPack<
 /// `pack.dropped_tip_details[*].bitmap` has correct dimensions and empty data.
 /// A tip whose pixels fail to decode fails its [`DeferredPack::decode_tip`]
 /// call, not the parse. The exception is a raw v1/v2 tip whose pixels run past
-/// the end of the input, which fails the parse as in [`parse_abr`]. See
+/// the end of its entry, which fails the parse as in [`parse_abr`]. See
 /// [`DeferredPack`].
 pub fn parse_abr_all_deferred_without_patterns(bytes: &[u8]) -> Result<DeferredPack<'_>, AbrError> {
     parse_abr_deferred_with(bytes, PatternMode::Skip, Defer::All)
@@ -631,7 +631,7 @@ fn parse_legacy<'a>(
             .filter(|&n| n <= MAX_TIP_DECODED_BYTES)
             .ok_or_else(|| entry_err(cursor.position(), "bitmap byte size out of range"))?;
 
-        if entry_end as usize > cursor.get_ref().len() {
+        if entry_end > cursor.get_ref().len() as u64 {
             return Err(entry_err(
                 cursor.position(),
                 "samp entry length exceeds buffer",
