@@ -49,15 +49,15 @@ enum PatternMode {
 /// Everything `parse_abr_with` produces: the pack itself plus the bookkeeping
 /// only the deferred mode uses. In `Tips::Eager` every tip vector holds
 /// `None` and `samp_blocks` is empty.
-struct ParsedAbr {
+struct ParsedAbr<'a> {
     pack: AbrPack,
     /// Aligned with `pack.brushes`.
     tips: Vec<Option<DeferredTip>>,
     /// Aligned with `pack.dropped_tip_details`.
     dropped_tips: Vec<Option<DeferredTip>>,
-    /// The `samp` block payloads, in block order, moved out of `read_blocks`.
+    /// The `samp` block payloads, in block order, borrowed from the input.
     /// For a v1/v2 pack with a deferred tip, the one block is the whole input.
-    samp_blocks: Vec<Vec<u8>>,
+    samp_blocks: Vec<&'a [u8]>,
     /// Every `dual_brush_uuid` any preset names, sampled or computed. Filled
     /// only in `Tips::Deferred(Defer::Paired)`, the one mode that reads it.
     dual_uuids: HashSet<String>,
@@ -70,7 +70,11 @@ enum Tips {
     Deferred(Defer),
 }
 
-fn parse_abr_with(bytes: &[u8], tips: Tips, patterns: PatternMode) -> Result<ParsedAbr, AbrError> {
+fn parse_abr_with(
+    bytes: &[u8],
+    tips: Tips,
+    patterns: PatternMode,
+) -> Result<ParsedAbr<'_>, AbrError> {
     let mut cursor = Cursor::new(bytes);
     let (version, subversion) = read_header(&mut cursor)?;
 
@@ -92,7 +96,7 @@ fn parse_abr_with(bytes: &[u8], tips: Tips, patterns: PatternMode) -> Result<Par
                 Tips::Eager => TipMode::Eager,
                 Tips::Deferred(_) => TipMode::Deferred { block: samp_index },
             };
-            let entries = parse_samp_block(&block.data, version, subversion, block_mode);
+            let entries = parse_samp_block(block.data, version, subversion, block_mode);
             bitmaps.extend(entries);
             samp_index += 1;
         }
@@ -103,7 +107,7 @@ fn parse_abr_with(bytes: &[u8], tips: Tips, patterns: PatternMode) -> Result<Par
     let mut desc_parse_error: Option<String> = None;
     for block in &blocks {
         if block.block_type == "desc" {
-            match extract_all_brush_info_inner(&block.data) {
+            match extract_all_brush_info_inner(block.data) {
                 Ok(infos) => {
                     if !infos.is_empty() {
                         desc_infos.extend(infos);
@@ -116,7 +120,7 @@ fn parse_abr_with(bytes: &[u8], tips: Tips, patterns: PatternMode) -> Result<Par
                 }
             }
             if raw_desc_block.is_none() {
-                raw_desc_block = Some(block.data.clone());
+                raw_desc_block = Some(block.data.to_vec());
             }
         }
     }
@@ -129,7 +133,7 @@ fn parse_abr_with(bytes: &[u8], tips: Tips, patterns: PatternMode) -> Result<Par
     let mut patt_block_index = 0usize;
     for block in &blocks {
         if block.block_type == "patt" && !block.data.is_empty() {
-            let outcome = parse_patt_block(&block.data, patt_block_index, records_seen);
+            let outcome = parse_patt_block(block.data, patt_block_index, records_seen);
             records_seen +=
                 outcome.patterns.len() + outcome.dropped.len() + outcome.unreadable.len();
             dropped_pattern_details.extend(outcome.dropped);
@@ -147,7 +151,7 @@ fn parse_abr_with(bytes: &[u8], tips: Tips, patterns: PatternMode) -> Result<Par
         Tips::Eager | Tips::Deferred(Defer::All) => HashSet::new(),
     };
 
-    let samp_blocks: Vec<Vec<u8>> = match tips {
+    let samp_blocks: Vec<&[u8]> = match tips {
         Tips::Eager => Vec::new(),
         Tips::Deferred(_) => blocks
             .into_iter()
@@ -234,7 +238,8 @@ pub struct DeferredTip {
     decoded_len: usize,
 }
 
-/// A pack whose sampled tips are still compressed.
+/// A pack whose sampled tips are still compressed. It borrows the input it
+/// was parsed from, where the compressed tips stay until decoded.
 ///
 /// The invariant: whenever [`is_deferred`](DeferredPack::is_deferred) is true
 /// for brush `i`, `pack.brushes[i].tip.data` is EMPTY — the width, height and
@@ -252,13 +257,13 @@ pub struct DeferredTip {
 /// a preset names as its dual brush. They also decode every tip of a v1 or v2
 /// pack. `is_deferred` is false for those.
 /// [`parse_abr_all_deferred_without_patterns`] decodes none of them.
-pub struct DeferredPack {
+pub struct DeferredPack<'a> {
     pub pack: AbrPack,
     tips: Vec<Option<DeferredTip>>,
-    samp_blocks: Vec<Vec<u8>>,
+    samp_blocks: Vec<&'a [u8]>,
 }
 
-impl DeferredPack {
+impl DeferredPack<'_> {
     /// True when brush `i`'s pixels still have to come from `decode_tip`.
     pub fn is_deferred(&self, i: usize) -> bool {
         self.tips.get(i).is_some_and(Option::is_some)
@@ -282,16 +287,16 @@ impl DeferredPack {
     }
 }
 
-fn decode_deferred_tip(samp_blocks: &[Vec<u8>], tip: &DeferredTip) -> Result<TipBitmap, AbrError> {
+fn decode_deferred_tip(samp_blocks: &[&[u8]], tip: &DeferredTip) -> Result<TipBitmap, AbrError> {
     decode_bitmap(&samp_blocks[tip.block][tip.entry.clone()], &tip.header)
 }
 
 /// Parse a pack without decoding its sampled tips, so a caller can hold the
-/// compressed samp bytes plus one decoded tip at a time instead of all of them.
+/// input plus one decoded tip at a time instead of all of them.
 ///
 /// See [`DeferredPack`] for the empty-`tip.data` invariant and for the tips
 /// this still decodes eagerly.
-pub fn parse_abr_deferred(bytes: &[u8]) -> Result<DeferredPack, AbrError> {
+pub fn parse_abr_deferred(bytes: &[u8]) -> Result<DeferredPack<'_>, AbrError> {
     parse_abr_deferred_with(bytes, PatternMode::Read, Defer::Paired)
 }
 
@@ -302,7 +307,7 @@ pub fn parse_abr_deferred(bytes: &[u8]) -> Result<DeferredPack, AbrError> {
 /// empty, and both pattern diagnostic counts are zero because patterns were
 /// not inspected. All other fields and decoded tips are unchanged.
 /// Declared block lengths are still checked against the input length.
-pub fn parse_abr_deferred_without_patterns(bytes: &[u8]) -> Result<DeferredPack, AbrError> {
+pub fn parse_abr_deferred_without_patterns(bytes: &[u8]) -> Result<DeferredPack<'_>, AbrError> {
     parse_abr_deferred_with(bytes, PatternMode::Skip, Defer::Paired)
 }
 
@@ -314,7 +319,7 @@ pub fn parse_abr_deferred_without_patterns(bytes: &[u8]) -> Result<DeferredPack,
 /// call, not the parse. The exception is a raw v1/v2 tip whose pixels run past
 /// the end of the input, which fails the parse as in [`parse_abr`]. See
 /// [`DeferredPack`].
-pub fn parse_abr_all_deferred_without_patterns(bytes: &[u8]) -> Result<DeferredPack, AbrError> {
+pub fn parse_abr_all_deferred_without_patterns(bytes: &[u8]) -> Result<DeferredPack<'_>, AbrError> {
     parse_abr_deferred_with(bytes, PatternMode::Skip, Defer::All)
 }
 
@@ -331,7 +336,7 @@ fn parse_abr_deferred_with(
     bytes: &[u8],
     patterns: PatternMode,
     defer: Defer,
-) -> Result<DeferredPack, AbrError> {
+) -> Result<DeferredPack<'_>, AbrError> {
     let ParsedAbr {
         mut pack,
         mut tips,
@@ -533,12 +538,12 @@ fn pair_brushes(valid_bitmaps: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> 
 /// which becomes samp block 0. An entry's rect, depth and compression have the
 /// samp bitmap header layout, so a `BitmapHeader` with `rect_offset` 0 decodes
 /// it.
-fn parse_legacy(
-    cursor: &mut Cursor<&[u8]>,
+fn parse_legacy<'a>(
+    cursor: &mut Cursor<&'a [u8]>,
     brush_count: u16,
     version: AbrVersion,
     defer: bool,
-) -> Result<ParsedAbr, AbrError> {
+) -> Result<ParsedAbr<'a>, AbrError> {
     let mut brushes = Vec::new();
     let mut tips = Vec::new();
 
@@ -710,7 +715,7 @@ fn parse_legacy(
     tips.reverse();
     // The one samp block `block: 0` above points into.
     let samp_blocks = if tips.iter().any(Option::is_some) {
-        vec![cursor.get_ref().to_vec()]
+        vec![*cursor.get_ref()]
     } else {
         Vec::new()
     };
@@ -792,16 +797,17 @@ fn read_header(cursor: &mut Cursor<&[u8]>) -> Result<(AbrVersion, u16), AbrError
 }
 
 #[derive(Debug)]
-struct Block {
+struct Block<'a> {
     block_type: String,
-    data: Vec<u8>,
+    data: &'a [u8],
 }
 
-fn read_blocks(
-    cursor: &mut Cursor<&[u8]>,
+fn read_blocks<'a>(
+    cursor: &mut Cursor<&'a [u8]>,
     file_len: u64,
     patterns: PatternMode,
-) -> Result<Vec<Block>, AbrError> {
+) -> Result<Vec<Block<'a>>, AbrError> {
+    let input: &'a [u8] = cursor.get_ref();
     let mut blocks = Vec::new();
 
     loop {
@@ -847,10 +853,10 @@ fn read_blocks(
 
         let omit = patterns == PatternMode::Skip && block_type == "patt";
         if !omit {
-            let mut data = vec![0u8; data_len as usize];
-            cursor
-                .read_exact(&mut data)
-                .map_err(|_| AbrError::MalformedBlock {
+            let data = usize::try_from(data_start + data_len)
+                .ok()
+                .and_then(|end| input.get(data_start as usize..end))
+                .ok_or_else(|| AbrError::MalformedBlock {
                     offset: pos,
                     reason: "truncated block data".into(),
                 })?;
@@ -2180,6 +2186,21 @@ mod tests {
         assert_eq!(blocks[0].data, b"hello");
     }
 
+    #[test]
+    fn read_blocks_rejects_a_block_past_the_input_within_the_logical_length() {
+        let mut d = Vec::new();
+        d.extend_from_slice(b"8BIM");
+        d.extend_from_slice(b"samp");
+        d.write_u32::<BigEndian>(8).unwrap();
+        d.extend_from_slice(b"data");
+        let mut c = Cursor::new(d.as_slice());
+        let err = read_blocks(&mut c, d.len() as u64 + 4, PatternMode::Read).unwrap_err();
+        assert!(
+            matches!(&err, AbrError::MalformedBlock { reason, .. } if reason == "truncated block data"),
+            "got {err:?}"
+        );
+    }
+
     fn push_block(file: &mut Vec<u8>, kind: &[u8; 4], payload: &[u8]) {
         file.extend_from_slice(b"8BIM");
         file.extend_from_slice(kind);
@@ -2347,6 +2368,48 @@ mod tests {
         );
     }
 
+    #[test]
+    fn deferred_tips_decode_from_their_own_samp_block_after_an_unaligned_one() {
+        let mut d = Vec::new();
+        d.write_u16::<BigEndian>(6).unwrap();
+        d.write_u16::<BigEndian>(1).unwrap();
+        for (entry, misalignment) in [
+            (build_simple_entry(3, 2, 8, 0x11), 1),
+            (build_simple_entry(3, 3, 8, 0x22), 0),
+        ] {
+            let mut payload = Vec::new();
+            payload.write_u32::<BigEndian>(entry.len() as u32).unwrap();
+            payload.extend_from_slice(&entry);
+            assert_eq!(payload.len() % 4, misalignment);
+            push_block(&mut d, b"samp", &payload);
+        }
+
+        let eager = parse_abr(&d).unwrap();
+        assert_eq!(eager.brushes.len(), 2);
+        for deferred in [
+            parse_abr_deferred(&d).unwrap(),
+            parse_abr_all_deferred_without_patterns(&d).unwrap(),
+        ] {
+            assert_eq!(deferred.samp_blocks.len(), 2);
+            for block in &deferred.samp_blocks {
+                assert!(d.as_ptr_range().contains(&block.as_ptr()));
+            }
+            assert!(deferred.is_deferred(0) && deferred.is_deferred(1));
+            assert_tips_match_eager(&deferred, &eager);
+        }
+    }
+
+    #[test]
+    fn raw_desc_block_outlives_the_input() {
+        let desc = build_mixed_desc_block();
+        let mut d = v10_header();
+        push_block(&mut d, b"samp", &build_v10_entry(8, 8, 0xDD));
+        push_block(&mut d, b"desc", &desc);
+        let pack = parse_abr_all_deferred_without_patterns(&d).unwrap().pack;
+        drop(d);
+        assert_eq!(pack.raw_desc_block, Some(desc));
+    }
+
     fn build_simple_entry(w: u32, h: u32, depth: u8, val: u8) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.write_u32::<BigEndian>(0).unwrap();
@@ -2421,7 +2484,7 @@ mod tests {
         let blocks = read_blocks(&mut cursor, bytes.len() as u64 - 4, PatternMode::Read).unwrap();
         let samp = blocks.iter().find(|b| b.block_type == "samp").unwrap();
 
-        let (frames, clean) = frame_samp_entries_by_length(&samp.data);
+        let (frames, clean) = frame_samp_entries_by_length(samp.data);
         assert!(clean, "the length chain frames the whole block");
         assert_eq!(frames.len(), 17);
         assert_eq!(
@@ -2430,7 +2493,7 @@ mod tests {
             "11 of the 17 bodies are unaligned"
         );
 
-        let anchors = find_all_uuid_offsets(&samp.data);
+        let anchors = find_all_uuid_offsets(samp.data);
         assert_eq!(anchors.len(), 17);
         let anchor_offsets: Vec<usize> = anchors.iter().map(|&(off, _)| off).collect();
         let frame_starts: Vec<usize> = frames.iter().map(|&(start, _)| start).collect();
@@ -2925,7 +2988,7 @@ mod tests {
     }
 
     /// Asserts that `decode_tip` reproduces `parse_abr`'s tip for every brush.
-    fn assert_tips_match_eager(deferred: &DeferredPack, eager: &AbrPack) {
+    fn assert_tips_match_eager(deferred: &DeferredPack<'_>, eager: &AbrPack) {
         assert_eq!(deferred.pack.brushes.len(), eager.brushes.len());
         for (i, brush) in eager.brushes.iter().enumerate() {
             let tip = deferred.decode_tip(i).unwrap();
@@ -2965,6 +3028,7 @@ mod tests {
                 assert!(brush.tip.data.is_empty(), "v{version}: brush {i}");
                 assert_eq!(all.tip_decoded_len(i), eager.brushes[i].tip.data.len());
             }
+            assert!(std::ptr::eq(all.samp_blocks[0], d.as_slice()));
 
             let (_, one) = decodes(|| all.decode_tip(0).unwrap());
             assert_eq!(one, 1, "v{version}");

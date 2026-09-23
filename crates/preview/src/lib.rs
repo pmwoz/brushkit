@@ -217,7 +217,12 @@ fn abr(bytes: &[u8], opts: PreviewOptions, take: Take) -> Result<PreviewSet, Pre
 
 /// Render one `.abr` row. A sampled tip is decoded and downsampled here, so
 /// only the rows a caller takes are decoded.
-fn abr_entry(deferred: &DeferredPack, index: usize, source: Source, max_cell: u32) -> PreviewEntry {
+fn abr_entry(
+    deferred: &DeferredPack<'_>,
+    index: usize,
+    source: Source,
+    max_cell: u32,
+) -> PreviewEntry {
     #[cfg(test)]
     tests::record_entry();
     let pack = &deferred.pack;

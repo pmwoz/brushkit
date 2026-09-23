@@ -80,7 +80,9 @@ but the parse decodes no tip.
 demand, except that they decode every tip of a v1 or v2 pack and every
 dual-brush tip up front. `parse_abr_all_deferred_without_patterns` decodes no
 tip up front. The preview path uses it, so previewing a pack with a large
-pattern block does not copy or decode the patterns.
+pattern block does not copy or decode the patterns. A `DeferredPack` borrows
+the input bytes instead of copying its tips out of them, so it cannot outlive
+them.
 
 ## Features
 
