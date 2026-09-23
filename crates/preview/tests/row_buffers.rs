@@ -13,9 +13,11 @@ const WIDTH: u32 = 4096;
 /// macOS moves a 3 MiB block shrunk to 1 MiB.
 const SHORT: u32 = 1024;
 const TALL: u32 = 2048;
-/// Under 0.02 byte per pixel the tall image adds, so a buffer that grows with
-/// the height fails the check.
-const NOISE: usize = 64 * 1024;
+/// Room for the PNG decoder's 128 KiB input buffer, which sometimes moves when
+/// it grows, so the old and new blocks are briefly both live. Under 0.1 byte
+/// per pixel the tall image adds, so a buffer that grows with the height still
+/// fails the check.
+const NOISE: usize = 256 * 1024;
 
 fn rgba_png(height: u32) -> Vec<u8> {
     let mut bytes = Cursor::new(Vec::new());
