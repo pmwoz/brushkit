@@ -5,8 +5,8 @@ use brushkit_preview::{decode_tip_image, TipImageError, MAX_IMPORT_DIMENSION};
 use brushkit_preview::{preview_brush, preview_brushset, PreviewOptions, TipPreview};
 use brushkit_preview::{PreviewSet, UnavailableReason};
 use common::{
-    baseline_jpeg, brush_archive, depth_bomb_plist_xml, dimension_bomb_png, gray_png, real_4x4_png,
-    rgba_dimension_bomb_png, zip_with,
+    baseline_jpeg, brush_archive, depth_bomb_plist_xml, dimension_bomb_png, gray_png,
+    progressive_jpeg, real_4x4_png, rgba_dimension_bomb_png, zip_with,
 };
 use std::io::{self, Cursor, Read};
 
@@ -204,5 +204,22 @@ fn imported_image_over_the_memory_budget_is_too_large() {
             matches!(err, TipImageError::TooLarge { width, height } if (width, height) == (side, side)),
             "expected TooLarge, got {err:?}"
         );
+    }
+}
+
+#[test]
+fn progressive_jpeg_over_the_budget_with_its_coefficients_is_too_large() {
+    // Each decoded image fits the 512 MiB budget, but not with the DCT
+    // coefficients a progressive decode holds, 2 bytes per sample: gray
+    // 256 + 512 MiB, RGB 192 + 384 MiB.
+    for (side, components) in [(MAX_IMPORT_DIMENSION, 1), (MAX_IMPORT_DIMENSION / 2, 3)] {
+        // A decoded tip is not printed: at this size it is hundreds of MiB.
+        match decode_tip_image(&progressive_jpeg(side, side, components)) {
+            Err(TipImageError::TooLarge { width, height }) => {
+                assert_eq!((width, height), (side, side), "the declared dimensions");
+            }
+            Err(err) => panic!("{components} components: expected TooLarge, got {err:?}"),
+            Ok(_) => panic!("{components} components: an over-budget progressive JPEG decoded"),
+        }
     }
 }
