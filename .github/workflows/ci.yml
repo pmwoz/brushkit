@@ -13,6 +13,8 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - name: The JPEG header probe and image share one zune-jpeg
+        run: cargo tree --invert zune-jpeg --depth 0
       - run: cargo test -p brushkit --no-default-features
       - run: cargo build --workspace --target wasm32-unknown-unknown
       - name: Fixture crate stays independent of the crates under test

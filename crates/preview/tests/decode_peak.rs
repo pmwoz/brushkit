@@ -1,9 +1,11 @@
+mod common;
 mod counting_alloc;
 
 use std::io::Cursor;
 
 use brushkit_preview::procreate::decode_tip_png;
 use brushkit_preview::{decode_tip_image, GrayscaleBitmap};
+use common::progressive_jpeg;
 use counting_alloc::{live, peak, reset_peak};
 use image::{DynamicImage, ImageBuffer, ImageFormat, Luma, LumaA, Rgb, Rgba};
 
@@ -51,7 +53,8 @@ fn shape_png(bytes: &[u8]) -> GrayscaleBitmap {
 }
 
 /// Each decoder's peak is the decoded image, `bytes_per_pixel` wide, plus the
-/// decoder's fixed slack: the tip is converted inside the decoded buffer.
+/// decoder's fixed slack: the tip is converted inside the decoded buffer. A
+/// progressive JPEG also holds its DCT coefficients, 2 bytes per sample.
 #[test]
 fn tip_decoders_hold_no_copy_of_the_decoded_image() {
     let gray = png(ImageBuffer::from_pixel(SIDE, SIDE, Luma([0x40u8])).into());
@@ -68,8 +71,10 @@ fn tip_decoders_hold_no_copy_of_the_decoded_image() {
         ImageBuffer::from_pixel(SIDE, SIDE, Rgb([0x10u8, 0x20, 0x30])).into(),
         ImageFormat::Jpeg,
     );
+    let gray_progressive_jpeg = progressive_jpeg(SIDE, SIDE, 1, 0x11);
+    let rgb_progressive_jpeg = progressive_jpeg(SIDE, SIDE, 3, 0x11);
 
-    let cases: [(&str, Decode, &[u8], usize); 17] = [
+    let cases: [(&str, Decode, &[u8], usize); 19] = [
         ("decode_tip_image gray", tip_image, &gray, 1),
         ("decode_tip_image gray+alpha", tip_image, &gray_alpha, 2),
         ("decode_tip_image RGB", tip_image, &rgb, 3),
@@ -88,6 +93,18 @@ fn tip_decoders_hold_no_copy_of_the_decoded_image() {
             tip_image,
             &rgb_baseline_jpeg,
             3,
+        ),
+        (
+            "decode_tip_image gray progressive JPEG",
+            tip_image,
+            &gray_progressive_jpeg,
+            1 + 2,
+        ),
+        (
+            "decode_tip_image RGB progressive JPEG",
+            tip_image,
+            &rgb_progressive_jpeg,
+            3 + 3 * 2,
         ),
         ("decode_tip_png gray", shape_png, &gray, 1),
         ("decode_tip_png gray+alpha", shape_png, &gray_alpha, 2),

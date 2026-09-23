@@ -1,6 +1,7 @@
 use brushkit_abr::TipBitmap;
 use image::{ColorType, ImageBuffer, ImageDecoder, Rgba, RgbaImage};
 use std::io::Cursor;
+use zune_jpeg::SampleRatios;
 
 #[derive(Debug, Clone)]
 pub struct GrayscaleBitmap {
@@ -57,8 +58,8 @@ const MAX_IMPORT_DECODED_BYTES: u64 = 512 * 1024 * 1024;
 #[derive(Debug)]
 pub enum TipImageError {
     Decode(String),
-    /// A side over `MAX_IMPORT_DIMENSION`, or a decoded buffer, in the image's
-    /// own pixel format, over 512 MiB.
+    /// A side over `MAX_IMPORT_DIMENSION`, or a decode over 512 MiB: the image
+    /// in its own pixel format, plus the DCT coefficients of a progressive JPEG.
     TooLarge {
         width: u32,
         height: u32,
@@ -71,7 +72,7 @@ impl std::fmt::Display for TipImageError {
             TipImageError::Decode(msg) => f.write_str(msg),
             TipImageError::TooLarge { width, height } => write!(
                 f,
-                "image is {width}x{height}px; a brush tip must be at most {MAX_IMPORT_DIMENSION}px per side and {} MiB decoded in its own pixel format",
+                "image is {width}x{height}px; a brush tip must be at most {MAX_IMPORT_DIMENSION}px per side and {} MiB to decode",
                 MAX_IMPORT_DECODED_BYTES / (1024 * 1024)
             ),
         }
@@ -243,7 +244,7 @@ fn convert_chunk(format: PixelFormat, alpha: bool, chunk: &[u8]) -> Vec<u8> {
 
 /// Why `decode_guarded` returned no image.
 pub(crate) enum GuardedDecodeError {
-    /// A side over `max_side`, or a decoded buffer over `max_bytes`.
+    /// A side over `max_side`, or a decode over `max_bytes`.
     TooLarge {
         width: u32,
         height: u32,
@@ -251,9 +252,10 @@ pub(crate) enum GuardedDecodeError {
     Decode(image::ImageError),
 }
 
-/// Decode an image of at most `max_side` px per side and `max_bytes` decoded
-/// in its own pixel format. Oversize is decided from the header before any
-/// pixels are decoded.
+/// Decode an image of at most `max_side` px per side and `max_bytes` decoded:
+/// the image in its own pixel format, plus the DCT coefficients of a
+/// progressive JPEG. Oversize is decided from the header before any pixels are
+/// decoded.
 pub(crate) fn decode_guarded(
     bytes: &[u8],
     max_side: u32,
@@ -288,7 +290,12 @@ pub(crate) fn decode_guarded(
     let mut decoder = reader.into_decoder().map_err(GuardedDecodeError::Decode)?;
     // What `ImageReader::decode` does, with the budget failure reported as
     // `TooLarge`: the output buffer is reserved and the decoder keeps the rest.
-    if limits.reserve(decoder.total_bytes()).is_err() {
+    // `image` does not pass the rest to zune-jpeg, so the coefficients of a
+    // progressive JPEG are reserved here too.
+    let decode_bytes = decoder
+        .total_bytes()
+        .saturating_add(progressive_jpeg_coefficient_bytes(bytes));
+    if limits.reserve(decode_bytes).is_err() {
         let (width, height) = decoder.dimensions();
         return Err(GuardedDecodeError::TooLarge { width, height });
     }
@@ -333,6 +340,43 @@ pub(crate) fn header_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
         .ok()?
         .into_dimensions()
         .ok()
+}
+
+/// The DCT coefficients zune-jpeg holds for a progressive JPEG until its last
+/// scan: 2 bytes per sample, with each side padded to whole MCUs. zune-jpeg
+/// reports only the largest sampling factors, so every component is counted at
+/// full resolution, and 4:2:0 at twice its real size. 0 for any other image.
+fn progressive_jpeg_coefficient_bytes(bytes: &[u8]) -> u64 {
+    if image::guess_format(bytes).ok() != Some(image::ImageFormat::Jpeg) {
+        return 0;
+    }
+    // The options `image` decodes with.
+    let options = zune_jpeg::zune_core::options::DecoderOptions::default()
+        .set_strict_mode(false)
+        .set_max_width(usize::MAX)
+        .set_max_height(usize::MAX);
+    let mut decoder = zune_jpeg::JpegDecoder::new_with_options(
+        zune_jpeg::zune_core::bytestream::ZCursor::new(bytes),
+        options,
+    );
+    if decoder.decode_headers().is_err() {
+        return 0;
+    }
+    let Some(info) = decoder.info() else {
+        return 0;
+    };
+    if !info.sof.is_progressive() {
+        return 0;
+    }
+    let (h_max, v_max) = match info.sample_ratio {
+        SampleRatios::None => (1, 1),
+        SampleRatios::H => (2, 1),
+        SampleRatios::V => (1, 2),
+        SampleRatios::HV => (2, 2),
+        SampleRatios::Generic(h, v) => (h as u64, v as u64),
+    };
+    let padded = |side: u16, factor: u64| u64::from(side).div_ceil(8 * factor) * 8 * factor;
+    2 * u64::from(info.components) * padded(info.width, h_max) * padded(info.height, v_max)
 }
 
 /// A PNG's IHDR, parsed without allocating pixels. `None` for other formats

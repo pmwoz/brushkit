@@ -82,8 +82,9 @@ pub enum UnavailableReason {
     NoShapePng,
     UnsupportedTipKind(String),
     Corrupt(String),
-    /// A side over `procreate::MAX_PNG_DIMENSION`, or a decoded buffer, in the
-    /// image's own pixel format, over `procreate::MAX_ENTRY_BYTES`.
+    /// A side over `procreate::MAX_PNG_DIMENSION`, or a decode over
+    /// `procreate::MAX_ENTRY_BYTES`: the image in its own pixel format, plus
+    /// the DCT coefficients of a progressive JPEG.
     TooLarge {
         width: u32,
         height: u32,
