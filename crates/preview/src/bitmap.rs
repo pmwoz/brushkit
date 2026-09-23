@@ -276,9 +276,9 @@ pub(crate) fn decode_guarded(
             return Err(GuardedDecodeError::TooLarge { width, height });
         }
     }
-    // On 32-bit targets `png` rejects an output buffer over `isize::MAX` while
-    // `image` builds its decoder, so an over-budget PNG is sized from IHDR first.
-    // IHDR undercounts indexed color, which `image` expands to RGB or RGBA.
+    // On 32-bit targets `png` rejects an output buffer over `isize::MAX` in
+    // `read_info`, so an over-budget PNG is sized from IHDR first.
+    // IHDR undercounts indexed color, which EXPAND turns into RGB or RGBA.
     if let Some(info) = png_header(bytes) {
         let min_decoded =
             u64::from(info.width) * u64::from(info.height) * info.bytes_per_pixel() as u64;
@@ -288,6 +288,7 @@ pub(crate) fn decode_guarded(
                 height: info.height,
             });
         }
+        return decode_png(bytes, max_bytes);
     }
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
@@ -329,6 +330,81 @@ pub(crate) fn decode_guarded(
         height,
         format,
         bytes,
+    })
+}
+
+/// `decode_guarded` for a PNG, set up as `image`'s PNG decoder is, except that
+/// the iCCP chunk is skipped: `image` decompresses the ICC profile, which the
+/// tip never uses, into a buffer bounded only by `max_bytes`.
+fn decode_png(bytes: &[u8], max_bytes: u64) -> Result<DecodedImage, GuardedDecodeError> {
+    let limits = png::Limits {
+        bytes: usize::try_from(max_bytes).unwrap_or(usize::MAX),
+    };
+    let mut decoder = png::Decoder::new_with_limits(Cursor::new(bytes), limits);
+    decoder.set_ignore_iccp_chunk(true);
+    decoder.set_transformations(png::Transformations::EXPAND);
+    let mut reader = decoder.read_info().map_err(png_error)?;
+    let (width, height) = reader.info().size();
+    let (color, depth) = reader.output_color_type();
+    let format = match (color, depth) {
+        (png::ColorType::Grayscale, png::BitDepth::Eight) => PixelFormat::L8,
+        (png::ColorType::GrayscaleAlpha, png::BitDepth::Eight) => PixelFormat::La8,
+        (png::ColorType::Rgb, png::BitDepth::Eight) => PixelFormat::Rgb8,
+        (png::ColorType::Rgba, png::BitDepth::Eight) => PixelFormat::Rgba8,
+        (png::ColorType::Grayscale, png::BitDepth::Sixteen) => PixelFormat::L16,
+        (png::ColorType::GrayscaleAlpha, png::BitDepth::Sixteen) => PixelFormat::La16,
+        (png::ColorType::Rgb, png::BitDepth::Sixteen) => PixelFormat::Rgb16,
+        (png::ColorType::Rgba, png::BitDepth::Sixteen) => PixelFormat::Rgba16,
+        // EXPAND leaves no indexed color and no depth below 8.
+        _ => {
+            let bits = color.samples() as u8 * depth as u8;
+            return Err(GuardedDecodeError::Decode(image::ImageError::Unsupported(
+                image::error::UnsupportedError::from_format_and_kind(
+                    image::ImageFormat::Png.into(),
+                    image::error::UnsupportedErrorKind::Color(image::ExtendedColorType::Unknown(
+                        bits,
+                    )),
+                ),
+            )));
+        }
+    };
+    let total_bytes = u64::from(width) * u64::from(height) * format.bytes_per_pixel() as u64;
+    if total_bytes > max_bytes {
+        return Err(GuardedDecodeError::TooLarge { width, height });
+    }
+    let total_bytes = reader
+        .output_buffer_size()
+        .ok_or(GuardedDecodeError::TooLarge { width, height })?;
+    let mut pixels = vec![0; total_bytes];
+    reader.next_frame(&mut pixels).map_err(png_error)?;
+    if matches!(depth, png::BitDepth::Sixteen) {
+        for sample in pixels.as_chunks_mut::<2>().0 {
+            *sample = u16::from_be_bytes(*sample).to_ne_bytes();
+        }
+    }
+    Ok(DecodedImage {
+        width,
+        height,
+        format,
+        bytes: pixels,
+    })
+}
+
+fn png_error(err: png::DecodingError) -> GuardedDecodeError {
+    use image::error::{
+        DecodingError, LimitError, LimitErrorKind, ParameterError, ParameterErrorKind,
+    };
+    GuardedDecodeError::Decode(match err {
+        png::DecodingError::IoError(err) => image::ImageError::IoError(err),
+        err @ png::DecodingError::Format(_) => {
+            image::ImageError::Decoding(DecodingError::new(image::ImageFormat::Png.into(), err))
+        }
+        err @ png::DecodingError::Parameter(_) => image::ImageError::Parameter(
+            ParameterError::from_kind(ParameterErrorKind::Generic(err.to_string())),
+        ),
+        png::DecodingError::LimitsExceeded => {
+            image::ImageError::Limits(LimitError::from_kind(LimitErrorKind::InsufficientMemory))
+        }
     })
 }
 
@@ -717,6 +793,34 @@ mod tip_image_tests {
             err.to_string().starts_with("image is "),
             "unexpected message: {err}"
         );
+    }
+
+    #[test]
+    fn expanded_png_is_checked_against_decode_budget() {
+        for transparent in [false, true] {
+            let mut bytes = Vec::new();
+            {
+                let mut encoder = png::Encoder::new(&mut bytes, 128, 128);
+                encoder.set_color(png::ColorType::Indexed);
+                encoder.set_depth(png::BitDepth::Eight);
+                encoder.set_palette(vec![0, 0, 0, 255, 128, 64]);
+                if transparent {
+                    encoder.set_trns(vec![0, 128]);
+                }
+                encoder
+                    .write_header()
+                    .unwrap()
+                    .write_image_data(&[0; 128 * 128])
+                    .unwrap();
+            }
+            assert!(matches!(
+                decode_guarded(&bytes, 128, 128 * 128),
+                Err(GuardedDecodeError::TooLarge {
+                    width: 128,
+                    height: 128
+                })
+            ));
+        }
     }
 
     /// Every decodable pixel format, filled with varied samples, over several
