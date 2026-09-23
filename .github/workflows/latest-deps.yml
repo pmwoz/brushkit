@@ -30,15 +30,20 @@ jobs:
           cd "$RUNNER_TEMP/consumer"
           cargo tree -e normal --prefix none --no-dedupe -f '{p}' | grep -v '^consumer ' | sort -u > "$RUNNER_TEMP/consumer.txt"
           diff "$RUNNER_TEMP/workspace.txt" "$RUNNER_TEMP/consumer.txt"
-      - name: No unpinned dependency resolves below its newest compatible release
+      - name: No workspace pin holds back an unpinned dependency
+        shell: bash
         run: |
           cargo metadata --format-version 1 --no-deps | jq -r '.packages[].dependencies[] | select(.kind == null and (.req | test("^[=~<]"))) | .name' | sort -u > "$RUNNER_TEMP/pinned.txt"
-          cut -d ' ' -f 1 "$RUNNER_TEMP/consumer.txt" | sort -u > "$RUNNER_TEMP/consumer-names.txt"
           cd "$RUNNER_TEMP/consumer"
-          cargo update --dry-run --verbose 2>&1 | tee "$RUNNER_TEMP/update.txt"
-          sed -n 's/^ *Unchanged \([^ ]*\) v[^ ]* (available: v.*)$/\1/p' "$RUNNER_TEMP/update.txt" | sort -u > "$RUNNER_TEMP/behind.txt"
-          comm -12 "$RUNNER_TEMP/behind.txt" "$RUNNER_TEMP/consumer-names.txt" | comm -23 - "$RUNNER_TEMP/pinned.txt" > "$RUNNER_TEMP/held.txt"
+          cargo update --dry-run --verbose --color never 2>&1 | tee "$RUNNER_TEMP/update.txt"
+          sed -n 's/^ *Unchanged \([^ ]*\) v[^ ]* (available: v.*)$/\1/p' "$RUNNER_TEMP/update.txt" > "$RUNNER_TEMP/behind.txt"
+          if [ "$(grep -c 'available:' "$RUNNER_TEMP/update.txt")" -ne "$(wc -l < "$RUNNER_TEMP/behind.txt")" ]; then
+            echo "::error::Some cargo update lines with available: did not match the Unchanged pattern."
+            exit 1
+          fi
+          xargs -n 1 cargo tree -e normal --prefix none -f '{p}' --invert < "$RUNNER_TEMP/pinned.txt" | cut -d ' ' -f 1 | sort -u > "$RUNNER_TEMP/dependents.txt"
+          sort -u "$RUNNER_TEMP/behind.txt" | comm -12 - "$RUNNER_TEMP/dependents.txt" | comm -23 - "$RUNNER_TEMP/pinned.txt" > "$RUNNER_TEMP/held.txt"
           if [ -s "$RUNNER_TEMP/held.txt" ]; then
-            echo "::error::Held back below the newest compatible release: $(paste -sd ' ' "$RUNNER_TEMP/held.txt"). cargo tree --invert <name> shows which requirement holds each one back."
+            echo "::error::A workspace pin holds back: $(paste -sd ' ' "$RUNNER_TEMP/held.txt"). cargo tree --invert <name> shows the path."
             exit 1
           fi
