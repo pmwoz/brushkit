@@ -23,5 +23,8 @@ ab_glyph = "0.2"
 png = "0.18"
 # Decodes a JPEG the way `image` 0.25 does, without its copy of the input. The
 # tests compare it with image's JPEG decoder, so it must resolve to the copy
-# `image` uses, which CI checks.
-zune-jpeg = "0.5"
+# `image` uses, which CI checks. Exact pin: the coefficient budget and the
+# first scan header's end, read from the cursor after `decode_headers`, follow
+# 0.5.15's internals, so recheck both in `crates/preview/src/bitmap.rs`
+# before a bump.
+zune-jpeg = "=0.5.15"
