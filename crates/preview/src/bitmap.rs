@@ -357,7 +357,7 @@ fn oversize_exif(bytes: &[u8]) -> Option<u32> {
 /// an iCCP profile up to the whole budget before the output buffer is
 /// reserved, and keeps it while the image decodes. Text chunks are kept the
 /// same way. The tip reads neither, so `png` decodes here with both skipped.
-/// `png` 0.18 keeps an eXIf chunk whatever its options, in its chunk buffer
+/// `png` 0.18.1 keeps an eXIf chunk whatever its options, in its chunk buffer
 /// and in a copy, so a PNG with one over [`MAX_PNG_EXIF_BYTES`] fails before
 /// `png` reads it. The transformation, output formats and errors are those of
 /// `image` 0.25.
