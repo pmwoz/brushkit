@@ -5,8 +5,8 @@
 //! Every entry here parses untrusted bytes, so each size, count and dimension
 //! is checked against a ceiling before anything is allocated.
 
+use crate::bitmap::{decode_guarded, GuardedDecodeError};
 use crate::GrayscaleBitmap;
-use image::ImageDecoder;
 use std::io::{Cursor, Read};
 
 /// Defensive ceilings for untrusted archives: anything above them is treated
@@ -95,77 +95,21 @@ impl std::error::Error for ShapePngError {}
 /// coverage, so the luminance is taken as-is. Oversize, by either dimension
 /// or decoded size, is decided from the header before any pixels are decoded.
 pub fn decode_tip_png(bytes: &[u8]) -> Result<GrayscaleBitmap, ShapePngError> {
-    if let Some((width, height)) = header_dimensions(bytes) {
-        if width > MAX_PNG_DIMENSION || height > MAX_PNG_DIMENSION {
-            return Err(ShapePngError::TooLarge { width, height });
-        }
-    }
-    // On 32-bit targets `png` rejects an output buffer over `isize::MAX` while
-    // `image` builds its decoder, so an over-budget PNG is sized from IHDR first.
-    // IHDR undercounts indexed color, which `image` expands to RGB or RGBA.
-    if let Some(info) = png_header(bytes) {
-        let min_decoded =
-            u64::from(info.width) * u64::from(info.height) * info.bytes_per_pixel() as u64;
-        if min_decoded > MAX_ENTRY_BYTES as u64 {
-            return Err(ShapePngError::TooLarge {
-                width: info.width,
-                height: info.height,
-            });
-        }
-    }
-    let corrupt =
-        |e: image::ImageError| ShapePngError::Corrupt(format!("failed to decode Shape.png: {e}"));
-    let mut reader = image::ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .map_err(|e| ShapePngError::Corrupt(format!("failed to sniff Shape.png: {e}")))?;
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(MAX_PNG_DIMENSION);
-    limits.max_image_height = Some(MAX_PNG_DIMENSION);
-    limits.max_alloc = Some(MAX_ENTRY_BYTES as u64);
-    reader.limits(limits.clone());
-    let mut decoder = reader.into_decoder().map_err(corrupt)?;
-    // What `ImageReader::decode` does, with the budget failure reported as
-    // `TooLarge`: the output buffer is reserved and the decoder keeps the rest.
-    if limits.reserve(decoder.total_bytes()).is_err() {
-        let (width, height) = decoder.dimensions();
-        return Err(ShapePngError::TooLarge { width, height });
-    }
-    decoder.set_limits(limits).map_err(corrupt)?;
-    let luma = image::DynamicImage::from_decoder(decoder)
-        .map_err(corrupt)?
+    let luma = decode_guarded(bytes, MAX_PNG_DIMENSION, MAX_ENTRY_BYTES as u64)
+        .map_err(|e| match e {
+            GuardedDecodeError::TooLarge { width, height } => {
+                ShapePngError::TooLarge { width, height }
+            }
+            GuardedDecodeError::Decode(e) => {
+                ShapePngError::Corrupt(format!("failed to decode Shape.png: {e}"))
+            }
+        })?
         .to_luma8();
     Ok(GrayscaleBitmap {
         width: luma.width(),
         height: luma.height(),
         data: luma.into_raw(),
     })
-}
-
-/// Reads header dimensions without allocating pixels or applying decode limits.
-/// PNG goes through the `png` header alone: `image` sizes the output buffer
-/// before it reports dimensions, which fails on 32-bit targets for large ones.
-pub(crate) fn header_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
-    if image::guess_format(bytes).ok()? == image::ImageFormat::Png {
-        let info = png_header(bytes)?;
-        return Some((info.width, info.height));
-    }
-    image::ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .ok()?
-        .into_dimensions()
-        .ok()
-}
-
-/// A PNG's IHDR, parsed without allocating pixels. `None` for other formats
-/// and for a PNG whose header does not parse.
-fn png_header(bytes: &[u8]) -> Option<png::Info<'static>> {
-    if image::guess_format(bytes).ok()? != image::ImageFormat::Png {
-        return None;
-    }
-    png::Decoder::new(Cursor::new(bytes))
-        .read_header_info()
-        .ok()
-        .cloned()
 }
 
 /// The set name and the member uuids a `brushset.plist` declares, in its order.

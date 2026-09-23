@@ -1,5 +1,6 @@
 use brushkit_abr::TipBitmap;
-use image::{ImageBuffer, Rgba, RgbaImage};
+use image::{ImageBuffer, ImageDecoder, Rgba, RgbaImage};
+use std::io::Cursor;
 
 #[derive(Debug, Clone)]
 pub struct GrayscaleBitmap {
@@ -49,11 +50,19 @@ pub fn tip_bitmap_of(bitmap: &GrayscaleBitmap) -> TipBitmap {
 }
 
 pub const MAX_IMPORT_DIMENSION: u32 = 16384;
+/// Equal to `image`'s default `max_alloc`, so every image that decoded
+/// through `image::load_from_memory` still decodes.
+const MAX_IMPORT_DECODED_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug)]
 pub enum TipImageError {
     Decode(String),
-    TooLarge { width: u32, height: u32 },
+    /// A side over `MAX_IMPORT_DIMENSION`, or a decoded buffer, in the image's
+    /// own pixel format, over 512 MiB.
+    TooLarge {
+        width: u32,
+        height: u32,
+    },
 }
 
 impl std::fmt::Display for TipImageError {
@@ -62,7 +71,8 @@ impl std::fmt::Display for TipImageError {
             TipImageError::Decode(msg) => f.write_str(msg),
             TipImageError::TooLarge { width, height } => write!(
                 f,
-                "image is {width}x{height}px; the maximum supported brush-tip dimension is {MAX_IMPORT_DIMENSION}px"
+                "image is {width}x{height}px; a brush tip must be at most {MAX_IMPORT_DIMENSION}px per side and {} MiB decoded in its own pixel format",
+                MAX_IMPORT_DECODED_BYTES / (1024 * 1024)
             ),
         }
     }
@@ -77,11 +87,15 @@ impl std::error::Error for TipImageError {}
 pub fn decode_tip_image(bytes: &[u8]) -> Result<GrayscaleBitmap, TipImageError> {
     use image::GenericImageView;
 
-    let img = image::load_from_memory(bytes).map_err(|e| TipImageError::Decode(e.to_string()))?;
+    let img = decode_guarded(bytes, MAX_IMPORT_DIMENSION, MAX_IMPORT_DECODED_BYTES).map_err(
+        |e| match e {
+            GuardedDecodeError::TooLarge { width, height } => {
+                TipImageError::TooLarge { width, height }
+            }
+            GuardedDecodeError::Decode(e) => TipImageError::Decode(e.to_string()),
+        },
+    )?;
     let (width, height) = img.dimensions();
-    if width > MAX_IMPORT_DIMENSION || height > MAX_IMPORT_DIMENSION {
-        return Err(TipImageError::TooLarge { width, height });
-    }
 
     let data: Vec<u8> = if img.color().has_alpha() {
         img.to_rgba8().pixels().map(|p| p.0[3]).collect()
@@ -94,6 +108,90 @@ pub fn decode_tip_image(bytes: &[u8]) -> Result<GrayscaleBitmap, TipImageError> 
         height,
         data,
     })
+}
+
+/// Why `decode_guarded` returned no image.
+pub(crate) enum GuardedDecodeError {
+    /// A side over `max_side`, or a decoded buffer over `max_bytes`.
+    TooLarge {
+        width: u32,
+        height: u32,
+    },
+    Decode(image::ImageError),
+}
+
+/// Decode an image of at most `max_side` px per side and `max_bytes` decoded
+/// in its own pixel format. Oversize is decided from the header before any
+/// pixels are decoded.
+pub(crate) fn decode_guarded(
+    bytes: &[u8],
+    max_side: u32,
+    max_bytes: u64,
+) -> Result<image::DynamicImage, GuardedDecodeError> {
+    if let Some((width, height)) = header_dimensions(bytes) {
+        if width > max_side || height > max_side {
+            return Err(GuardedDecodeError::TooLarge { width, height });
+        }
+    }
+    // On 32-bit targets `png` rejects an output buffer over `isize::MAX` while
+    // `image` builds its decoder, so an over-budget PNG is sized from IHDR first.
+    // IHDR undercounts indexed color, which `image` expands to RGB or RGBA.
+    if let Some(info) = png_header(bytes) {
+        let min_decoded =
+            u64::from(info.width) * u64::from(info.height) * info.bytes_per_pixel() as u64;
+        if min_decoded > max_bytes {
+            return Err(GuardedDecodeError::TooLarge {
+                width: info.width,
+                height: info.height,
+            });
+        }
+    }
+    let mut reader = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| GuardedDecodeError::Decode(image::ImageError::IoError(e)))?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(max_side);
+    limits.max_image_height = Some(max_side);
+    limits.max_alloc = Some(max_bytes);
+    reader.limits(limits.clone());
+    let mut decoder = reader.into_decoder().map_err(GuardedDecodeError::Decode)?;
+    // What `ImageReader::decode` does, with the budget failure reported as
+    // `TooLarge`: the output buffer is reserved and the decoder keeps the rest.
+    if limits.reserve(decoder.total_bytes()).is_err() {
+        let (width, height) = decoder.dimensions();
+        return Err(GuardedDecodeError::TooLarge { width, height });
+    }
+    decoder
+        .set_limits(limits)
+        .map_err(GuardedDecodeError::Decode)?;
+    image::DynamicImage::from_decoder(decoder).map_err(GuardedDecodeError::Decode)
+}
+
+/// Reads header dimensions without allocating pixels or applying decode limits.
+/// PNG goes through the `png` header alone: `image` sizes the output buffer
+/// before it reports dimensions, which fails on 32-bit targets for large ones.
+pub(crate) fn header_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if image::guess_format(bytes).ok()? == image::ImageFormat::Png {
+        let info = png_header(bytes)?;
+        return Some((info.width, info.height));
+    }
+    image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
+}
+
+/// A PNG's IHDR, parsed without allocating pixels. `None` for other formats
+/// and for a PNG whose header does not parse.
+fn png_header(bytes: &[u8]) -> Option<png::Info<'static>> {
+    if image::guess_format(bytes).ok()? != image::ImageFormat::Png {
+        return None;
+    }
+    png::Decoder::new(Cursor::new(bytes))
+        .read_header_info()
+        .ok()
+        .cloned()
 }
 
 /// Box-filter `bitmap` so its larger side is at most `max_side` (>= 1). Returns

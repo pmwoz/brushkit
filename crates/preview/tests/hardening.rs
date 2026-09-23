@@ -1,6 +1,7 @@
 mod common;
 
 use brushkit_preview::procreate::MAX_PNG_DIMENSION;
+use brushkit_preview::{decode_tip_image, TipImageError, MAX_IMPORT_DIMENSION};
 use brushkit_preview::{preview_brush, preview_brushset, PreviewOptions, TipPreview};
 use brushkit_preview::{PreviewSet, UnavailableReason};
 use common::{
@@ -162,4 +163,46 @@ fn depth_bomb_brush_archive_is_rejected_not_recursed() {
         panic!("expected Corrupt, got {:?}", only_tip(&set));
     };
     assert!(msg.contains("depth"), "error must mention depth: {msg}");
+}
+
+#[test]
+fn imported_image_dimension_bomb_is_rejected_not_allocated() {
+    // The IDAT holds 4x4 pixels, so a decode-first path fails on the truncated
+    // data instead of the declared size.
+    let over = MAX_IMPORT_DIMENSION + 1;
+    for (bytes, width, height) in [
+        (dimension_bomb_png(60000, 60000), 60000, 60000),
+        (dimension_bomb_png(20000, 20000), 20000, 20000),
+        (dimension_bomb_png(u32::MAX, u32::MAX), u32::MAX, u32::MAX),
+        (dimension_bomb_png(over, 1), over, 1),
+        (dimension_bomb_png(1, over), 1, over),
+        (baseline_jpeg(65535, 65535, 1), 65535, 65535),
+        (baseline_jpeg(over, 1, 1), over, 1),
+        (baseline_jpeg(1, over, 3), 1, over),
+    ] {
+        let err = decode_tip_image(&bytes).expect_err("an oversized image must be rejected");
+        assert!(
+            matches!(err, TipImageError::TooLarge { width: w, height: h } if (w, h) == (width, height)),
+            "{width}x{height}: expected TooLarge with the declared dimensions, got {err:?}"
+        );
+    }
+}
+
+#[test]
+fn imported_image_over_the_memory_budget_is_too_large() {
+    // Both sides are within MAX_IMPORT_DIMENSION. RGBA8 at the limit decodes to
+    // 1 GiB and RGBA16 to 2 GiB, past isize::MAX on 32-bit targets. The PNGs are
+    // sized from IHDR, the RGB JPEG (768 MiB) from the decoder.
+    let side = MAX_IMPORT_DIMENSION;
+    for bytes in [
+        rgba_dimension_bomb_png(side, side, 8),
+        rgba_dimension_bomb_png(side, side, 16),
+        baseline_jpeg(side, side, 3),
+    ] {
+        let err = decode_tip_image(&bytes).expect_err("an over-budget image must be rejected");
+        assert!(
+            matches!(err, TipImageError::TooLarge { width, height } if (width, height) == (side, side)),
+            "expected TooLarge, got {err:?}"
+        );
+    }
 }
