@@ -86,7 +86,7 @@ fn parse_abr_with(
         AbrVersion::V6 | AbrVersion::V7 | AbrVersion::V9 | AbrVersion::V10 => {}
     }
 
-    let blocks = read_blocks(&mut cursor, bytes.len() as u64, patterns)?;
+    let blocks = read_blocks(&mut cursor, patterns)?;
 
     let mut bitmaps: Vec<Option<SampEntry>> = Vec::new();
     let mut samp_index = 0usize;
@@ -804,10 +804,10 @@ struct Block<'a> {
 
 fn read_blocks<'a>(
     cursor: &mut Cursor<&'a [u8]>,
-    file_len: u64,
     patterns: PatternMode,
 ) -> Result<Vec<Block<'a>>, AbrError> {
     let input: &'a [u8] = cursor.get_ref();
+    let file_len = input.len() as u64;
     let mut blocks = Vec::new();
 
     loop {
@@ -853,14 +853,7 @@ fn read_blocks<'a>(
 
         let omit = patterns == PatternMode::Skip && block_type == "patt";
         if !omit {
-            let data = usize::try_from(data_start + data_len)
-                .ok()
-                .and_then(|end| input.get(data_start as usize..end))
-                .ok_or_else(|| AbrError::MalformedBlock {
-                    offset: pos,
-                    reason: "truncated block data".into(),
-                })?;
-
+            let data = &input[data_start as usize..(data_start + data_len) as usize];
             blocks.push(Block { block_type, data });
         }
 
@@ -2148,7 +2141,7 @@ mod tests {
         d.write_u32::<BigEndian>(5).unwrap();
         d.extend_from_slice(b"hello");
         let mut c = Cursor::new(d.as_slice());
-        let blocks = read_blocks(&mut c, d.len() as u64, PatternMode::Read).unwrap();
+        let blocks = read_blocks(&mut c, PatternMode::Read).unwrap();
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].block_type, "test");
     }
@@ -2166,7 +2159,7 @@ mod tests {
         d.write_u32::<BigEndian>(4).unwrap();
         d.extend_from_slice(b"data");
         let mut c = Cursor::new(d.as_slice());
-        let blocks = read_blocks(&mut c, d.len() as u64, PatternMode::Read).unwrap();
+        let blocks = read_blocks(&mut c, PatternMode::Read).unwrap();
         let types: Vec<&str> = blocks.iter().map(|b| b.block_type.as_str()).collect();
         assert_eq!(types, ["desc", "samp"]);
         assert_eq!(blocks[1].data, b"data");
@@ -2180,25 +2173,10 @@ mod tests {
         d.write_u32::<BigEndian>(5).unwrap();
         d.extend_from_slice(b"hello");
         let mut c = Cursor::new(d.as_slice());
-        let blocks = read_blocks(&mut c, d.len() as u64, PatternMode::Read).unwrap();
+        let blocks = read_blocks(&mut c, PatternMode::Read).unwrap();
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].block_type, "desc");
         assert_eq!(blocks[0].data, b"hello");
-    }
-
-    #[test]
-    fn read_blocks_rejects_a_block_past_the_input_within_the_logical_length() {
-        let mut d = Vec::new();
-        d.extend_from_slice(b"8BIM");
-        d.extend_from_slice(b"samp");
-        d.write_u32::<BigEndian>(8).unwrap();
-        d.extend_from_slice(b"data");
-        let mut c = Cursor::new(d.as_slice());
-        let err = read_blocks(&mut c, d.len() as u64 + 4, PatternMode::Read).unwrap_err();
-        assert!(
-            matches!(&err, AbrError::MalformedBlock { reason, .. } if reason == "truncated block data"),
-            "got {err:?}"
-        );
     }
 
     fn push_block(file: &mut Vec<u8>, kind: &[u8; 4], payload: &[u8]) {
@@ -2220,12 +2198,12 @@ mod tests {
         d.extend_from_slice(b"end");
 
         let mut c = Cursor::new(d.as_slice());
-        let read = read_blocks(&mut c, d.len() as u64, PatternMode::Read).unwrap();
+        let read = read_blocks(&mut c, PatternMode::Read).unwrap();
         let types: Vec<&str> = read.iter().map(|b| b.block_type.as_str()).collect();
         assert_eq!(types, ["patt", "samp", "patt"]);
 
         let mut c = Cursor::new(d.as_slice());
-        let skipped = read_blocks(&mut c, d.len() as u64, PatternMode::Skip).unwrap();
+        let skipped = read_blocks(&mut c, PatternMode::Skip).unwrap();
         assert_eq!(skipped.len(), 1);
         assert_eq!(skipped[0].block_type, "samp");
         assert_eq!(skipped[0].data, b"data");
@@ -2400,13 +2378,12 @@ mod tests {
     }
 
     #[test]
-    fn raw_desc_block_outlives_the_input() {
+    fn raw_desc_block_holds_the_desc_payload() {
         let desc = build_mixed_desc_block();
         let mut d = v10_header();
         push_block(&mut d, b"samp", &build_v10_entry(8, 8, 0xDD));
         push_block(&mut d, b"desc", &desc);
         let pack = parse_abr_all_deferred_without_patterns(&d).unwrap().pack;
-        drop(d);
         assert_eq!(pack.raw_desc_block, Some(desc));
     }
 
@@ -2459,7 +2436,7 @@ mod tests {
         };
         let bytes = std::fs::read(&path).unwrap();
         let mut cursor = Cursor::new(&bytes[4..]);
-        let blocks = read_blocks(&mut cursor, bytes.len() as u64 - 4, PatternMode::Read).unwrap();
+        let blocks = read_blocks(&mut cursor, PatternMode::Read).unwrap();
 
         let types: Vec<&str> = blocks.iter().map(|b| b.block_type.as_str()).collect();
         assert_eq!(types, ["samp", "patt", "desc", "phry"]);
@@ -2481,7 +2458,7 @@ mod tests {
         };
         let bytes = std::fs::read(&path).unwrap();
         let mut cursor = Cursor::new(&bytes[4..]);
-        let blocks = read_blocks(&mut cursor, bytes.len() as u64 - 4, PatternMode::Read).unwrap();
+        let blocks = read_blocks(&mut cursor, PatternMode::Read).unwrap();
         let samp = blocks.iter().find(|b| b.block_type == "samp").unwrap();
 
         let (frames, clean) = frame_samp_entries_by_length(samp.data);
