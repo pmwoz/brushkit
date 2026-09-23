@@ -54,7 +54,7 @@ pub fn tip_bitmap_of(bitmap: &GrayscaleBitmap) -> TipBitmap {
 }
 
 pub const MAX_IMPORT_DIMENSION: u32 = 16384;
-/// The decode budget of `decode_tip_image`. [`TipImageError::TooLarge`] lists
+/// The decode budget of [`decode_tip_image`]. [`TipImageError::TooLarge`] lists
 /// what it reserves.
 pub const MAX_IMPORT_DECODED_BYTES: u64 = 512 * 1024 * 1024;
 
