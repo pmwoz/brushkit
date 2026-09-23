@@ -30,3 +30,15 @@ jobs:
           cd "$RUNNER_TEMP/consumer"
           cargo tree -e normal --prefix none --no-dedupe -f '{p}' | grep -v '^consumer ' | sort -u > "$RUNNER_TEMP/consumer.txt"
           diff "$RUNNER_TEMP/workspace.txt" "$RUNNER_TEMP/consumer.txt"
+      - name: No unpinned dependency resolves below its newest compatible release
+        run: |
+          cargo metadata --format-version 1 --no-deps | jq -r '.packages[].dependencies[] | select(.kind == null and (.req | test("^[=~<]"))) | .name' | sort -u > "$RUNNER_TEMP/pinned.txt"
+          cut -d ' ' -f 1 "$RUNNER_TEMP/consumer.txt" | sort -u > "$RUNNER_TEMP/consumer-names.txt"
+          cd "$RUNNER_TEMP/consumer"
+          cargo update --dry-run --verbose 2>&1 | tee "$RUNNER_TEMP/update.txt"
+          sed -n 's/^ *Unchanged \([^ ]*\) v[^ ]* (available: v.*)$/\1/p' "$RUNNER_TEMP/update.txt" | sort -u > "$RUNNER_TEMP/behind.txt"
+          comm -12 "$RUNNER_TEMP/behind.txt" "$RUNNER_TEMP/consumer-names.txt" | comm -23 - "$RUNNER_TEMP/pinned.txt" > "$RUNNER_TEMP/held.txt"
+          if [ -s "$RUNNER_TEMP/held.txt" ]; then
+            echo "::error::Held back below the newest compatible release: $(paste -sd ' ' "$RUNNER_TEMP/held.txt"). cargo tree --invert <name> shows which requirement holds each one back."
+            exit 1
+          fi
