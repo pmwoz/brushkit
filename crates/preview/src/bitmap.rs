@@ -450,19 +450,20 @@ pub(crate) fn header_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 
 /// The DCT coefficients zune-jpeg holds for the whole image during the
 /// decode: those of a progressive JPEG, and those of a baseline JPEG whose
-/// first scan leaves out a component. `bytes` run from the start of the file
-/// to the end of the first scan header.
+/// first scan, the one whose header ends `to_first_scan`, leaves out a
+/// component.
 ///
 /// zune-jpeg reports the frame type and sampling factors only through
 /// `JpegDecoder::info`, which copies every metadata segment, so every frame
-/// header (0xFFC0, 0xFFC1 or 0xFFC2) in `bytes` that zune-jpeg would accept
-/// at the size it reports is a candidate, and the largest count wins. A
-/// baseline candidate counts only when the first scan holds fewer components
-/// than it. zune-jpeg parses one frame header, before the first scan header,
-/// and allocates coefficients only after it, so the count is never below
-/// zune-jpeg's. A candidate zune-jpeg never parses, such as one inside a
-/// skipped segment, counts too.
-fn coefficient_bytes(bytes: &[u8], width: u32, height: u32) -> u64 {
+/// header (0xFFC0, 0xFFC1 or 0xFFC2) in `to_first_scan` that zune-jpeg would
+/// accept at the size it reports is a candidate, and the largest count wins.
+/// A baseline candidate counts only when the first scan holds fewer
+/// components than it. zune-jpeg parses one frame header, before the first
+/// scan header, and allocates coefficients only after it, so the count is
+/// never below zune-jpeg's. A candidate zune-jpeg never parses, such as one
+/// inside a skipped segment, counts too.
+fn coefficient_bytes(to_first_scan: &[u8], width: u32, height: u32) -> u64 {
+    let bytes = to_first_scan;
     let first_scan = scan_components(bytes);
     (1..bytes.len())
         .filter(|&i| bytes[i - 1] == 0xFF && matches!(bytes[i], 0xC0..=0xC2))
