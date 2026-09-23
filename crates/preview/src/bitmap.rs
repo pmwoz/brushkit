@@ -1,3 +1,4 @@
+use crate::procreate::{decode_guarded, GuardedDecodeError};
 use brushkit_abr::TipBitmap;
 use image::{ImageBuffer, Rgba, RgbaImage};
 
@@ -49,11 +50,19 @@ pub fn tip_bitmap_of(bitmap: &GrayscaleBitmap) -> TipBitmap {
 }
 
 pub const MAX_IMPORT_DIMENSION: u32 = 16384;
+/// Equal to `image`'s default `max_alloc`, so every image that decoded
+/// through `image::load_from_memory` still decodes.
+const MAX_IMPORT_DECODED_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug)]
 pub enum TipImageError {
     Decode(String),
-    TooLarge { width: u32, height: u32 },
+    /// A side over `MAX_IMPORT_DIMENSION`, or a decoded buffer, in the image's
+    /// own pixel format, over 512 MiB.
+    TooLarge {
+        width: u32,
+        height: u32,
+    },
 }
 
 impl std::fmt::Display for TipImageError {
@@ -62,7 +71,8 @@ impl std::fmt::Display for TipImageError {
             TipImageError::Decode(msg) => f.write_str(msg),
             TipImageError::TooLarge { width, height } => write!(
                 f,
-                "image is {width}x{height}px; the maximum supported brush-tip dimension is {MAX_IMPORT_DIMENSION}px"
+                "image is {width}x{height}px; a brush tip must be at most {MAX_IMPORT_DIMENSION}px per side and {} MiB decoded in its own pixel format",
+                MAX_IMPORT_DECODED_BYTES / (1024 * 1024)
             ),
         }
     }
@@ -77,11 +87,16 @@ impl std::error::Error for TipImageError {}
 pub fn decode_tip_image(bytes: &[u8]) -> Result<GrayscaleBitmap, TipImageError> {
     use image::GenericImageView;
 
-    let img = image::load_from_memory(bytes).map_err(|e| TipImageError::Decode(e.to_string()))?;
+    let img = decode_guarded(bytes, MAX_IMPORT_DIMENSION, MAX_IMPORT_DECODED_BYTES).map_err(
+        |e| match e {
+            GuardedDecodeError::TooLarge { width, height } => {
+                TipImageError::TooLarge { width, height }
+            }
+            GuardedDecodeError::Sniff(e) => TipImageError::Decode(e.to_string()),
+            GuardedDecodeError::Decode(e) => TipImageError::Decode(e.to_string()),
+        },
+    )?;
     let (width, height) = img.dimensions();
-    if width > MAX_IMPORT_DIMENSION || height > MAX_IMPORT_DIMENSION {
-        return Err(TipImageError::TooLarge { width, height });
-    }
 
     let data: Vec<u8> = if img.color().has_alpha() {
         img.to_rgba8().pixels().map(|p| p.0[3]).collect()

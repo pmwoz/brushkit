@@ -95,9 +95,48 @@ impl std::error::Error for ShapePngError {}
 /// coverage, so the luminance is taken as-is. Oversize, by either dimension
 /// or decoded size, is decided from the header before any pixels are decoded.
 pub fn decode_tip_png(bytes: &[u8]) -> Result<GrayscaleBitmap, ShapePngError> {
+    let luma = decode_guarded(bytes, MAX_PNG_DIMENSION, MAX_ENTRY_BYTES as u64)
+        .map_err(|e| match e {
+            GuardedDecodeError::TooLarge { width, height } => {
+                ShapePngError::TooLarge { width, height }
+            }
+            GuardedDecodeError::Sniff(e) => {
+                ShapePngError::Corrupt(format!("failed to sniff Shape.png: {e}"))
+            }
+            GuardedDecodeError::Decode(e) => {
+                ShapePngError::Corrupt(format!("failed to decode Shape.png: {e}"))
+            }
+        })?
+        .to_luma8();
+    Ok(GrayscaleBitmap {
+        width: luma.width(),
+        height: luma.height(),
+        data: luma.into_raw(),
+    })
+}
+
+/// Why `decode_guarded` returned no image.
+pub(crate) enum GuardedDecodeError {
+    /// A side over `max_side`, or a decoded buffer over `max_bytes`.
+    TooLarge {
+        width: u32,
+        height: u32,
+    },
+    Sniff(std::io::Error),
+    Decode(image::ImageError),
+}
+
+/// Decode an image of at most `max_side` px per side and `max_bytes` decoded
+/// in its own pixel format. Oversize is decided from the header before any
+/// pixels are decoded.
+pub(crate) fn decode_guarded(
+    bytes: &[u8],
+    max_side: u32,
+    max_bytes: u64,
+) -> Result<image::DynamicImage, GuardedDecodeError> {
     if let Some((width, height)) = header_dimensions(bytes) {
-        if width > MAX_PNG_DIMENSION || height > MAX_PNG_DIMENSION {
-            return Err(ShapePngError::TooLarge { width, height });
+        if width > max_side || height > max_side {
+            return Err(GuardedDecodeError::TooLarge { width, height });
         }
     }
     // On 32-bit targets `png` rejects an output buffer over `isize::MAX` while
@@ -106,39 +145,32 @@ pub fn decode_tip_png(bytes: &[u8]) -> Result<GrayscaleBitmap, ShapePngError> {
     if let Some(info) = png_header(bytes) {
         let min_decoded =
             u64::from(info.width) * u64::from(info.height) * info.bytes_per_pixel() as u64;
-        if min_decoded > MAX_ENTRY_BYTES as u64 {
-            return Err(ShapePngError::TooLarge {
+        if min_decoded > max_bytes {
+            return Err(GuardedDecodeError::TooLarge {
                 width: info.width,
                 height: info.height,
             });
         }
     }
-    let corrupt =
-        |e: image::ImageError| ShapePngError::Corrupt(format!("failed to decode Shape.png: {e}"));
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
-        .map_err(|e| ShapePngError::Corrupt(format!("failed to sniff Shape.png: {e}")))?;
+        .map_err(GuardedDecodeError::Sniff)?;
     let mut limits = image::Limits::default();
-    limits.max_image_width = Some(MAX_PNG_DIMENSION);
-    limits.max_image_height = Some(MAX_PNG_DIMENSION);
-    limits.max_alloc = Some(MAX_ENTRY_BYTES as u64);
+    limits.max_image_width = Some(max_side);
+    limits.max_image_height = Some(max_side);
+    limits.max_alloc = Some(max_bytes);
     reader.limits(limits.clone());
-    let mut decoder = reader.into_decoder().map_err(corrupt)?;
+    let mut decoder = reader.into_decoder().map_err(GuardedDecodeError::Decode)?;
     // What `ImageReader::decode` does, with the budget failure reported as
     // `TooLarge`: the output buffer is reserved and the decoder keeps the rest.
     if limits.reserve(decoder.total_bytes()).is_err() {
         let (width, height) = decoder.dimensions();
-        return Err(ShapePngError::TooLarge { width, height });
+        return Err(GuardedDecodeError::TooLarge { width, height });
     }
-    decoder.set_limits(limits).map_err(corrupt)?;
-    let luma = image::DynamicImage::from_decoder(decoder)
-        .map_err(corrupt)?
-        .to_luma8();
-    Ok(GrayscaleBitmap {
-        width: luma.width(),
-        height: luma.height(),
-        data: luma.into_raw(),
-    })
+    decoder
+        .set_limits(limits)
+        .map_err(GuardedDecodeError::Decode)?;
+    image::DynamicImage::from_decoder(decoder).map_err(GuardedDecodeError::Decode)
 }
 
 /// Reads header dimensions without allocating pixels or applying decode limits.
