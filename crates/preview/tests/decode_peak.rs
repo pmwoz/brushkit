@@ -45,7 +45,9 @@ fn noise_jpeg() -> Vec<u8> {
 }
 
 /// A gray JPEG with 100 APP2 gain-map segments of 65,000 bytes after SOI.
-/// zune-jpeg keeps its own copy of each one, which the tip never reads.
+/// zune-jpeg keeps its own copy of each one, which the tip never reads. The
+/// segments must outweigh `PIXELS + DECODER_SLACK`, so a second copy, made
+/// before the pixels are allocated, breaks the bound.
 fn gain_map_jpeg() -> Vec<u8> {
     const GAIN_MAP: &[u8] = b"urn:iso:std:iso:ts:21496:-1\0";
     let mut segment = vec![0xFF, 0xE2];
