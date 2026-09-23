@@ -68,10 +68,11 @@ pub enum TipImageError {
     /// first scan leaves out a component. The decoder's other buffers are not
     /// counted: up to a few hundred KiB at any width, more for wide images,
     /// whose row buffers grow with the width. Neither is a PNG's eXIf chunk of
-    /// at most 64 KiB, which the decoder holds twice, up to 128 KiB. Nor are a
-    /// JPEG's metadata segments, which the decoder copies, up to the input
-    /// size. It holds extended XMP twice while it joins the parts, so the
-    /// copies can reach twice the input size.
+    /// at most 64 KiB, which the decoder holds twice, up to 128 KiB. Nor is
+    /// zune-jpeg's copy of a JPEG's metadata segments. It adds a list entry
+    /// per segment and holds extended XMP twice while it joins the parts, so
+    /// it reaches up to twice the input size for large segments and about
+    /// five times for many small ones.
     TooLarge { width: u32, height: u32 },
 }
 
