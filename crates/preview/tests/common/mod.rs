@@ -63,26 +63,29 @@ pub fn adler32(data: &[u8]) -> u32 {
     (b << 16) | a
 }
 
-/// An 8-bit grayscale PNG written by hand, with one stored DEFLATE block. The
+/// A PNG written by hand whose IHDR declares `width` x `height` at `bit_depth`
+/// and `color_type`, and whose IDAT holds `scanlines` (filter bytes included)
+/// in one stored DEFLATE block. The declared size need not match the rows. The
 /// fuzz seeds embed these bytes, so they must not change when the png encoder
 /// does.
-pub fn gray_png(width: u32, height: u32, fill: u8) -> Vec<u8> {
-    let mut scanlines = Vec::new();
-    for _ in 0..height {
-        scanlines.push(0);
-        scanlines.extend(std::iter::repeat_n(fill, width as usize));
-    }
+fn png_file(
+    width: u32,
+    height: u32,
+    bit_depth: u8,
+    color_type: u8,
+    scanlines: &[u8],
+) -> Vec<u8> {
     let len = u16::try_from(scanlines.len()).expect("scanlines fit one stored block");
     let mut zlib = vec![0x78, 0x01, 1];
     zlib.extend_from_slice(&len.to_le_bytes());
     zlib.extend_from_slice(&(!len).to_le_bytes());
-    zlib.extend_from_slice(&scanlines);
-    zlib.extend_from_slice(&adler32(&scanlines).to_be_bytes());
+    zlib.extend_from_slice(scanlines);
+    zlib.extend_from_slice(&adler32(scanlines).to_be_bytes());
 
     let mut ihdr = Vec::new();
     ihdr.extend_from_slice(&width.to_be_bytes());
     ihdr.extend_from_slice(&height.to_be_bytes());
-    ihdr.extend_from_slice(&[8, 0, 0, 0, 0]);
+    ihdr.extend_from_slice(&[bit_depth, color_type, 0, 0, 0]);
 
     let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
     for (kind, data) in [(b"IHDR", ihdr), (b"IDAT", zlib), (b"IEND", Vec::new())] {
@@ -96,35 +99,35 @@ pub fn gray_png(width: u32, height: u32, fill: u8) -> Vec<u8> {
     png
 }
 
+/// `height` unfiltered rows of `width` 8-bit gray pixels of `fill`.
+fn gray_scanlines(width: u32, height: u32, fill: u8) -> Vec<u8> {
+    let mut scanlines = Vec::new();
+    for _ in 0..height {
+        scanlines.push(0);
+        scanlines.extend(std::iter::repeat_n(fill, width as usize));
+    }
+    scanlines
+}
+
+/// An 8-bit grayscale PNG of `width` x `height` pixels of `fill`.
+pub fn gray_png(width: u32, height: u32, fill: u8) -> Vec<u8> {
+    png_file(width, height, 8, 0, &gray_scanlines(width, height, fill))
+}
+
 pub fn real_4x4_png() -> Vec<u8> {
     gray_png(4, 4, 128)
 }
 
+/// A grayscale PNG whose IHDR declares `w` x `h` but whose IDAT holds only
+/// 4 x 4 pixels.
 pub fn dimension_bomb_png(w: u32, h: u32) -> Vec<u8> {
-    let mut png = real_4x4_png();
-    // IHDR is the first chunk: 8-byte signature, 4-byte length, 4-byte type,
-    // then width and height as the first 8 bytes of its 13-byte payload.
-    assert_eq!(
-        &png[12..16],
-        b"IHDR",
-        "gray_png must write IHDR first for these offsets to be right"
-    );
-    png[16..20].copy_from_slice(&w.to_be_bytes());
-    png[20..24].copy_from_slice(&h.to_be_bytes());
-    let crc = crc32(&png[12..29]); // chunk type + the 13 IHDR data bytes
-    png[29..33].copy_from_slice(&crc.to_be_bytes());
-    png
+    png_file(w, h, 8, 0, &gray_scanlines(4, 4, 128))
 }
 
 /// A [`dimension_bomb_png`] whose IHDR declares RGBA at `bit_depth` 8 or 16,
 /// so each pixel decodes to four or eight bytes.
 pub fn rgba_dimension_bomb_png(w: u32, h: u32, bit_depth: u8) -> Vec<u8> {
-    let mut png = dimension_bomb_png(w, h);
-    png[24] = bit_depth;
-    png[25] = 6; // IHDR color type
-    let crc = crc32(&png[12..29]);
-    png[29..33].copy_from_slice(&crc.to_be_bytes());
-    png
+    png_file(w, h, bit_depth, 6, &gray_scanlines(4, 4, 128))
 }
 
 /// A baseline JPEG written by hand that declares `width` x `height` with
