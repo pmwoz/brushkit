@@ -5,7 +5,9 @@ use brushkit_preview::{
     preview_brushset, preview_brushset_first_available, PreviewError, PreviewOptions, PreviewSet,
     TipPreview,
 };
-use common::{brush_archive, brushset_plist, corpus_files, gray_png, samp_abr, zip_with, SampTip};
+use common::{
+    brush_archive, brushset_plist, corpus_files, gray_png, legacy_abr, samp_abr, zip_with, SampTip,
+};
 use std::path::Path;
 
 type Preview = fn(&[u8], PreviewOptions) -> Result<PreviewSet, PreviewError>;
@@ -104,6 +106,26 @@ fn abr_returns_the_first_available_tips_of_the_full_preview() {
         .map(|entry| entry.index)
         .collect();
     assert_eq!(indices, vec![1, 4, 5]);
+}
+
+#[test]
+fn v2_abr_returns_the_first_available_tips_of_the_full_preview() {
+    let tip = |side: u32, fill: u8, corrupt: bool| SampTip {
+        width: side,
+        height: side / 2 + 1,
+        fill,
+        corrupt,
+    };
+    // Listed in reverse, as in the v6 test above.
+    let bytes = legacy_abr(&[
+        tip(3, 0x20, false),
+        tip(12, 0x40, true),
+        tip(5, 0x60, false),
+        tip(16, 0x80, false),
+        tip(7, 0xa0, true),
+    ]);
+    let full = check_every_n(&bytes, preview_abr, preview_abr_first_available);
+    assert_eq!(availability(&full), vec![false, true, true, false, true]);
 }
 
 #[test]

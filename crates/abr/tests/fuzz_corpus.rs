@@ -25,6 +25,11 @@ fn corpus_files_parse_without_panic() {
         }
         let bytes = std::fs::read(&path).unwrap();
         let _ = brushkit_abr::parse_abr(&bytes);
+        if let Ok(deferred) = brushkit_abr::parse_abr_all_deferred_without_patterns(&bytes) {
+            for i in 0..deferred.pack.brushes.len() {
+                let _ = deferred.decode_tip(i);
+            }
+        }
         replayed.insert(path.file_name().unwrap().to_string_lossy().into_owned());
     }
 
