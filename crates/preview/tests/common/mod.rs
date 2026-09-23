@@ -166,14 +166,15 @@ pub fn baseline_jpeg(width: u32, height: u32, components: u8) -> Vec<u8> {
     jpeg
 }
 
-pub fn depth_bomb_plist_xml() -> Vec<u8> {
+/// An XML plist that opens `depth` nested arrays and never closes them.
+pub fn depth_bomb_plist_xml(depth: usize) -> Vec<u8> {
     let mut s = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
          \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
          <plist version=\"1.0\">\n",
     );
-    s.push_str(&"<array>".repeat(10_000));
+    s.push_str(&"<array>".repeat(depth));
     s.into_bytes()
 }
 
