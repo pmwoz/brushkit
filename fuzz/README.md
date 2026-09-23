@@ -20,6 +20,9 @@ The preview targets use `max_cell: 8` to exercise decoding and downsampling.
 Each target reads seeds from `fuzz/corpus/<target>`. The ABR seeds are synthetic
 fixtures. The Procreate seeds cover valid ZIP archives, binary plists, PNG
 shapes, missing and corrupt shapes, oversized PNG dimensions, and plist depth.
+The `filtered_shape` seed embeds `crates/preview/tests/fixtures/filtered_shape.png`,
+whose IDAT is compressed and whose rows are filtered. The PNG is committed rather
+than generated, so a compressor change does not move its bytes.
 
 To replay the corpus and then run a bounded campaign, replace `preview_brush`
 with the target name:

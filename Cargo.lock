@@ -83,6 +83,7 @@ version = "0.2.3"
 dependencies = [
  "ab_glyph",
  "brushkit-abr",
+ "flate2",
  "image",
  "plist",
  "png",
