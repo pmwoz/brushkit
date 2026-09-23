@@ -2860,7 +2860,7 @@ mod tests {
     }
 
     fn v2_stream_with_depth(depth: u16) -> Vec<u8> {
-        legacy_stream(2, &[legacy_entry(2, 8, 8, depth, 0, &[0u8; 64], Some(64))])
+        legacy_stream(2, &[legacy_entry(2, 8, 8, depth, 0, &[0u8; 64], None)])
     }
 
     #[test]
@@ -2905,21 +2905,24 @@ mod tests {
             .collect()
     }
 
-    /// Three RLE tips and one raw tip. The raw tip's declared entry length
-    /// stops short of its pixels, which the parser reads past.
+    /// Three RLE tips and one raw tip whose entry is padded past its pixels.
     fn legacy_multi_tip_stream(version: u16) -> Vec<u8> {
         let rle_entry = |w: usize, h: usize, seed: u8| {
             let packed = rle_literal_rows(&tip_rows(w, h, seed));
             legacy_entry(version, w as i32, h as i32, 8, 1, &packed, None)
         };
         let raw_pixels: Vec<u8> = tip_rows(3, 2, 0x70).concat();
-        let raw_header_len = legacy_entry(version, 3, 2, 8, 0, &[], None).len() as u32 - 6;
+        let padded_len = legacy_entry(version, 3, 2, 8, 0, &raw_pixels, None).len() as u32 - 6 + 4;
         legacy_stream(
             version,
             &[
                 rle_entry(3, 2, 0x10),
                 rle_entry(5, 4, 0x30),
-                legacy_entry(version, 3, 2, 8, 0, &raw_pixels, Some(raw_header_len)),
+                [
+                    legacy_entry(version, 3, 2, 8, 0, &raw_pixels, Some(padded_len)),
+                    vec![0xEE; 4],
+                ]
+                .concat(),
                 rle_entry(1, 1, 0x90),
             ],
         )
@@ -3043,21 +3046,48 @@ mod tests {
     }
 
     #[test]
-    fn all_deferred_parse_rejects_raw_legacy_pixels_past_the_input() {
-        // The entry length covers the header, so only the pixel read overruns.
-        let header_len = legacy_entry(2, 2, 2, 8, 0, &[], None).len() as u32 - 6;
-        let d = legacy_stream(
-            2,
-            &[legacy_entry(2, 2, 2, 8, 0, &[1, 2, 3], Some(header_len))],
-        );
-        for result in [
-            parse_abr(&d).map(|_| ()),
-            parse_abr_all_deferred_without_patterns(&d).map(|_| ()),
-        ] {
-            assert!(
-                matches!(&result, Err(AbrError::Decompression(msg)) if msg == "truncated raw data"),
-                "got {result:?}"
+    fn raw_legacy_entry_ends_at_its_declared_length() {
+        for version in [1, 2] {
+            let pixels = tip_rows(3, 2, 0x70).concat();
+            let padded_len = legacy_entry(version, 3, 2, 8, 0, &pixels, None).len() as u32 - 6 + 5;
+            let d = legacy_stream(
+                version,
+                &[
+                    [
+                        legacy_entry(version, 3, 2, 8, 0, &pixels, Some(padded_len)),
+                        vec![0xEE; 5],
+                    ]
+                    .concat(),
+                    legacy_entry(version, 1, 1, 8, 0, &[0x42], None),
+                ],
             );
+            let pack = parse_abr(&d).unwrap();
+            let tips: Vec<_> = pack
+                .brushes
+                .iter()
+                .map(|b| (b.tip.width, b.tip.height, b.tip.data.clone()))
+                .collect();
+            assert_eq!(tips, [(1, 1, vec![0x42]), (3, 2, pixels)], "v{version}");
+        }
+    }
+
+    #[test]
+    fn raw_legacy_pixels_past_the_entry_are_rejected() {
+        // The entry length covers the header only. With `[1, 2, 3]` the pixels
+        // also run past the input, with `[1, 2, 3, 4]` they are all present.
+        let header_len = legacy_entry(2, 2, 2, 8, 0, &[], None).len() as u32 - 6;
+        for pixels in [&[1, 2, 3][..], &[1, 2, 3, 4]] {
+            let d = legacy_stream(2, &[legacy_entry(2, 2, 2, 8, 0, pixels, Some(header_len))]);
+            for result in [
+                parse_abr(&d).map(|_| ()),
+                parse_abr_all_deferred_without_patterns(&d).map(|_| ()),
+            ] {
+                assert!(
+                    matches!(&result, Err(AbrError::Decompression(msg)) if msg == "truncated raw data"),
+                    "{} pixel bytes: got {result:?}",
+                    pixels.len()
+                );
+            }
         }
     }
 
