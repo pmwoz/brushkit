@@ -117,6 +117,28 @@ pub fn dimension_bomb_png(w: u32, h: u32) -> Vec<u8> {
     png
 }
 
+/// A grayscale baseline JPEG written by hand that declares `width` x `height`
+/// and holds one 8x8 block of scan data, so it decodes to mid-gray at 8x8.
+/// Each Huffman table holds one 1-bit code: the block is a zero DC and an
+/// immediate end-of-block.
+pub fn gray_jpeg(width: u16, height: u16) -> Vec<u8> {
+    let mut jpeg = vec![0xFF, 0xD8];
+    jpeg.extend_from_slice(&[0xFF, 0xDB, 0x00, 0x43, 0x00]);
+    jpeg.extend_from_slice(&[1; 64]);
+    jpeg.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x0B, 8]);
+    jpeg.extend_from_slice(&height.to_be_bytes());
+    jpeg.extend_from_slice(&width.to_be_bytes());
+    jpeg.extend_from_slice(&[1, 1, 0x11, 0]);
+    for class in [0x00, 0x10] {
+        jpeg.extend_from_slice(&[0xFF, 0xC4, 0x00, 0x14, class, 1]);
+        jpeg.extend_from_slice(&[0; 15]);
+        jpeg.push(0);
+    }
+    jpeg.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x08, 1, 1, 0x00, 0, 0x3F, 0]);
+    jpeg.extend_from_slice(&[0x3F, 0xFF, 0xD9]);
+    jpeg
+}
+
 pub fn depth_bomb_plist_xml() -> Vec<u8> {
     let mut s = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
