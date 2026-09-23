@@ -56,13 +56,14 @@ pub fn tip_bitmap_of(bitmap: &GrayscaleBitmap) -> TipBitmap {
 pub const MAX_IMPORT_DIMENSION: u32 = 16384;
 /// The decode budget of `decode_tip_image`. [`TipImageError::TooLarge`] lists
 /// what it reserves.
-const MAX_IMPORT_DECODED_BYTES: u64 = 512 * 1024 * 1024;
+pub const MAX_IMPORT_DECODED_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug)]
 pub enum TipImageError {
     Decode(String),
-    /// A side over `MAX_IMPORT_DIMENSION`, or a decode over 512 MiB: the image
-    /// in its own pixel format, plus the DCT coefficients of a progressive JPEG.
+    /// A side over [`MAX_IMPORT_DIMENSION`], or a decode over
+    /// [`MAX_IMPORT_DECODED_BYTES`]: the image in its own pixel format, plus
+    /// the DCT coefficients of a progressive JPEG.
     TooLarge {
         width: u32,
         height: u32,
