@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 
 pub fn brush_archive(name: &str) -> Vec<u8> {
@@ -152,14 +151,53 @@ pub fn depth_bomb_plist_xml() -> Vec<u8> {
     s.into_bytes()
 }
 
+/// A zip of `entries` in order, written by hand with stored entries and fixed
+/// header fields. The fuzz seeds embed these bytes, so they must not change
+/// when the zip crate or its deflate backend does.
 pub fn zip_with(entries: &[(&str, &[u8])]) -> Vec<u8> {
-    let mut zw = zip::write::ZipWriter::new(Cursor::new(Vec::new()));
-    let opts = zip::write::SimpleFileOptions::default();
+    let mut zip = Vec::new();
+    let mut directory = Vec::new();
     for (path, bytes) in entries {
-        zw.start_file(*path, opts).expect("start_file");
-        zw.write_all(bytes).expect("write entry");
+        let offset = u32::try_from(zip.len()).expect("zip fits in 4 GiB");
+        let size = u32::try_from(bytes.len()).expect("entry fits in 4 GiB");
+        // The fields both headers share: version needed 1.0, no flags, stored,
+        // dated 1980-01-01 00:00, then the CRC, both sizes, the name length and
+        // no extra field.
+        let mut fields = Vec::new();
+        for half in [10u16, 0, 0, 0, 0x21] {
+            fields.extend_from_slice(&half.to_le_bytes());
+        }
+        for word in [crc32(bytes), size, size] {
+            fields.extend_from_slice(&word.to_le_bytes());
+        }
+        fields.extend_from_slice(&(path.len() as u16).to_le_bytes());
+        fields.extend_from_slice(&0u16.to_le_bytes());
+
+        zip.extend_from_slice(b"PK\x03\x04");
+        zip.extend_from_slice(&fields);
+        zip.extend_from_slice(path.as_bytes());
+        zip.extend_from_slice(bytes);
+
+        directory.extend_from_slice(b"PK\x01\x02");
+        directory.extend_from_slice(&10u16.to_le_bytes()); // Made by MS-DOS, version 1.0.
+        directory.extend_from_slice(&fields);
+        // No comment, disk 0, no internal or external attributes.
+        directory.extend_from_slice(&[0; 2 + 2 + 2 + 4]);
+        directory.extend_from_slice(&offset.to_le_bytes());
+        directory.extend_from_slice(path.as_bytes());
     }
-    zw.finish().expect("finish zip").into_inner()
+    let count = u16::try_from(entries.len()).expect("entry count fits in u16");
+    let directory_offset = zip.len() as u32;
+    let directory_size = directory.len() as u32;
+    zip.extend_from_slice(&directory);
+    zip.extend_from_slice(b"PK\x05\x06");
+    zip.extend_from_slice(&[0; 4]); // This disk and the directory's disk.
+    zip.extend_from_slice(&count.to_le_bytes());
+    zip.extend_from_slice(&count.to_le_bytes());
+    zip.extend_from_slice(&directory_size.to_le_bytes());
+    zip.extend_from_slice(&directory_offset.to_le_bytes());
+    zip.extend_from_slice(&0u16.to_le_bytes()); // No comment.
+    zip
 }
 
 /// One sampled tip for [`samp_abr`]: `width` x `height` raw 8-bit pixels of
