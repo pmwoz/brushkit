@@ -71,11 +71,10 @@ pub enum ShapePngError {
     /// the image in its own pixel format, plus the DCT coefficients of a
     /// progressive JPEG or of a baseline JPEG whose first scan leaves out a
     /// component. The decoder's row buffers, which grow with the width only,
-    /// are not counted.
-    TooLarge {
-        width: u32,
-        height: u32,
-    },
+    /// and a PNG's eXIf chunk of at most 64 KiB are not counted.
+    TooLarge { width: u32, height: u32 },
+    /// The bytes did not decode, or a PNG carries an eXIf chunk over 64 KiB
+    /// before the image data.
     Corrupt(String),
 }
 

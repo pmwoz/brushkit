@@ -59,16 +59,16 @@ pub const MAX_IMPORT_DECODED_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug)]
 pub enum TipImageError {
+    /// The bytes did not decode, or a PNG carries an eXIf chunk over 64 KiB
+    /// before the image data.
     Decode(String),
     /// A side over [`MAX_IMPORT_DIMENSION`], or a decode over
     /// [`MAX_IMPORT_DECODED_BYTES`]: the image in its own pixel format, plus
     /// the DCT coefficients of a progressive JPEG or of a baseline JPEG whose
     /// first scan leaves out a component. The decoder's row buffers, which
-    /// grow with the width only, are not counted.
-    TooLarge {
-        width: u32,
-        height: u32,
-    },
+    /// grow with the width only, and a PNG's eXIf chunk of at most 64 KiB
+    /// are not counted.
+    TooLarge { width: u32, height: u32 },
 }
 
 impl std::fmt::Display for TipImageError {
@@ -263,7 +263,8 @@ pub(crate) enum GuardedDecodeError {
 /// buffers, which grow with the width only, are not counted. Oversize is
 /// decided from the header before any pixels are decoded. A JPEG is decoded
 /// from `bytes`, and only its metadata segments are copied. A PNG's iCCP
-/// profile is skipped.
+/// profile and text chunks are skipped, and one with an eXIf chunk over
+/// [`MAX_PNG_EXIF_BYTES`] before the image data does not decode.
 pub(crate) fn decode_guarded(
     bytes: &[u8],
     max_side: u32,
@@ -328,11 +329,38 @@ fn unsupported_color(
     ))
 }
 
+/// The largest eXIf chunk a PNG may carry for its tip to decode: what a JPEG's
+/// APP1 segment holds.
+const MAX_PNG_EXIF_BYTES: usize = 64 * 1024;
+
+/// The length of the first eXIf chunk before the image data that is over
+/// [`MAX_PNG_EXIF_BYTES`]. `png` buffers a chunk's declared length.
+fn oversize_exif(bytes: &[u8]) -> Option<u32> {
+    // Chunks follow the 8-byte signature.
+    let mut at = 8usize;
+    while let Some(&[l0, l1, l2, l3, ref kind @ ..]) =
+        bytes.get(at..).and_then(|rest| rest.get(..8))
+    {
+        let len = u32::from_be_bytes([l0, l1, l2, l3]);
+        match kind {
+            b"IDAT" => return None,
+            b"eXIf" if len as usize > MAX_PNG_EXIF_BYTES => return Some(len),
+            _ => {}
+        }
+        // Length, type, data and CRC.
+        at = at.saturating_add(12).saturating_add(len as usize);
+    }
+    None
+}
+
 /// `decode_guarded` for a PNG. Through `image`'s PNG decoder, `png` inflates
 /// an iCCP profile up to the whole budget before the output buffer is
-/// reserved, and keeps it while the image decodes. The tip never reads the
-/// profile, so `png` decodes here with iCCP skipped. The transformation,
-/// output formats and errors are those of `image` 0.25.
+/// reserved, and keeps it while the image decodes. Text chunks are kept the
+/// same way. The tip reads neither, so `png` decodes here with both skipped.
+/// `png` 0.18 keeps an eXIf chunk whatever its options, in its chunk buffer
+/// and in a copy, so a PNG with one over [`MAX_PNG_EXIF_BYTES`] fails before
+/// `png` reads it. The transformation, output formats and errors are those of
+/// `image` 0.25.
 fn decode_png(
     bytes: &[u8],
     max_side: u32,
@@ -344,6 +372,7 @@ fn decode_png(
     };
     let mut decoder = png::Decoder::new_with_limits(Cursor::new(bytes), limits);
     decoder.set_ignore_iccp_chunk(true);
+    decoder.set_ignore_text_chunk(true);
     decoder.set_transformations(png::Transformations::EXPAND);
     let info = decoder.read_header_info().map_err(png_error)?;
     let (width, height) = (info.width, info.height);
@@ -356,6 +385,14 @@ fn decode_png(
     let min_decoded = u64::from(width) * u64::from(height) * info.bytes_per_pixel() as u64;
     if min_decoded > max_bytes {
         return Err(GuardedDecodeError::TooLarge { width, height });
+    }
+    if let Some(len) = oversize_exif(bytes) {
+        return Err(GuardedDecodeError::Decode(image::ImageError::Decoding(
+            image::error::DecodingError::new(
+                image::ImageFormat::Png.into(),
+                format!("eXIf chunk is {len} bytes, over the {MAX_PNG_EXIF_BYTES} a tip reads"),
+            ),
+        )));
     }
     let mut reader = decoder.read_info().map_err(png_error)?;
     let (color, depth) = reader.output_color_type();
@@ -956,6 +993,46 @@ mod tip_image_tests {
             };
             assert_eq!(err.to_string(), expected.to_string(), "{name}");
         }
+    }
+
+    /// An eXIf chunk before the image data decodes up to
+    /// `MAX_PNG_EXIF_BYTES`, whatever the pixel format. One after the image
+    /// data is never read.
+    #[test]
+    fn png_exif_decodes_up_to_the_limit() {
+        let png = |exif_len: usize, after_image: bool| {
+            let mut png = Vec::new();
+            let mut encoder = png::Encoder::new(&mut png, 3, 2);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Sixteen);
+            let mut writer = encoder.write_header().unwrap();
+            let exif = png::chunk::ChunkType(*b"eXIf");
+            if !after_image {
+                writer.write_chunk(exif, &vec![0; exif_len]).unwrap();
+            }
+            writer.write_image_data(&[0x40; 3 * 2 * 8]).unwrap();
+            if after_image {
+                writer.write_chunk(exif, &vec![0; exif_len]).unwrap();
+            }
+            writer.finish().unwrap();
+            png
+        };
+        for (exif_len, after_image) in [(MAX_PNG_EXIF_BYTES, false), (MAX_PNG_EXIF_BYTES + 1, true)]
+        {
+            assert!(
+                decode_guarded(&png(exif_len, after_image), 64, u64::MAX).is_ok(),
+                "a {exif_len}-byte eXIf, after the image data: {after_image}, must decode"
+            );
+        }
+        let Err(GuardedDecodeError::Decode(err)) =
+            decode_guarded(&png(MAX_PNG_EXIF_BYTES + 1, false), 64, u64::MAX)
+        else {
+            panic!("an eXIf over the limit must not decode");
+        };
+        assert_eq!(
+            err.to_string(),
+            "Format error decoding Png: eXIf chunk is 65537 bytes, over the 65536 a tip reads"
+        );
     }
 
     #[test]
