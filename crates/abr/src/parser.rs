@@ -3072,6 +3072,22 @@ mod tests {
     }
 
     #[test]
+    fn legacy_entry_length_past_usize_is_rejected() {
+        // On 32-bit targets this `entry_end` truncates to a small `usize`.
+        for compression in [0, 1] {
+            let d = legacy_stream(
+                1,
+                &[legacy_entry(1, 1, 1, 8, compression, &[], Some(u32::MAX))],
+            );
+            assert!(parse_abr(&d).is_err(), "compression {compression}");
+            assert!(
+                parse_abr_all_deferred_without_patterns(&d).is_err(),
+                "compression {compression}"
+            );
+        }
+    }
+
+    #[test]
     fn raw_legacy_pixels_past_the_entry_are_rejected() {
         // The entry length covers the header only. With `[1, 2, 3]` the pixels
         // also run past the input, with `[1, 2, 3, 4]` they are all present.
