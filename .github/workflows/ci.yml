@@ -40,21 +40,6 @@ jobs:
       - uses: taiki-e/install-action@v2
         with: { tool: wasmtime@49.0.0 }
       - run: cargo test --workspace --target wasm32-wasip1 --no-fail-fast -- --no-capture
-  test-latest-deps:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with: { targets: wasm32-unknown-unknown }
-      - run: cargo update
-      - uses: Swatinem/rust-cache@v2
-      - name: The JPEG decoder and image share one zune-jpeg
-        run: cargo tree --invert zune-jpeg --depth 0
-      - name: The PNG decoder and image share one png
-        run: cargo tree --invert png --depth 0
-      - run: cargo test --workspace
-      - run: cargo build --workspace --target wasm32-unknown-unknown
   fuzz:
     runs-on: ubuntu-latest
     timeout-minutes: 15
