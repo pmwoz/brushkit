@@ -1,5 +1,5 @@
 use brushkit_abr::TipBitmap;
-use image::{ImageBuffer, ImageDecoder, Rgba, RgbaImage};
+use image::{ColorType, ImageBuffer, ImageDecoder, Rgba, RgbaImage};
 use std::io::Cursor;
 
 #[derive(Debug, Clone)]
@@ -85,8 +85,6 @@ impl std::error::Error for TipImageError {}
 /// otherwise luminance is inverted (dark = opaque), matching Photoshop's
 /// convention.
 pub fn decode_tip_image(bytes: &[u8]) -> Result<GrayscaleBitmap, TipImageError> {
-    use image::GenericImageView;
-
     let img = decode_guarded(bytes, MAX_IMPORT_DIMENSION, MAX_IMPORT_DECODED_BYTES).map_err(
         |e| match e {
             GuardedDecodeError::TooLarge { width, height } => {
@@ -95,38 +93,152 @@ pub fn decode_tip_image(bytes: &[u8]) -> Result<GrayscaleBitmap, TipImageError> 
             GuardedDecodeError::Decode(e) => TipImageError::Decode(e.to_string()),
         },
     )?;
-    let (width, height) = img.dimensions();
-
-    let data: Vec<u8> = match img {
-        image::DynamicImage::ImageRgba8(rgba) => alpha_in_place(rgba),
-        img if img.color().has_alpha() => alpha_in_place(img.into_luma_alpha8()),
-        img => {
-            let mut data = img.into_luma8().into_raw();
-            data.iter_mut().for_each(|v| *v = 255 - *v);
-            data
-        }
-    };
-
     Ok(GrayscaleBitmap {
-        width,
-        height,
-        data,
+        width: img.width,
+        height: img.height,
+        data: tip_plane(img, TipSample::Coverage),
     })
 }
 
-/// Each pixel's last channel, moved to the front of the image's own buffer,
-/// so the tip allocates no second buffer. The final shrink is a `realloc`,
-/// which macOS and glibc do in place for blocks this large.
-fn alpha_in_place<P: image::Pixel<Subpixel = u8>>(image: ImageBuffer<P, Vec<u8>>) -> Vec<u8> {
-    let channels = usize::from(P::CHANNEL_COUNT);
-    let mut raw = image.into_raw();
-    let pixels = raw.len() / channels;
-    for i in 0..pixels {
-        raw[i] = raw[i * channels + channels - 1];
+/// A decoded image in its own pixel format. 16-bit and float samples are in
+/// native byte order, as `ImageDecoder::read_image` writes them.
+pub(crate) struct DecodedImage {
+    pub width: u32,
+    pub height: u32,
+    pub format: PixelFormat,
+    pub bytes: Vec<u8>,
+}
+
+/// Every pixel format `image` 0.25 decodes to. The float formats come from
+/// decoders a dependent crate may enable on the shared `image` dependency.
+#[derive(Clone, Copy)]
+pub(crate) enum PixelFormat {
+    L8,
+    La8,
+    Rgb8,
+    Rgba8,
+    L16,
+    La16,
+    Rgb16,
+    Rgba16,
+    Rgb32F,
+    Rgba32F,
+}
+
+impl PixelFormat {
+    fn of(color: ColorType) -> Option<Self> {
+        Some(match color {
+            ColorType::L8 => Self::L8,
+            ColorType::La8 => Self::La8,
+            ColorType::Rgb8 => Self::Rgb8,
+            ColorType::Rgba8 => Self::Rgba8,
+            ColorType::L16 => Self::L16,
+            ColorType::La16 => Self::La16,
+            ColorType::Rgb16 => Self::Rgb16,
+            ColorType::Rgba16 => Self::Rgba16,
+            ColorType::Rgb32F => Self::Rgb32F,
+            ColorType::Rgba32F => Self::Rgba32F,
+            _ => return None,
+        })
+    }
+
+    fn color_type(self) -> ColorType {
+        match self {
+            Self::L8 => ColorType::L8,
+            Self::La8 => ColorType::La8,
+            Self::Rgb8 => ColorType::Rgb8,
+            Self::Rgba8 => ColorType::Rgba8,
+            Self::L16 => ColorType::L16,
+            Self::La16 => ColorType::La16,
+            Self::Rgb16 => ColorType::Rgb16,
+            Self::Rgba16 => ColorType::Rgba16,
+            Self::Rgb32F => ColorType::Rgb32F,
+            Self::Rgba32F => ColorType::Rgba32F,
+        }
+    }
+
+    fn bytes_per_pixel(self) -> usize {
+        usize::from(self.color_type().bytes_per_pixel())
+    }
+}
+
+/// What a tip keeps of each pixel.
+#[derive(Clone, Copy)]
+pub(crate) enum TipSample {
+    /// Alpha when the image has it, otherwise inverted luma, so dark is opaque.
+    Coverage,
+    Luma,
+}
+
+/// One byte per pixel, written over the front of the decoded buffer so the tip
+/// allocates no second buffer. Values are `image`'s own `into_luma8` and
+/// `into_luma_alpha8` conversions. The final shrink is a `realloc`, measured in
+/// place from 16 to 512 MiB on glibc and both wasm32 targets, and on macOS
+/// except a 16 MiB block shrunk to 2 MiB. An allocator that moves the block
+/// adds the tip's size to the peak.
+pub(crate) fn tip_plane(image: DecodedImage, sample: TipSample) -> Vec<u8> {
+    const CHUNK: usize = 4096;
+    let format = image.format;
+    let bytes_per_pixel = format.bytes_per_pixel();
+    let coverage = matches!(sample, TipSample::Coverage);
+    let alpha = coverage && format.color_type().has_alpha();
+    let mut raw = image.bytes;
+    let pixels = raw.len() / bytes_per_pixel;
+    if alpha && matches!(format, PixelFormat::La8 | PixelFormat::Rgba8) {
+        for i in 0..pixels {
+            raw[i] = raw[i * bytes_per_pixel + bytes_per_pixel - 1];
+        }
+    } else if bytes_per_pixel > 1 {
+        // Chunk `start..end` is written to bytes `start..end`, which precede
+        // its own source bytes, so no unread pixel is overwritten.
+        for start in (0..pixels).step_by(CHUNK) {
+            let end = (start + CHUNK).min(pixels);
+            let chunk = &raw[start * bytes_per_pixel..end * bytes_per_pixel];
+            let plane = convert_chunk(format, alpha, chunk);
+            raw[start..end].copy_from_slice(&plane);
+        }
     }
     raw.truncate(pixels);
     raw.shrink_to_fit();
+    if coverage && !alpha {
+        raw.iter_mut().for_each(|v| *v = 255 - *v);
+    }
     raw
+}
+
+/// One byte per pixel of `chunk`, alpha when `alpha` and luma otherwise,
+/// through a one-row image so `image` does the conversion.
+fn convert_chunk(format: PixelFormat, alpha: bool, chunk: &[u8]) -> Vec<u8> {
+    use image::DynamicImage::*;
+    let width = (chunk.len() / format.bytes_per_pixel()) as u32;
+    let u8s = || chunk.to_vec();
+    let u16s = || {
+        let samples = chunk.as_chunks::<2>().0.iter();
+        samples.map(|s| u16::from_ne_bytes(*s)).collect()
+    };
+    let f32s = || {
+        let samples = chunk.as_chunks::<4>().0.iter();
+        samples.map(|s| f32::from_ne_bytes(*s)).collect()
+    };
+    let pixels = match format {
+        PixelFormat::L8 => ImageBuffer::from_raw(width, 1, u8s()).map(ImageLuma8),
+        PixelFormat::La8 => ImageBuffer::from_raw(width, 1, u8s()).map(ImageLumaA8),
+        PixelFormat::Rgb8 => ImageBuffer::from_raw(width, 1, u8s()).map(ImageRgb8),
+        PixelFormat::Rgba8 => ImageBuffer::from_raw(width, 1, u8s()).map(ImageRgba8),
+        PixelFormat::L16 => ImageBuffer::from_raw(width, 1, u16s()).map(ImageLuma16),
+        PixelFormat::La16 => ImageBuffer::from_raw(width, 1, u16s()).map(ImageLumaA16),
+        PixelFormat::Rgb16 => ImageBuffer::from_raw(width, 1, u16s()).map(ImageRgb16),
+        PixelFormat::Rgba16 => ImageBuffer::from_raw(width, 1, u16s()).map(ImageRgba16),
+        PixelFormat::Rgb32F => ImageBuffer::from_raw(width, 1, f32s()).map(ImageRgb32F),
+        PixelFormat::Rgba32F => ImageBuffer::from_raw(width, 1, f32s()).map(ImageRgba32F),
+    }
+    .expect("a chunk holds whole pixels");
+    if alpha {
+        let luma_alpha = pixels.into_luma_alpha8().into_raw();
+        luma_alpha.into_iter().skip(1).step_by(2).collect()
+    } else {
+        pixels.into_luma8().into_raw()
+    }
 }
 
 /// Why `decode_guarded` returned no image.
@@ -146,7 +258,7 @@ pub(crate) fn decode_guarded(
     bytes: &[u8],
     max_side: u32,
     max_bytes: u64,
-) -> Result<image::DynamicImage, GuardedDecodeError> {
+) -> Result<DecodedImage, GuardedDecodeError> {
     if let Some((width, height)) = header_dimensions(bytes) {
         if width > max_side || height > max_side {
             return Err(GuardedDecodeError::TooLarge { width, height });
@@ -183,7 +295,29 @@ pub(crate) fn decode_guarded(
     decoder
         .set_limits(limits)
         .map_err(GuardedDecodeError::Decode)?;
-    image::DynamicImage::from_decoder(decoder).map_err(GuardedDecodeError::Decode)
+    let (width, height) = decoder.dimensions();
+    let color = decoder.color_type();
+    let format = PixelFormat::of(color).ok_or_else(|| {
+        GuardedDecodeError::Decode(image::ImageError::Unsupported(
+            image::error::UnsupportedError::from_format_and_kind(
+                image::error::ImageFormatHint::Unknown,
+                image::error::UnsupportedErrorKind::Color(color.into()),
+            ),
+        ))
+    })?;
+    // One buffer in the decoder's own format, so a converting tip reuses it.
+    let total_bytes = usize::try_from(decoder.total_bytes())
+        .map_err(|_| GuardedDecodeError::TooLarge { width, height })?;
+    let mut bytes = vec![0; total_bytes];
+    decoder
+        .read_image(&mut bytes)
+        .map_err(GuardedDecodeError::Decode)?;
+    Ok(DecodedImage {
+        width,
+        height,
+        format,
+        bytes,
+    })
 }
 
 /// Reads header dimensions without allocating pixels or applying decode limits.
@@ -393,6 +527,72 @@ mod tip_image_tests {
             err.to_string().starts_with("image is "),
             "unexpected message: {err}"
         );
+    }
+
+    /// Every decodable pixel format, filled with varied samples, over several
+    /// conversion chunks.
+    fn every_format() -> [(PixelFormat, image::DynamicImage); 10] {
+        let base = image::DynamicImage::ImageRgba16(ImageBuffer::from_fn(100, 100, |x, y| {
+            let i = (y * 100 + x) * 4;
+            image::Rgba([0, 1, 2, 3].map(|c| ((i + c).wrapping_mul(0x9E37_79B9) >> 16) as u16))
+        }));
+        [
+            (PixelFormat::L8, base.to_luma8().into()),
+            (PixelFormat::La8, base.to_luma_alpha8().into()),
+            (PixelFormat::Rgb8, base.to_rgb8().into()),
+            (PixelFormat::Rgba8, base.to_rgba8().into()),
+            (PixelFormat::L16, base.to_luma16().into()),
+            (PixelFormat::La16, base.to_luma_alpha16().into()),
+            (PixelFormat::Rgb16, base.to_rgb16().into()),
+            (PixelFormat::Rgb32F, base.to_rgb32f().into()),
+            (PixelFormat::Rgba32F, base.to_rgba32f().into()),
+            (PixelFormat::Rgba16, base),
+        ]
+    }
+
+    #[test]
+    fn tips_match_image_conversions_for_every_format() {
+        for (format, image) in every_format() {
+            let name = format!("{:?}", image.color());
+            let coverage = if image.color().has_alpha() {
+                image.to_luma_alpha8().pixels().map(|p| p.0[1]).collect()
+            } else {
+                let luma = image.to_luma8().into_raw();
+                luma.into_iter().map(|v| 255 - v).collect::<Vec<_>>()
+            };
+            let luma = image.to_luma8().into_raw();
+            let decoded = |image: &image::DynamicImage| DecodedImage {
+                width: image.width(),
+                height: image.height(),
+                format,
+                bytes: image.as_bytes().to_vec(),
+            };
+            assert_eq!(
+                tip_plane(decoded(&image), TipSample::Coverage),
+                coverage,
+                "coverage {name}"
+            );
+            assert_eq!(
+                tip_plane(decoded(&image), TipSample::Luma),
+                luma,
+                "luma {name}"
+            );
+            if !matches!(format, PixelFormat::Rgb32F | PixelFormat::Rgba32F) {
+                let mut png = std::io::Cursor::new(Vec::new());
+                image.write_to(&mut png, image::ImageFormat::Png).unwrap();
+                let png = png.into_inner();
+                assert_eq!(
+                    decode_tip_image(&png).unwrap().data,
+                    coverage,
+                    "decode_tip_image {name}"
+                );
+                assert_eq!(
+                    crate::procreate::decode_tip_png(&png).unwrap().data,
+                    luma,
+                    "decode_tip_png {name}"
+                );
+            }
+        }
     }
 
     #[test]
