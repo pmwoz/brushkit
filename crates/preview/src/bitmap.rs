@@ -1,7 +1,7 @@
 use brushkit_abr::TipBitmap;
 use image::{ColorType, ImageBuffer, ImageDecoder, Rgba, RgbaImage};
 use std::io::Cursor;
-use zune_jpeg::zune_core::bytestream::ZCursor;
+use zune_jpeg::zune_core::bytestream::{ZByteReaderTrait, ZCursor};
 use zune_jpeg::zune_core::colorspace::ColorSpace;
 use zune_jpeg::zune_core::options::DecoderOptions;
 
@@ -365,7 +365,7 @@ fn decode_jpeg(
     let mut pixels = vec![0; total_bytes];
     // A second decoder, because zune-jpeg picks its color conversion while it
     // reads the headers.
-    jpeg_decoder(bytes, output_color)
+    jpeg_decoder(ZCursor::new(bytes), output_color)
         .decode_into(&mut pixels)
         .map_err(jpeg_error)?;
     Ok(DecodedImage {
@@ -376,14 +376,17 @@ fn decode_jpeg(
     })
 }
 
-/// zune-jpeg over the borrowed bytes, with the options `image` decodes with.
-fn jpeg_decoder(bytes: &[u8], output_color: ColorSpace) -> zune_jpeg::JpegDecoder<ZCursor<&[u8]>> {
+/// zune-jpeg over `reader`, with the options `image` decodes with.
+fn jpeg_decoder<R: ZByteReaderTrait>(
+    reader: R,
+    output_color: ColorSpace,
+) -> zune_jpeg::JpegDecoder<R> {
     let options = DecoderOptions::default()
         .jpeg_set_out_colorspace(output_color)
         .set_strict_mode(false)
         .set_max_width(usize::MAX)
         .set_max_height(usize::MAX);
-    zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(bytes), options)
+    zune_jpeg::JpegDecoder::new_with_options(reader, options)
 }
 
 /// What `decode_jpeg` needs from a JPEG's headers.
@@ -397,16 +400,21 @@ struct JpegHeader {
 /// Reads the headers without `JpegDecoder::info`, which returns a copy of
 /// every metadata segment the decoder keeps.
 fn jpeg_header(bytes: &[u8]) -> Result<JpegHeader, zune_jpeg::errors::DecodeErrors> {
-    let mut decoder = jpeg_decoder(bytes, ColorSpace::RGB);
+    // `decode_headers` stops right after the first scan header, so the
+    // cursor's position is where that header ends.
+    let mut cursor = Cursor::new(bytes);
+    let mut decoder = jpeg_decoder(&mut cursor, ColorSpace::RGB);
     decoder.decode_headers()?;
     let (width, height) = decoder.dimensions().expect("headers were decoded");
+    let input_color = decoder.input_colorspace().expect("headers were decoded");
     let side = |side: usize| u32::try_from(side).expect("zune-jpeg frame sides are u16");
     let (width, height) = (side(width), side(height));
+    let scan_end = usize::try_from(cursor.position()).expect("within the input");
     Ok(JpegHeader {
         width,
         height,
-        input_color: decoder.input_colorspace().expect("headers were decoded"),
-        coefficient_bytes: coefficient_bytes(bytes, width, height),
+        input_color,
+        coefficient_bytes: coefficient_bytes(bytes, width, height, &bytes[..scan_end]),
     })
 }
 
@@ -440,56 +448,42 @@ pub(crate) fn header_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     }
 }
 
-/// The DCT coefficients zune-jpeg holds for the whole image: those of a
-/// progressive JPEG until its last scan, and those of a baseline JPEG whose
-/// first scan leaves out a component until its scans hold them all.
+/// The DCT coefficients zune-jpeg holds for the whole image during the
+/// decode: those of a progressive JPEG, and those of a baseline JPEG whose
+/// first scan, the one that ends `to_first_scan`, leaves out a component.
 ///
-/// zune-jpeg keeps its frame type and headers private, so every frame header
-/// (0xFFC0, 0xFFC1 or 0xFFC2) zune-jpeg would accept at the size it reports is
-/// a candidate, and the largest count wins. A baseline candidate counts only
-/// when a scan header after it holds fewer components. zune-jpeg allocates
-/// coefficients only after it parses a candidate, and for a baseline one only
-/// when the scan header it parses next holds fewer components, so the count is
+/// zune-jpeg reports the frame type and sampling factors only through
+/// `JpegDecoder::info`, which copies every metadata segment, so every frame
+/// header (0xFFC0, 0xFFC1 or 0xFFC2) zune-jpeg would accept at the size it
+/// reports is a candidate, and the largest count wins. A baseline candidate
+/// counts only when the first scan holds fewer components than it. zune-jpeg
+/// allocates coefficients only after it parses a candidate, so the count is
 /// never below zune-jpeg's. A candidate zune-jpeg never parses, such as one
 /// inside a skipped segment, counts too.
-fn coefficient_bytes(bytes: &[u8], width: u32, height: u32) -> u64 {
-    // Walked back to front, so the fewest components of a scan header after
-    // each frame header is known when it is reached.
-    let mut fewest_scanned = u8::MAX;
-    let mut largest = 0;
-    for i in (1..bytes.len()).rev() {
-        if bytes[i - 1] != 0xFF {
-            continue;
-        }
-        let header = &bytes[i + 1..];
-        match bytes[i] {
-            0xDA => {
-                if let Some(components) = scan_components(header) {
-                    fewest_scanned = fewest_scanned.min(components);
-                }
-            }
-            marker @ 0xC0..=0xC2 => {
-                if let Some((components, coefficients)) = frame_coefficients(header, width, height)
-                {
-                    if marker == 0xC2 || fewest_scanned < components {
-                        largest = largest.max(coefficients);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    largest
+fn coefficient_bytes(bytes: &[u8], width: u32, height: u32, to_first_scan: &[u8]) -> u64 {
+    let first_scan = scan_components(to_first_scan);
+    (1..bytes.len())
+        .filter(|&i| bytes[i - 1] == 0xFF && matches!(bytes[i], 0xC0..=0xC2))
+        .filter_map(|i| {
+            let (components, coefficients) = frame_coefficients(&bytes[i + 1..], width, height)?;
+            (bytes[i] == 0xC2 || first_scan < components).then_some(coefficients)
+        })
+        .max()
+        .unwrap_or(0)
 }
 
-/// The component count of a scan header zune-jpeg would accept.
-fn scan_components(header: &[u8]) -> Option<u8> {
-    // Length, then the component count.
-    let &[length_high, length_low, components, ..] = header else {
-        return None;
-    };
-    let length = u16::from_be_bytes([length_high, length_low]);
-    ((1..=4).contains(&components) && length == 6 + 2 * u16::from(components)).then_some(components)
+/// The component count of the scan header that ends `bytes`: 0xFFDA, its
+/// length, the count, two bytes per component and three more. The smallest
+/// count that fits wins, and 1 if none does, so a doubt counts coefficients.
+fn scan_components(bytes: &[u8]) -> u8 {
+    (1..=4)
+        .find(|&components| {
+            let length = 6 + 2 * usize::from(components);
+            bytes.len().checked_sub(length + 2).is_some_and(|marker| {
+                bytes[marker..marker + 5] == [0xFF, 0xDA, 0, length as u8, components]
+            })
+        })
+        .unwrap_or(1)
 }
 
 /// The component count of a frame header zune-jpeg would accept at `width` x

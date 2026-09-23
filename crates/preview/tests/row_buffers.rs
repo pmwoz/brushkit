@@ -52,13 +52,18 @@ fn uncounted(name: &str, bytes: &[u8], height: u32, counted_per_pixel: usize) ->
 #[test]
 fn uncounted_decode_buffers_do_not_grow_with_the_height() {
     type Fixture = fn(u32) -> Vec<u8>;
-    let cases: [(&str, Fixture, usize); 8] = [
+    let cases: [(&str, Fixture, usize); 9] = [
         ("baseline gray JPEG", |h| baseline_jpeg(WIDTH, h, 1), 1),
         ("baseline RGB JPEG", |h| baseline_jpeg(WIDTH, h, 3), 3),
         (
-            "baseline RGB JPEG, one component in the first scan",
-            |h| partial_scan_jpeg(WIDTH, h, 3, 1),
+            "baseline 4:4:4 JPEG, one component in the first scan",
+            |h| partial_scan_jpeg(WIDTH, h, &[0x11; 3], 1),
             3 + 6,
+        ),
+        (
+            "baseline 4:2:0 JPEG, one component in the first scan",
+            |h| partial_scan_jpeg(WIDTH, h, &[0x22, 0x11, 0x11], 1),
+            3 + 3,
         ),
         (
             "progressive gray JPEG",

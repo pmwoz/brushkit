@@ -138,8 +138,7 @@ pub fn rgba_dimension_bomb_png(w: u32, h: u32, bit_depth: u8) -> Vec<u8> {
 /// Each Huffman table holds one 1-bit code: every block is a zero DC and an
 /// immediate end-of-block.
 pub fn baseline_jpeg(width: u32, height: u32, components: u8) -> Vec<u8> {
-    hand_written_jpeg(
-        0xC0,
+    partial_scan_jpeg(
         width,
         height,
         &vec![0x11; usize::from(components)],
@@ -147,16 +146,11 @@ pub fn baseline_jpeg(width: u32, height: u32, components: u8) -> Vec<u8> {
     )
 }
 
-/// `baseline_jpeg` whose one scan holds only the first `scan` of its
-/// `components`, as a non-interleaved JPEG's first scan does.
-pub fn partial_scan_jpeg(width: u32, height: u32, components: u8, scan: u8) -> Vec<u8> {
-    hand_written_jpeg(
-        0xC0,
-        width,
-        height,
-        &vec![0x11; usize::from(components)],
-        scan,
-    )
+/// `baseline_jpeg` with one component per `sampling` byte (0xHV), whose one
+/// scan holds only the first `scan` of them, as a non-interleaved JPEG's first
+/// scan does.
+pub fn partial_scan_jpeg(width: u32, height: u32, sampling: &[u8], scan: u8) -> Vec<u8> {
+    hand_written_jpeg(0xC0, width, height, sampling, scan)
 }
 
 /// `baseline_jpeg` as a progressive JPEG with one component per `sampling`
