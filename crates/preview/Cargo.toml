@@ -23,6 +23,8 @@ plist.workspace = true
 zip.workspace = true
 # Inflates a fixture PNG's IDAT to check its row filters.
 flate2.workspace = true
+# The tests encode JPEG fixtures and compare zune-jpeg with image's decoder.
+image = { workspace = true, features = ["jpeg"] }
 
 [features]
 default = ["text"]
