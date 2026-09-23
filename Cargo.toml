@@ -4,15 +4,15 @@ members = ["crates/brushkit", "crates/abr", "crates/preview", "crates/fixture"]
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.2.3"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/pmwoz/brushkit"
 readme = "README.md"
 
 [workspace.dependencies]
-brushkit-abr = { path = "crates/abr", version = "0.2.3" }
-brushkit-preview = { path = "crates/preview", version = "0.2.3", default-features = false }
+brushkit-abr = { path = "crates/abr", version = "0.3.0" }
+brushkit-preview = { path = "crates/preview", version = "0.3.0", default-features = false }
 thiserror = "2"
 byteorder = "1"
 flate2 = "1"
