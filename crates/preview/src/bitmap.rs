@@ -97,12 +97,14 @@ pub fn decode_tip_image(bytes: &[u8]) -> Result<GrayscaleBitmap, TipImageError> 
     )?;
     let (width, height) = img.dimensions();
 
-    let data: Vec<u8> = if img.color().has_alpha() {
-        img.into_luma_alpha8().pixels().map(|p| p.0[1]).collect()
-    } else {
-        let mut data = img.into_luma8().into_raw();
-        data.iter_mut().for_each(|v| *v = 255 - *v);
-        data
+    let data: Vec<u8> = match img {
+        image::DynamicImage::ImageRgba8(rgba) => rgba.pixels().map(|p| p.0[3]).collect(),
+        img if img.color().has_alpha() => img.into_luma_alpha8().pixels().map(|p| p.0[1]).collect(),
+        img => {
+            let mut data = img.into_luma8().into_raw();
+            data.iter_mut().for_each(|v| *v = 255 - *v);
+            data
+        }
     };
 
     Ok(GrayscaleBitmap {
