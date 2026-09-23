@@ -85,8 +85,14 @@ impl std::fmt::Display for ShapePngError {
 impl std::error::Error for ShapePngError {}
 
 /// Decode a Procreate `Shape.png` into a grayscale tip. White is stamp
-/// coverage, so the luminance is taken as-is.
+/// coverage, so the luminance is taken as-is. Oversize is decided from the
+/// header, before any pixels are decoded.
 pub fn decode_tip_png(bytes: &[u8]) -> Result<GrayscaleBitmap, ShapePngError> {
+    if let Some((width, height)) = header_dimensions(bytes) {
+        if width > MAX_PNG_DIMENSION || height > MAX_PNG_DIMENSION {
+            return Err(ShapePngError::TooLarge { width, height });
+        }
+    }
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| ShapePngError::Corrupt(format!("failed to sniff Shape.png: {e}")))?;
@@ -97,17 +103,7 @@ pub fn decode_tip_png(bytes: &[u8]) -> Result<GrayscaleBitmap, ShapePngError> {
     reader.limits(limits);
     let luma = reader
         .decode()
-        .map_err(|e| match &e {
-            image::ImageError::Limits(l)
-                if matches!(l.kind(), image::error::LimitErrorKind::DimensionError) =>
-            {
-                match header_dimensions(bytes) {
-                    Some((width, height)) => ShapePngError::TooLarge { width, height },
-                    None => ShapePngError::Corrupt(format!("failed to decode Shape.png: {e}")),
-                }
-            }
-            _ => ShapePngError::Corrupt(format!("failed to decode Shape.png: {e}")),
-        })?
+        .map_err(|e| ShapePngError::Corrupt(format!("failed to decode Shape.png: {e}")))?
         .to_luma8();
     Ok(GrayscaleBitmap {
         width: luma.width(),
