@@ -120,15 +120,16 @@ pub fn decode_tip_png(bytes: &[u8]) -> Result<GrayscaleBitmap, ShapePngError> {
 /// PNG goes through the `png` header alone: `image` sizes the output buffer
 /// before it reports dimensions, which fails on 32-bit targets for large ones.
 pub(crate) fn header_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
-    let reader = image::ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .ok()?;
-    if reader.format() == Some(image::ImageFormat::Png) {
+    if image::guess_format(bytes).ok()? == image::ImageFormat::Png {
         let mut decoder = png::Decoder::new(Cursor::new(bytes));
         let info = decoder.read_header_info().ok()?;
         return Some((info.width, info.height));
     }
-    reader.into_dimensions().ok()
+    image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
 }
 
 /// The set name and the member uuids a `brushset.plist` declares, in its order.
