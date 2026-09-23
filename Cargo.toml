@@ -30,12 +30,12 @@ png = "=0.18.1"
 # Decodes a JPEG the way `image` 0.25 does, without its copy of the input. The
 # tests compare it with image's JPEG decoder, so it must resolve to the copy
 # `image` uses, which CI checks. Exact pin: the coefficient budget, the first
-# scan header's end, read from the cursor after `decode_headers`, the extended
-# XMP namespace peek that `HideExtendedXmp` changes and the APP1 length field
-# it reads before that peek, and the JPEG metadata sentence of
-# `TipImageError::TooLarge` follow 0.5.15's internals, so recheck them in
-# `crates/preview/src/bitmap.rs` before a bump.
+# scan header's end, read from the cursor after `decode_headers`, the metadata
+# identifier peeks that `HideMetadata` changes, each right after the segment's
+# length field and each identifier length peeked by one parser only, and the
+# JPEG metadata sentence of `TipImageError::TooLarge` follow 0.5.15's
+# internals, so recheck them in `crates/preview/src/bitmap.rs` before a bump.
 zune-jpeg = "=0.5.15"
-# `HideExtendedXmp` implements zune-jpeg's reader trait, which in 0.5.1 has two
+# `HideMetadata` implements zune-jpeg's reader trait, which in 0.5.1 has two
 # more required methods.
 zune-core = "0.5.3"

@@ -46,23 +46,55 @@ fn noise_jpeg() -> Vec<u8> {
     bytes
 }
 
-/// A gray JPEG with 100 APP2 gain-map segments of 65,000 bytes after SOI.
-/// zune-jpeg keeps its own copy of each one, which the tip never reads. The
-/// segments must outweigh `PIXELS + DECODER_SLACK`, so a second copy, made
-/// before the pixels are allocated, breaks the bound.
-fn gain_map_jpeg() -> Vec<u8> {
-    const GAIN_MAP: &[u8] = b"urn:iso:std:iso:ts:21496:-1\0";
-    let mut segment = vec![0xFF, 0xE2];
-    let length = u16::try_from(2 + GAIN_MAP.len() + 65_000).expect("segment fits");
+/// A JPEG segment: `marker`, its length and `body`.
+fn segment(marker: u8, body: &[u8]) -> Vec<u8> {
+    let length = u16::try_from(2 + body.len()).expect("segment fits");
+    let mut segment = vec![0xFF, marker];
     segment.extend_from_slice(&length.to_be_bytes());
-    segment.extend_from_slice(GAIN_MAP);
-    segment.resize(2 + usize::from(length), 0x5A);
+    segment.extend_from_slice(body);
+    segment
+}
+
+/// A gray JPEG with `metadata` after SOI, which the tip never reads. It
+/// outweighs `PIXELS + DECODER_SLACK`, so keeping it breaks the bound.
+fn jpeg_with_metadata(metadata: Vec<u8>) -> Vec<u8> {
     let mut jpeg = encode(
         ImageBuffer::from_pixel(SIDE, SIDE, Luma([0x40u8])).into(),
         ImageFormat::Jpeg,
     );
-    jpeg.splice(2..2, segment.repeat(100));
+    jpeg.splice(2..2, metadata);
     jpeg
+}
+
+/// 100 APP2 gain-map segments of 65,000 bytes.
+fn gain_map_jpeg() -> Vec<u8> {
+    let mut body = b"urn:iso:std:iso:ts:21496:-1\0".to_vec();
+    body.resize(body.len() + 65_000, 0x5A);
+    jpeg_with_metadata(segment(0xE2, &body).repeat(100))
+}
+
+/// One extended XMP packet in 100 APP1 parts of 65,000 bytes. zune-jpeg
+/// joins the parts into a new buffer while it still holds them.
+fn extended_xmp_jpeg() -> Vec<u8> {
+    const PART: u32 = 65_000;
+    const PARTS: u32 = 100;
+    let metadata = (0..PARTS)
+        .flat_map(|part| {
+            let mut body = b"http://ns.adobe.com/xmp/extension/\0".to_vec();
+            body.extend_from_slice(&[b'G'; 32]);
+            body.extend_from_slice(&(PART * PARTS).to_be_bytes());
+            body.extend_from_slice(&(PART * part).to_be_bytes());
+            body.resize(body.len() + PART as usize, b'x');
+            segment(0xE1, &body)
+        })
+        .collect();
+    jpeg_with_metadata(metadata)
+}
+
+/// 262,145 APP2 ICC segments of 19 bytes, the smallest zune-jpeg keeps. Each
+/// adds a 32-byte entry to a list that doubles as it grows.
+fn icc_jpeg() -> Vec<u8> {
+    jpeg_with_metadata(segment(0xE2, b"ICC_PROFILE\0\x01\x01x").repeat(262_145))
 }
 
 /// `png` with a `kind` chunk holding `data` after IHDR.
@@ -275,12 +307,17 @@ fn tip_decoders_hold_no_copy_of_the_decoded_image() {
         "a rejected eXIf must not be kept: {growth} bytes"
     );
 
-    let name = "decode_tip_image gray JPEG with gain-map segments";
-    let jpeg = gain_map_jpeg();
-    let growth = measure(name, || tip_image(&jpeg));
-    println!("{name}: {growth} bytes");
-    assert!(
-        growth <= PIXELS + jpeg.len() + DECODER_SLACK,
-        "{name} must hold at most one copy of its metadata: {growth} bytes"
-    );
+    for (name, jpeg) in [
+        ("gain-map segments", gain_map_jpeg()),
+        ("extended XMP", extended_xmp_jpeg()),
+        ("ICC segments", icc_jpeg()),
+    ] {
+        let name = format!("decode_tip_image gray JPEG with {name}");
+        let growth = measure(&name, || tip_image(&jpeg));
+        println!("{name}: {growth} bytes");
+        assert!(
+            growth <= PIXELS + DECODER_SLACK,
+            "{name} must not keep its metadata: {growth} bytes"
+        );
+    }
 }

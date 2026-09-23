@@ -68,11 +68,8 @@ pub enum TipImageError {
     /// first scan leaves out a component. The decoder's other buffers are not
     /// counted: up to a few hundred KiB at any width, more for wide images,
     /// whose row buffers grow with the width. Neither is a PNG's eXIf chunk of
-    /// at most 64 KiB, which the decoder holds twice, up to 128 KiB. Nor is
-    /// zune-jpeg's copy of a JPEG's metadata segments other than extended
-    /// XMP, which it never sees. It adds a list entry per segment, so it
-    /// reaches about the input size for large segments and about five times
-    /// for many small ones.
+    /// at most 64 KiB, which the decoder holds twice, up to 128 KiB. A JPEG's
+    /// metadata segments cost nothing: zune-jpeg skips them without a copy.
     TooLarge { width: u32, height: u32 },
 }
 
@@ -267,7 +264,7 @@ pub(crate) enum GuardedDecodeError {
 /// for the whole image, counted by `coefficient_bytes`. The decoder's other
 /// buffers are not counted, as [`TipImageError::TooLarge`] describes. Oversize
 /// is decided from the header before any pixels are decoded. A JPEG is decoded
-/// from `bytes`, and only its metadata segments are copied. A PNG's iCCP
+/// from `bytes`, and its metadata segments are skipped. A PNG's iCCP
 /// profile and text chunks are skipped, and one with an eXIf chunk over
 /// [`MAX_PNG_EXIF_BYTES`] before the image data does not decode.
 pub(crate) fn decode_guarded(
@@ -508,42 +505,56 @@ fn decode_jpeg(
 fn jpeg_decoder<R: ZByteReaderTrait>(
     reader: R,
     output_color: ColorSpace,
-) -> zune_jpeg::JpegDecoder<HideExtendedXmp<R>> {
+) -> zune_jpeg::JpegDecoder<HideMetadata<R>> {
     let options = DecoderOptions::default()
         .jpeg_set_out_colorspace(output_color)
         .set_strict_mode(false)
         .set_max_width(usize::MAX)
         .set_max_height(usize::MAX);
-    zune_jpeg::JpegDecoder::new_with_options(HideExtendedXmp(reader), options)
+    zune_jpeg::JpegDecoder::new_with_options(HideMetadata(reader), options)
 }
 
-/// `reader` with every extended XMP part hidden from zune-jpeg, which the tip
-/// never reads. Before the first scan, zune-jpeg sorts and walks the parts it
-/// holds after every marker, so parts that never complete make the header
-/// parse quadratic. zune-jpeg recognizes a part by peeking its 35-byte
-/// namespace, so this reader changes that peek and zune-jpeg skips the part
-/// as an unknown APP1 segment. A part too short for its 40-byte header or
-/// running past the end of the input stays visible, so zune-jpeg rejects it
-/// as `image` does.
-struct HideExtendedXmp<R>(R);
+/// `reader` with every metadata segment zune-jpeg keeps a copy of hidden from
+/// it: EXIF, XMP, extended XMP, ICC, gain map, MPF and IPTC. The tip reads
+/// none of them. zune-jpeg keeps a list entry per ICC and gain-map segment,
+/// which reaches five times the input for many small ones, and before the
+/// first scan it sorts and walks the extended XMP parts it holds after every
+/// marker, so parts that never complete make the header parse quadratic.
+/// zune-jpeg recognizes each segment by peeking its identifier, so this reader
+/// changes that peek and zune-jpeg skips the segment as an unknown one. A
+/// segment zune-jpeg would reject, too short for an extended XMP part's
+/// 40-byte header or running past the end of the input, stays visible, so
+/// zune-jpeg rejects it as `image` does.
+struct HideMetadata<R>(R);
 
-const EXTENDED_XMP_NAMESPACE: &[u8; 35] = b"http://ns.adobe.com/xmp/extension/\0";
+/// The identifier of each segment zune-jpeg keeps, and the bytes it requires
+/// after the identifier. zune-jpeg peeks each identifier length in one parser
+/// only, so matching the identifier alone is exact.
+const KEPT_SEGMENTS: &[(&[u8], u64)] = &[
+    (b"Exif\0\0", 0),
+    (b"http://ns.adobe.com/xap/1.0/\0", 0),
+    (b"http://ns.adobe.com/xmp/extension/\0", 40),
+    (b"ICC_PROFILE\0", 0),
+    (b"urn:iso:std:iso:ts:21496:-1\0", 0),
+    (b"MPF\0", 0),
+    (b"Photoshop 3.0\0", 0),
+];
 
-impl<R: ZByteReaderTrait> HideExtendedXmp<R> {
-    /// Whether the APP1 segment whose length field ends at the cursor holds
-    /// the namespace and a 40-byte part header, and ends within the input.
-    fn holds_part_header(&mut self) -> Result<bool, ZByteIoError> {
+impl<R: ZByteReaderTrait> HideMetadata<R> {
+    /// Whether the segment whose length field ends at the cursor holds `bytes`
+    /// after that field and ends within the input.
+    fn holds(&mut self, bytes: u64) -> Result<bool, ZByteIoError> {
         let position = self.0.z_seek(ZSeekFrom::Current(-2))?;
         let mut length = [0; 2];
         self.0.read_exact_bytes(&mut length)?;
         let length = u64::from(u16::from_be_bytes(length));
         let end = self.0.z_seek(ZSeekFrom::End(0))?;
         self.0.z_seek(ZSeekFrom::Start(position + 2))?;
-        Ok(length >= 2 + EXTENDED_XMP_NAMESPACE.len() as u64 + 40 && position + length <= end)
+        Ok(length >= 2 + bytes && position + length <= end)
     }
 }
 
-impl<R: ZByteReaderTrait> ZByteReaderTrait for HideExtendedXmp<R> {
+impl<R: ZByteReaderTrait> ZByteReaderTrait for HideMetadata<R> {
     fn read_byte_no_error(&mut self) -> u8 {
         self.0.read_byte_no_error()
     }
@@ -562,8 +573,13 @@ impl<R: ZByteReaderTrait> ZByteReaderTrait for HideExtendedXmp<R> {
 
     fn peek_exact_bytes(&mut self, buf: &mut [u8]) -> Result<(), ZByteIoError> {
         self.0.peek_exact_bytes(buf)?;
-        if buf == EXTENDED_XMP_NAMESPACE && self.holds_part_header()? {
-            buf[0] = 0;
+        let kept = KEPT_SEGMENTS
+            .iter()
+            .find(|(identifier, _)| buf == *identifier);
+        if let Some(&(identifier, header)) = kept {
+            if self.holds(identifier.len() as u64 + header)? {
+                buf[0] = 0;
+            }
         }
         Ok(())
     }
@@ -593,8 +609,6 @@ struct JpegHeader {
     coefficient_bytes: u64,
 }
 
-/// Reads the headers without `JpegDecoder::info`, which returns a copy of
-/// every metadata segment the decoder keeps.
 fn jpeg_header(bytes: &[u8]) -> Result<JpegHeader, zune_jpeg::errors::DecodeErrors> {
     // `decode_headers` stops right after the first scan header, so the
     // cursor's position is where that header ends.
@@ -649,9 +663,8 @@ pub(crate) fn header_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 /// first scan, the one whose header ends `to_first_scan`, leaves out a
 /// component.
 ///
-/// zune-jpeg reports the frame type and sampling factors only through
-/// `JpegDecoder::info`, which copies every metadata segment, so every frame
-/// header (0xFFC0, 0xFFC1 or 0xFFC2) in `to_first_scan` that zune-jpeg would
+/// The frame header is read from the bytes, not from `JpegDecoder::info`,
+/// whose `SampleRatios` is too coarse for the count, so every frame header (0xFFC0, 0xFFC1 or 0xFFC2) in `to_first_scan` that zune-jpeg would
 /// accept at the size it reports is a candidate, and the largest count wins.
 /// A baseline candidate counts only when the first scan holds fewer
 /// components than it. zune-jpeg parses one frame header, before the first
@@ -1015,32 +1028,110 @@ mod tip_image_tests {
         };
         assert_eq!(err.to_string(), expected.to_string());
 
-        // An extended XMP part holds a 40-byte header after its namespace.
-        // zune-jpeg rejects a part with a shorter one or one that runs past
-        // the end of the input.
-        for (header, length, decodes) in [(40, 77, true), (39, 76, false), (40, u16::MAX, false)] {
-            let mut part = vec![0xFF, 0xE1];
-            part.extend_from_slice(&u16::to_be_bytes(length));
-            part.extend_from_slice(EXTENDED_XMP_NAMESPACE);
-            part.resize(part.len() + header, 0);
+        // zune-jpeg rejects a kept segment that runs past the end of the input
+        // and an extended XMP part with a 39-byte header, as `image` does.
+        let mut cases = Vec::new();
+        for (name, marker, body) in kept_segments() {
+            cases.push((name.to_string(), segment(marker, &body, None), true));
+            let past_end = segment(marker, &body, Some(u16::MAX));
+            cases.push((format!("{name} past the end"), past_end, false));
+        }
+        let mut short_part = b"http://ns.adobe.com/xmp/extension/\0".to_vec();
+        short_part.resize(short_part.len() + 39, 0);
+        let short_part = segment(0xE1, &short_part, None);
+        cases.push(("extended XMP with a short header".into(), short_part, false));
+        for (name, segment, decodes) in cases {
             let mut jpeg = gray.get_ref().clone();
-            jpeg.splice(2..2, part);
+            jpeg.splice(2..2, segment);
             match (
                 image::load_from_memory(&jpeg),
                 decode_guarded(&jpeg, 64, u64::MAX),
             ) {
                 (Ok(expected), Ok(decoded)) if decodes => {
-                    assert_eq!(decoded.bytes, expected.as_bytes());
+                    assert_eq!(decoded.bytes, expected.as_bytes(), "{name}");
                 }
                 (Err(expected), Err(GuardedDecodeError::Decode(err))) if !decodes => {
-                    assert_eq!(err.to_string(), expected.to_string(), "length {length}");
+                    assert_eq!(err.to_string(), expected.to_string(), "{name}");
                 }
                 (expected, decoded) => panic!(
-                    "a part of length {length}: image {:?}, decode_guarded {:?}",
+                    "{name}: image {:?}, decode_guarded {:?}",
                     expected.is_ok(),
                     decoded.is_ok()
                 ),
             }
+        }
+    }
+
+    /// A JPEG segment: `marker`, a length, `declared` or the real one, and
+    /// `body`.
+    fn segment(marker: u8, body: &[u8], declared: Option<u16>) -> Vec<u8> {
+        let length = declared.unwrap_or_else(|| u16::try_from(2 + body.len()).unwrap());
+        let mut segment = vec![0xFF, marker];
+        segment.extend_from_slice(&length.to_be_bytes());
+        segment.extend_from_slice(body);
+        segment
+    }
+
+    /// One segment of each kind zune-jpeg 0.5.15 keeps, with the identifiers
+    /// copied from its `headers.rs` and 5 bytes of data, enough for every
+    /// kind to be kept.
+    fn kept_segments() -> [(&'static str, u8, Vec<u8>); 7] {
+        let with_data = |identifier: &[u8]| [identifier, b"12345"].concat();
+        let mut extended_xmp = b"http://ns.adobe.com/xmp/extension/\0".to_vec();
+        extended_xmp.extend_from_slice(&[b'G'; 32]);
+        extended_xmp.extend_from_slice(&5u32.to_be_bytes());
+        extended_xmp.extend_from_slice(&0u32.to_be_bytes());
+        [
+            ("EXIF", 0xE1, with_data(b"Exif\0\0")),
+            ("XMP", 0xE1, with_data(b"http://ns.adobe.com/xap/1.0/\0")),
+            ("extended XMP", 0xE1, with_data(&extended_xmp)),
+            ("ICC", 0xE2, with_data(b"ICC_PROFILE\0\x01\x01")),
+            (
+                "gain map",
+                0xE2,
+                with_data(b"urn:iso:std:iso:ts:21496:-1\0"),
+            ),
+            ("MPF", 0xE2, with_data(b"MPF\0")),
+            ("IPTC", 0xED, with_data(b"Photoshop 3.0\0")),
+        ]
+    }
+
+    /// zune-jpeg keeps none of the metadata segments behind `jpeg_decoder`,
+    /// and all of them without it.
+    #[test]
+    fn jpeg_decoder_keeps_no_metadata() {
+        let mut jpeg = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageLuma8(ImageBuffer::from_pixel(8, 8, image::Luma([0x40])))
+            .write_to(&mut jpeg, image::ImageFormat::Jpeg)
+            .unwrap();
+        let mut jpeg = jpeg.into_inner();
+        let metadata: Vec<u8> = kept_segments()
+            .iter()
+            .flat_map(|(_, marker, body)| segment(*marker, body, None))
+            .collect();
+        jpeg.splice(2..2, metadata);
+
+        let kept = |info: &zune_jpeg::ImageInfo, icc: Option<Vec<u8>>| {
+            [
+                ("EXIF", info.exif_data.is_some()),
+                ("XMP", info.xmp_data.is_some()),
+                ("extended XMP", info.extended_xmp.is_some()),
+                ("ICC", icc.is_some()),
+                ("gain map", !info.gain_map_info.is_empty()),
+                ("MPF", info.multi_picture_information.is_some()),
+                ("IPTC", info.iptc_data.is_some()),
+            ]
+        };
+        let options = DecoderOptions::default().set_strict_mode(false);
+        let mut plain = zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(&jpeg), options);
+        plain.decode_headers().unwrap();
+        for (name, kept) in kept(&plain.info().unwrap(), plain.icc_profile()) {
+            assert!(kept, "zune-jpeg alone keeps {name}");
+        }
+        let mut hidden = jpeg_decoder(ZCursor::new(&jpeg), ColorSpace::Luma);
+        hidden.decode_headers().unwrap();
+        for (name, kept) in kept(&hidden.info().unwrap(), hidden.icc_profile()) {
+            assert!(!kept, "jpeg_decoder must hide {name}");
         }
     }
 
