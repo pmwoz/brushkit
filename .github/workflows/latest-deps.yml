@@ -20,3 +20,9 @@ jobs:
         run: cargo tree --invert png --depth 0
       - run: cargo test --workspace
       - run: cargo build --workspace --target wasm32-unknown-unknown
+      - name: The crates build from a consumer crate without a lockfile
+        run: |
+          cargo new --lib --vcs none "$RUNNER_TEMP/consumer"
+          cd "$RUNNER_TEMP/consumer"
+          cargo add --path "$GITHUB_WORKSPACE/crates/brushkit" --features serde
+          cargo build
