@@ -44,6 +44,23 @@ fn noise_jpeg() -> Vec<u8> {
     bytes
 }
 
+/// A gray JPEG with 100 APP2 gain-map segments of 65,000 bytes after SOI.
+/// zune-jpeg keeps its own copy of each one, which the tip never reads.
+fn gain_map_jpeg() -> Vec<u8> {
+    const GAIN_MAP: &[u8] = b"urn:iso:std:iso:ts:21496:-1\0";
+    let mut segment = vec![0xFF, 0xE2];
+    let length = u16::try_from(2 + GAIN_MAP.len() + 65_000).expect("segment fits");
+    segment.extend_from_slice(&length.to_be_bytes());
+    segment.extend_from_slice(GAIN_MAP);
+    segment.resize(2 + usize::from(length), 0x5A);
+    let mut jpeg = encode(
+        ImageBuffer::from_pixel(SIDE, SIDE, Luma([0x40u8])).into(),
+        ImageFormat::Jpeg,
+    );
+    jpeg.splice(2..2, segment.repeat(100));
+    jpeg
+}
+
 /// The peak growth of `decode`, after checking that the tip it returns holds
 /// one byte per pixel and nothing of the decoded image. Pixel values are
 /// checked by the unit tests in `bitmap.rs`.
@@ -156,4 +173,13 @@ fn tip_decoders_hold_no_copy_of_the_decoded_image() {
             "{name} must hold only the decoded image: {growth} bytes"
         );
     }
+
+    let name = "decode_tip_image gray JPEG with gain-map segments";
+    let jpeg = gain_map_jpeg();
+    let growth = measure(name, || tip_image(&jpeg));
+    println!("{name}: {growth} bytes");
+    assert!(
+        growth <= PIXELS + jpeg.len() + DECODER_SLACK,
+        "{name} must hold at most one copy of its metadata: {growth} bytes"
+    );
 }
