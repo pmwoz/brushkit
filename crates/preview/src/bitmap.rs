@@ -4,7 +4,6 @@ use std::io::Cursor;
 use zune_jpeg::zune_core::bytestream::ZCursor;
 use zune_jpeg::zune_core::colorspace::ColorSpace;
 use zune_jpeg::zune_core::options::DecoderOptions;
-use zune_jpeg::{ImageInfo, SampleRatios};
 
 #[derive(Debug, Clone)]
 pub struct GrayscaleBitmap {
@@ -258,7 +257,8 @@ pub(crate) enum GuardedDecodeError {
 
 /// Decode an image of at most `max_side` px per side and `max_bytes` decoded:
 /// the image in its own pixel format, plus the DCT coefficients of a
-/// progressive JPEG. Oversize is decided from the header before any pixels are
+/// progressive JPEG, counted from the largest progressive frame header of the
+/// image's size anywhere in the file. Oversize is decided from the header before any pixels are
 /// decoded. A JPEG is decoded from `bytes`, and only its metadata segments
 /// are copied.
 pub(crate) fn decode_guarded(
@@ -384,8 +384,7 @@ fn jpeg_decoder(bytes: &[u8], output_color: ColorSpace) -> zune_jpeg::JpegDecode
     zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(bytes), options)
 }
 
-/// What `decode_jpeg` needs from a JPEG's headers. zune-jpeg's `ImageInfo`
-/// also holds copies of the metadata segments, so it is not kept.
+/// What `decode_jpeg` needs from a JPEG's headers.
 struct JpegHeader {
     width: u32,
     height: u32,
@@ -393,15 +392,19 @@ struct JpegHeader {
     coefficient_bytes: u64,
 }
 
+/// Reads the headers without `JpegDecoder::info`, which returns a copy of
+/// every metadata segment the decoder keeps.
 fn jpeg_header(bytes: &[u8]) -> Result<JpegHeader, zune_jpeg::errors::DecodeErrors> {
     let mut decoder = jpeg_decoder(bytes, ColorSpace::RGB);
     decoder.decode_headers()?;
-    let info = decoder.info().expect("headers were decoded");
+    let (width, height) = decoder.dimensions().expect("headers were decoded");
+    let side = |side: usize| u32::try_from(side).expect("zune-jpeg frame sides are u16");
+    let (width, height) = (side(width), side(height));
     Ok(JpegHeader {
-        width: u32::from(info.width),
-        height: u32::from(info.height),
+        width,
+        height,
         input_color: decoder.input_colorspace().expect("headers were decoded"),
-        coefficient_bytes: progressive_coefficient_bytes(bytes, &info),
+        coefficient_bytes: progressive_coefficient_bytes(bytes, width, height),
     })
 }
 
@@ -437,60 +440,50 @@ pub(crate) fn header_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 
 /// The DCT coefficients zune-jpeg holds for a progressive JPEG until its last
 /// scan: 64 two-byte coefficients for each block of every MCU, with each side
-/// padded to whole MCUs. 0 for a baseline JPEG.
-fn progressive_coefficient_bytes(bytes: &[u8], info: &ImageInfo) -> u64 {
-    if !info.sof.is_progressive() {
-        return 0;
-    }
-    let (h_max, v_max) = match info.sample_ratio {
-        SampleRatios::None => (1, 1),
-        SampleRatios::H => (2, 1),
-        SampleRatios::V => (1, 2),
-        SampleRatios::HV => (2, 2),
-        SampleRatios::Generic(h, v) => (h as u64, v as u64),
-    };
-    let mcus =
-        u64::from(info.width).div_ceil(8 * h_max) * u64::from(info.height).div_ceil(8 * v_max);
-    // Every component at full resolution. Unreachable while zune-jpeg parses
-    // only the frame headers `sof_blocks_per_mcu` scans for.
-    let blocks_per_mcu = sof_blocks_per_mcu(bytes, info, (h_max, v_max))
-        .unwrap_or(u64::from(info.components) * h_max * v_max);
-    2 * 64 * mcus * blocks_per_mcu
-}
-
-/// The blocks per MCU in the frame header zune-jpeg parsed: the sum of each
-/// component's sampling factors multiplied, which zune-jpeg keeps private.
-/// Every 0xFFC2 marker whose header has the size, component count and largest
-/// factors zune-jpeg reports is a candidate, and the largest sum wins. zune-jpeg
-/// parses a progressive frame header only after 0xFFC2, so the one it parsed is
-/// a candidate and the count is never below zune-jpeg's.
-fn sof_blocks_per_mcu(bytes: &[u8], info: &ImageInfo, (h_max, v_max): (u64, u64)) -> Option<u64> {
-    let length = 8 + 3 * usize::from(info.components);
+/// padded to whole MCUs. The blocks per MCU are the sum of each component's
+/// sampling factors multiplied.
+///
+/// zune-jpeg keeps its frame type and header private, so every 0xFFC2 marker
+/// followed by a header zune-jpeg would accept at the size it reports is a
+/// candidate, and the largest count wins. zune-jpeg allocates coefficients only
+/// after it parses a 0xFFC2 frame header, which is then a candidate, so the
+/// count is never below zune-jpeg's. A candidate zune-jpeg never parses, such
+/// as one inside a skipped segment, counts too, even in a baseline JPEG.
+fn progressive_coefficient_bytes(bytes: &[u8], width: u32, height: u32) -> u64 {
     (1..bytes.len())
         .filter(|&i| bytes[i - 1] == 0xFF && bytes[i] == 0xC2)
         .filter_map(|i| {
             // Length, precision, height, width, component count, then an id,
             // the sampling factors and a table per component.
-            let header = bytes.get(i + 1..i + 1 + length)?;
-            let field = |at: usize| u16::from_be_bytes([header[at], header[at + 1]]);
-            if usize::from(field(0)) != length
-                || field(3) != info.height
-                || field(5) != info.width
-                || header[7] != info.components
+            let header = bytes.get(i + 1..i + 9)?;
+            let field = |at: usize| u32::from(u16::from_be_bytes([header[at], header[at + 1]]));
+            let length = 8 + 3 * usize::from(header[7]);
+            if !(1..=4).contains(&header[7])
+                || field(0) as usize != length
+                || field(3) != height
+                || field(5) != width
             {
                 return None;
             }
-            let factors = header[8..]
-                .as_chunks::<3>()
-                .0
+            let components = bytes.get(i + 9..i + 1 + length)?.as_chunks::<3>().0;
+            let factors = components
                 .iter()
                 .map(|&[_, factors, _]| (u64::from(factors >> 4), u64::from(factors & 0xF)));
-            let largest = factors
+            // zune-jpeg rejects a factor outside 1..=4.
+            if factors
+                .clone()
+                .any(|(h, v)| !(1..=4).contains(&h) || !(1..=4).contains(&v))
+            {
+                return None;
+            }
+            let (h_max, v_max) = factors
                 .clone()
                 .fold((1, 1), |(h, v), (hi, vi)| (h.max(hi), v.max(vi)));
-            (largest == (h_max, v_max)).then(|| factors.map(|(h, v)| h * v).sum())
+            let mcus = u64::from(width).div_ceil(8 * h_max) * u64::from(height).div_ceil(8 * v_max);
+            Some(2 * 64 * mcus * factors.map(|(h, v)| h * v).sum::<u64>())
         })
         .max()
+        .unwrap_or(0)
 }
 
 /// A PNG's IHDR, parsed without allocating pixels. `None` for other formats

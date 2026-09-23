@@ -283,3 +283,28 @@ fn progressive_jpeg_with_a_second_frame_header_counts_the_larger_one() {
         Ok(_) => panic!("the smaller frame header was counted"),
     }
 }
+
+#[test]
+fn frame_header_zune_jpeg_would_reject_is_not_counted() {
+    // A comment holding a frame header of the image's size with 255 components
+    // sampled 15x15, which would count about 2.4 GB of coefficients. zune-jpeg
+    // accepts at most 4 components and factors up to 4.
+    let (width, height) = (2048u16, 2048u16);
+    let mut jpeg = progressive_jpeg(width.into(), height.into(), &[0x11]);
+    let mut header = vec![0xFF, 0xC2];
+    header.extend_from_slice(&(8u16 + 3 * 255).to_be_bytes());
+    header.push(8);
+    header.extend_from_slice(&height.to_be_bytes());
+    header.extend_from_slice(&width.to_be_bytes());
+    header.push(255);
+    for id in 0..255u8 {
+        header.extend_from_slice(&[id, 0xFF, 0]);
+    }
+    let mut comment = vec![0xFF, 0xFE];
+    comment.extend_from_slice(&(2 + header.len() as u16).to_be_bytes());
+    comment.extend_from_slice(&header);
+    jpeg.splice(2..2, comment);
+
+    let tip = decode_tip_image(&jpeg).expect("the rejected frame header is not counted");
+    assert_eq!((tip.width, tip.height), (width.into(), height.into()));
+}
