@@ -71,8 +71,8 @@ fn tip_decoders_hold_no_copy_of_the_decoded_image() {
         ImageBuffer::from_pixel(SIDE, SIDE, Rgb([0x10u8, 0x20, 0x30])).into(),
         ImageFormat::Jpeg,
     );
-    let gray_progressive_jpeg = progressive_jpeg(SIDE, SIDE, 1);
-    let rgb_progressive_jpeg = progressive_jpeg(SIDE, SIDE, 3);
+    let gray_progressive_jpeg = progressive_jpeg(SIDE, SIDE, 1, 0x11);
+    let rgb_progressive_jpeg = progressive_jpeg(SIDE, SIDE, 3, 0x11);
 
     let cases: [(&str, Decode, &[u8], usize); 19] = [
         ("decode_tip_image gray", tip_image, &gray, 1),

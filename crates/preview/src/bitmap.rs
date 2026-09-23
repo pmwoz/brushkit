@@ -1,6 +1,7 @@
 use brushkit_abr::TipBitmap;
 use image::{ColorType, ImageBuffer, ImageDecoder, Rgba, RgbaImage};
 use std::io::Cursor;
+use zune_jpeg::SampleRatios;
 
 #[derive(Debug, Clone)]
 pub struct GrayscaleBitmap {
@@ -342,11 +343,13 @@ pub(crate) fn header_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 }
 
 /// The DCT coefficients zune-jpeg holds for a progressive JPEG until its last
-/// scan: 2 bytes per sample of every component. zune-jpeg does not report the
-/// sampling factors, so each side is padded to the largest MCU, 8 px times the
-/// largest factor, 4. 0 for any other image.
+/// scan: 2 bytes per sample, with each side padded to whole MCUs. zune-jpeg
+/// reports only the largest sampling factors, so every component is counted at
+/// full resolution, and 4:2:0 at twice its real size. 0 for any other image.
 fn progressive_jpeg_coefficient_bytes(bytes: &[u8]) -> u64 {
-    const LARGEST_MCU_SIDE: u64 = 8 * 4;
+    if image::guess_format(bytes).ok() != Some(image::ImageFormat::Jpeg) {
+        return 0;
+    }
     // The options `image` decodes with.
     let options = zune_jpeg::zune_core::options::DecoderOptions::default()
         .set_strict_mode(false)
@@ -365,8 +368,15 @@ fn progressive_jpeg_coefficient_bytes(bytes: &[u8]) -> u64 {
     if !info.sof.is_progressive() {
         return 0;
     }
-    let padded = |side: u16| u64::from(side).div_ceil(LARGEST_MCU_SIDE) * LARGEST_MCU_SIDE;
-    2 * u64::from(info.components) * padded(info.width) * padded(info.height)
+    let (h_max, v_max) = match info.sample_ratio {
+        SampleRatios::None => (1, 1),
+        SampleRatios::H => (2, 1),
+        SampleRatios::V => (1, 2),
+        SampleRatios::HV => (2, 2),
+        SampleRatios::Generic(h, v) => (h as u64, v as u64),
+    };
+    let padded = |side: u16, factor: u64| u64::from(side).div_ceil(8 * factor) * 8 * factor;
+    2 * u64::from(info.components) * padded(info.width, h_max) * padded(info.height, v_max)
 }
 
 /// A PNG's IHDR, parsed without allocating pixels. `None` for other formats

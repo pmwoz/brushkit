@@ -211,15 +211,24 @@ fn imported_image_over_the_memory_budget_is_too_large() {
 fn progressive_jpeg_over_the_budget_with_its_coefficients_is_too_large() {
     // Each decoded image fits the 512 MiB budget, but not with the DCT
     // coefficients a progressive decode holds, 2 bytes per sample: gray
-    // 256 + 512 MiB, RGB 192 + 384 MiB.
-    for (side, components) in [(MAX_IMPORT_DIMENSION, 1), (MAX_IMPORT_DIMENSION / 2, 3)] {
+    // 256 + 512 MiB, RGB 192 + 384 MiB. The last one is over by 340 KiB only
+    // because a vertical sampling factor of 3 pads its height to 16368 rows.
+    for (width, height, components, sampling) in [
+        (MAX_IMPORT_DIMENSION, MAX_IMPORT_DIMENSION, 1, 0x11),
+        (MAX_IMPORT_DIMENSION / 2, MAX_IMPORT_DIMENSION / 2, 3, 0x11),
+        (3648, 16352, 3, 0x13),
+    ] {
+        let name = format!("{width}x{height} {components} components {sampling:#x}");
         // A decoded tip is not printed: at this size it is hundreds of MiB.
-        match decode_tip_image(&progressive_jpeg(side, side, components)) {
-            Err(TipImageError::TooLarge { width, height }) => {
-                assert_eq!((width, height), (side, side), "the declared dimensions");
+        match decode_tip_image(&progressive_jpeg(width, height, components, sampling)) {
+            Err(TipImageError::TooLarge {
+                width: w,
+                height: h,
+            }) => {
+                assert_eq!((w, h), (width, height), "{name}: the declared dimensions");
             }
-            Err(err) => panic!("{components} components: expected TooLarge, got {err:?}"),
-            Ok(_) => panic!("{components} components: an over-budget progressive JPEG decoded"),
+            Err(err) => panic!("{name}: expected TooLarge, got {err:?}"),
+            Ok(_) => panic!("{name}: an over-budget progressive JPEG decoded"),
         }
     }
 }

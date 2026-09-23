@@ -138,16 +138,17 @@ pub fn rgba_dimension_bomb_png(w: u32, h: u32, bit_depth: u8) -> Vec<u8> {
 /// Each Huffman table holds one 1-bit code: every block is a zero DC and an
 /// immediate end-of-block.
 pub fn baseline_jpeg(width: u32, height: u32, components: u8) -> Vec<u8> {
-    hand_written_jpeg(0xC0, width, height, components)
+    hand_written_jpeg(0xC0, width, height, components, 0x11)
 }
 
-/// `baseline_jpeg` as a progressive JPEG: one DC scan whose blocks are each a
-/// zero DC, so it decodes to solid mid-gray at any size.
-pub fn progressive_jpeg(width: u32, height: u32, components: u8) -> Vec<u8> {
-    hand_written_jpeg(0xC2, width, height, components)
+/// `baseline_jpeg` as a progressive JPEG with every component at `sampling`
+/// (0xHV): one DC scan whose blocks are each a zero DC, so it decodes to solid
+/// mid-gray at any size.
+pub fn progressive_jpeg(width: u32, height: u32, components: u8, sampling: u8) -> Vec<u8> {
+    hand_written_jpeg(0xC2, width, height, components, sampling)
 }
 
-fn hand_written_jpeg(sof: u8, width: u32, height: u32, components: u8) -> Vec<u8> {
+fn hand_written_jpeg(sof: u8, width: u32, height: u32, components: u8, sampling: u8) -> Vec<u8> {
     assert!(matches!(components, 1 | 3), "grayscale or YCbCr only");
     let progressive = sof == 0xC2;
     let width = u16::try_from(width).expect("JPEG width is 16-bit");
@@ -160,7 +161,7 @@ fn hand_written_jpeg(sof: u8, width: u32, height: u32, components: u8) -> Vec<u8
     jpeg.extend_from_slice(&width.to_be_bytes());
     jpeg.push(components);
     for id in 1..=components {
-        jpeg.extend_from_slice(&[id, 0x11, 0]);
+        jpeg.extend_from_slice(&[id, sampling, 0]);
     }
     for class in [0x00, 0x10] {
         jpeg.extend_from_slice(&[0xFF, 0xC4, 0x00, 0x14, class, 1]);
@@ -173,10 +174,15 @@ fn hand_written_jpeg(sof: u8, width: u32, height: u32, components: u8) -> Vec<u8
     }
     let spectral_end = if progressive { 0 } else { 0x3F };
     jpeg.extend_from_slice(&[0, spectral_end, 0]);
-    // A zero bit per DC and, in a baseline scan, one per end-of-block, padded
-    // with one bits to the byte.
+    // The first MCU: a zero bit per DC and, in a baseline scan, one per
+    // end-of-block, padded with one bits to the byte.
     let bits_per_block = if progressive { 1 } else { 2 };
-    jpeg.extend_from_slice(&[0xFF >> (bits_per_block * components), 0xFF, 0xD9]);
+    let blocks = u32::from(components) * u32::from(sampling >> 4) * u32::from(sampling & 0xF);
+    let bits = bits_per_block * blocks;
+    let bytes = bits.div_ceil(8);
+    jpeg.extend(std::iter::repeat_n(0, bytes as usize - 1));
+    jpeg.push((0xFFu16 >> (bits - 8 * (bytes - 1))) as u8);
+    jpeg.extend_from_slice(&[0xFF, 0xD9]);
     jpeg
 }
 
