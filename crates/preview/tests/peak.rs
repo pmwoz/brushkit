@@ -142,6 +142,39 @@ fn with_patterns(mut bytes: Vec<u8>, count: usize) -> Vec<u8> {
     bytes
 }
 
+fn padded_samp_fixture(payload_size: usize) -> Vec<u8> {
+    let entry = build_simple_entry(8, 8, 8, 0x80);
+    let mut bytes = Vec::with_capacity(16 + payload_size);
+    bytes.extend_from_slice(&6u16.to_be_bytes());
+    bytes.extend_from_slice(&2u16.to_be_bytes());
+    bytes.extend_from_slice(b"8BIMsamp");
+    bytes.extend_from_slice(&(payload_size as u32).to_be_bytes());
+    bytes.extend_from_slice(&((payload_size - 4) as u32).to_be_bytes());
+    bytes.extend_from_slice(&entry);
+    // Opaque trailing bytes enlarge the payload without changing its tip.
+    bytes.resize(16 + payload_size, 0);
+    bytes
+}
+
+fn padded_samp_peak(payload_size: usize) -> usize {
+    let bytes = padded_samp_fixture(payload_size);
+    let before = live();
+    reset_peak();
+    let set = preview_abr(&bytes, PreviewOptions { max_cell: 64 }).expect("padded samp preview");
+    let growth = peak() - before;
+    assert_eq!(set.entries.len(), 1);
+    let TipPreview::Available(tip) = &set.entries[0].tip else {
+        panic!("expected padded samp tip");
+    };
+    assert_eq!((tip.width, tip.height), (8, 8));
+    assert_eq!(tip.data, vec![0x80; 64]);
+    println!(
+        "preview with {} MiB samp payload: {growth} bytes",
+        payload_size / MIB
+    );
+    growth
+}
+
 #[test]
 fn preview_peak_follows_one_tip_not_the_pack() {
     let bytes = fixture();
@@ -219,4 +252,11 @@ fn preview_peak_follows_one_tip_not_the_pack() {
             "patterns must not increase preview allocations: without {p_prev}, with {pattern_peak} bytes"
         );
     }
+
+    let small = padded_samp_peak(MIB);
+    let large = padded_samp_peak(32 * MIB);
+    assert!(
+        large <= small + 64 * 1024,
+        "preview allocations must not grow with samp payload size: small {small}, large {large} bytes"
+    );
 }
