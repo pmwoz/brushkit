@@ -410,13 +410,14 @@ fn frame_header_with_a_field_zune_jpeg_rejects_is_not_counted() {
         .position(|marker| marker == [0xFF, 0xC2])
         .expect("the fixture has a frame header");
     let mut skipped = jpeg.clone();
-    for (precision, factors, table, rejection) in [
-        (12, 0x22, 0, "8-bit"),
-        (8, 0x32, 0, "Horizontal sample is not a power of two"),
-        (8, 0x25, 0, "Bogus Vertical Sampling Factor"),
-        (8, 0x22, 4, "Too large quantization number"),
+    for (length, precision, factors, table, rejection) in [
+        (18, 8, 0x22, 0, "Length of start of frame"),
+        (17, 12, 0x22, 0, "8-bit"),
+        (17, 8, 0x32, 0, "Horizontal sample is not a power of two"),
+        (17, 8, 0x25, 0, "Bogus Vertical Sampling Factor"),
+        (17, 8, 0x22, 4, "Too large quantization number"),
     ] {
-        let mut header = vec![0xFF, 0xC2, 0x00, 17, precision];
+        let mut header = vec![0xFF, 0xC2, 0x00, length, precision];
         header.extend_from_slice(&(height as u16).to_be_bytes());
         header.extend_from_slice(&(width as u16).to_be_bytes());
         header.push(3);
