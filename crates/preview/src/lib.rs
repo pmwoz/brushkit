@@ -73,6 +73,8 @@ pub struct PreviewEntry {
 
 #[derive(Debug, Clone)]
 pub enum TipPreview {
+    /// A bitmap with a nonzero width and height. A tip that decodes to zero
+    /// area is `Unavailable` with [`UnavailableReason::Corrupt`].
     Available(GrayscaleBitmap),
     Unavailable(UnavailableReason),
 }
@@ -241,7 +243,7 @@ fn abr_entry(
                 brush.name.clone()
             };
             let tip = match deferred.decode_tip(i) {
-                Ok(tip) => TipPreview::Available(downsample(&to_grayscale(&tip), max_cell)),
+                Ok(tip) => tip_preview(&to_grayscale(&tip), max_cell),
                 Err(e) => TipPreview::Unavailable(UnavailableReason::Corrupt(e.to_string())),
             };
             (
@@ -259,7 +261,7 @@ fn abr_entry(
                 .filter(|geom| can_synthesize(geom))
                 .and_then(synthesize_computed_tip)
             {
-                Some(bitmap) => TipPreview::Available(downsample(&bitmap, max_cell)),
+                Some(bitmap) => tip_preview(&bitmap, max_cell),
                 None => TipPreview::Unavailable(UnavailableReason::UnsupportedTipKind(
                     "computed".to_string(),
                 )),
@@ -287,6 +289,17 @@ fn abr_entry(
         tip,
         source_dimensions,
     }
+}
+
+/// A full-size tip downsampled to `max_cell`. The area check runs first
+/// because `downsample` widens a zero side to 1.
+fn tip_preview(bitmap: &GrayscaleBitmap, max_cell: u32) -> TipPreview {
+    if bitmap.width == 0 || bitmap.height == 0 {
+        return TipPreview::Unavailable(UnavailableReason::Corrupt(
+            "tip has zero area".to_string(),
+        ));
+    }
+    TipPreview::Available(downsample(bitmap, max_cell))
 }
 
 /// Tips for a Procreate `.brushset`.
@@ -437,7 +450,7 @@ fn shape_tip(shape: Option<Result<Vec<u8>, String>>, max_cell: u32) -> TipPrevie
         Some(Ok(png)) => png,
     };
     match procreate::decode_tip_png(&png) {
-        Ok(bitmap) => TipPreview::Available(downsample(&bitmap, max_cell)),
+        Ok(bitmap) => tip_preview(&bitmap, max_cell),
         Err(procreate::ShapePngError::TooLarge { width, height }) => {
             TipPreview::Unavailable(UnavailableReason::TooLarge { width, height })
         }

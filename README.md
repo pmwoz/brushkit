@@ -64,8 +64,9 @@ rendered carries a reason (`NoShapePng`, `UnsupportedTipKind`, `Corrupt`,
 grid. Each entry also carries optional `source_dimensions` for the original
 raster, independent of the preview size and retained if pixel decoding fails.
 Computed tips have no source raster dimensions. No returned bitmap has a side
-larger than `max_cell`, and a tip that already fits keeps its size. A `.brushset`
-without `brushset.plist` is read in zip order and has no set name.
+larger than `max_cell`, and a tip that already fits keeps its size. A tip with
+a zero width or height is `Corrupt`, so every available tip has pixels. A
+`.brushset` without `brushset.plist` is read in zip order and has no set name.
 
 `preview_abr_first_available`, `preview_brush_first_available` and
 `preview_brushset_first_available` take a count `n` and return only the
