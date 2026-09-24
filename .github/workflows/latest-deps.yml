@@ -34,15 +34,17 @@ jobs:
         shell: bash
         run: |
           cd "$RUNNER_TEMP/consumer"
-          cargo metadata --format-version 1 | jq -r '.packages[] | select(.source == null) | .dependencies[] | select(.kind == null and (.req | test("(^|,) *[=~<]"))) | .name' | sort -u > "$RUNNER_TEMP/pinned.txt"
+          cargo tree -e normal --prefix none -f '{p}' | cut -d ' ' -f 1 | sort -u > "$RUNNER_TEMP/tree.txt"
+          cargo metadata --format-version 1 | jq -r '.packages[] | select(.source == null) | .dependencies[] | select(.kind == null and (.req | test("(^|,) *[=~<]"))) | .name' | sort -u | comm -12 - "$RUNNER_TEMP/tree.txt" > "$RUNNER_TEMP/pinned.txt"
           cargo update --dry-run --verbose --color never 2>&1 | tee "$RUNNER_TEMP/update.txt"
           sed -n 's/^ *Unchanged \([^ ]*\) v[^ ]* (available: v.*)$/\1/p' "$RUNNER_TEMP/update.txt" > "$RUNNER_TEMP/behind.txt"
           if [ "$(grep -c 'available:' "$RUNNER_TEMP/update.txt")" -ne "$(wc -l < "$RUNNER_TEMP/behind.txt")" ]; then
             echo "::error::Some cargo update lines with available: did not match the Unchanged pattern."
             exit 1
           fi
+          : > "$RUNNER_TEMP/inverted.txt"
           while read -r pin; do
-            cargo tree -e normal --prefix none -f '{p}' --invert "$pin" >> "$RUNNER_TEMP/inverted.txt" || { echo "::error::cargo tree --invert $pin failed. The workspace pin on $pin must match one package in the consumer tree."; exit 1; }
+            cargo tree -e normal --prefix none -f '{p}' --invert "$pin" >> "$RUNNER_TEMP/inverted.txt" || { echo "::error::cargo tree --invert $pin failed. The workspace pin on $pin must resolve to one version in the consumer tree."; exit 1; }
           done < "$RUNNER_TEMP/pinned.txt"
           cut -d ' ' -f 1 "$RUNNER_TEMP/inverted.txt" | sort -u > "$RUNNER_TEMP/dependents.txt"
           sort -u "$RUNNER_TEMP/behind.txt" | comm -12 - "$RUNNER_TEMP/dependents.txt" | comm -23 - "$RUNNER_TEMP/pinned.txt" > "$RUNNER_TEMP/held.txt"
