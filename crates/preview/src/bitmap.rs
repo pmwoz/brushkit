@@ -710,28 +710,27 @@ fn frame_coefficients(header: &[u8], frame: &ImageInfo) -> Option<u64> {
     let length = 8 + 3 * usize::from(components);
     if components != frame.components
         || usize::from(field(0)) != length
+        || fixed[2] != 8
         || field(3) != frame.height
         || field(5) != frame.width
     {
         return None;
     }
-    let factors = header.get(8..length)?.as_chunks::<3>().0;
-    let factors = factors
-        .iter()
-        .map(|&[_, factors, _]| (u64::from(factors >> 4), u64::from(factors & 0xF)));
-    // zune-jpeg rejects a factor outside 1..=4.
-    if factors
-        .clone()
-        .any(|(h, v)| !(1..=4).contains(&h) || !(1..=4).contains(&v))
-    {
-        return None;
+    let (mut h_max, mut v_max, mut blocks) = (1, 1, 0);
+    for &[_, factors, table] in header.get(8..length)?.as_chunks::<3>().0 {
+        let (h, v) = (u64::from(factors >> 4), u64::from(factors & 0xF));
+        // zune-jpeg rejects a horizontal factor other than 1, 2 or 4, a
+        // vertical factor outside 1..=4 and a quantization table above 3.
+        if !matches!(h, 1 | 2 | 4) || !(1..=4).contains(&v) || table > 3 {
+            return None;
+        }
+        h_max = h_max.max(h);
+        v_max = v_max.max(v);
+        blocks += h * v;
     }
-    let (h_max, v_max) = factors
-        .clone()
-        .fold((1, 1), |(h, v), (hi, vi)| (h.max(hi), v.max(vi)));
     let mcus =
         u64::from(frame.width).div_ceil(8 * h_max) * u64::from(frame.height).div_ceil(8 * v_max);
-    Some(2 * 64 * mcus * factors.map(|(h, v)| h * v).sum::<u64>())
+    Some(2 * 64 * mcus * blocks)
 }
 
 /// A PNG's IHDR, parsed without allocating pixels. `None` for other formats
