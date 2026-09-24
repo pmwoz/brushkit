@@ -39,3 +39,8 @@ zune-jpeg = "=0.5.15"
 # `HideMetadata` implements zune-jpeg's reader trait, which in 0.5.1 has two
 # more required methods.
 zune-core = "0.5.3"
+
+# The preview tests decode JPEGs at `MAX_IMPORT_DIMENSION`, which is slow with
+# unoptimized dependencies. Level 1 ran them faster on wasm32-wasip1 than 2 or 3.
+[profile.dev.package."*"]
+opt-level = 1
