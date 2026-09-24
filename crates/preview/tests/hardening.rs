@@ -343,6 +343,25 @@ fn progressive_frame_header_in_a_skipped_segment_of_a_baseline_jpeg_is_not_count
 }
 
 #[test]
+fn progressive_frame_header_in_a_baseline_jpeg_with_a_partial_first_scan_is_not_counted() {
+    // A 4:2:0 baseline JPEG whose first scan holds only luma, so zune-jpeg
+    // holds its coefficients: 3 bytes per pixel next to 3 bytes of RGB, which
+    // fits the budget. A comment holds a 4:4:4 progressive frame header of the
+    // same size, whose coefficients would not. zune-jpeg parses the baseline
+    // one.
+    let (width, height) = (MAX_IMPORT_DIMENSION, 5456);
+    let mut jpeg = hand_written_jpeg(0xC0, width, height, &[0x22, 0x11, 0x11], 1);
+    let mut comment = vec![0xFF, 0xFE, 0x00, 21, 0xFF, 0xC2, 0x00, 17, 8];
+    comment.extend_from_slice(&(height as u16).to_be_bytes());
+    comment.extend_from_slice(&(width as u16).to_be_bytes());
+    comment.extend_from_slice(&[3, 1, 0x22, 0, 2, 0x22, 0, 3, 0x22, 0]);
+    jpeg.splice(2..2, comment);
+
+    let tip = decode_tip_image(&jpeg).expect("the progressive frame header is not counted");
+    assert_eq!((tip.width, tip.height), (width, height));
+}
+
+#[test]
 fn baseline_frame_header_in_a_progressive_jpeg_is_not_counted() {
     // `progressive_jpeg_with_a_second_frame_header_counts_the_larger_one`
     // with a first scan of one component and a baseline 4:4:4 frame header in
@@ -401,4 +420,46 @@ fn frame_header_zune_jpeg_would_reject_is_not_counted() {
 
     let tip = decode_tip_image(&jpeg).expect("the rejected frame header is not counted");
     assert_eq!((tip.width, tip.height), (width.into(), height.into()));
+}
+
+#[test]
+fn frame_header_with_a_field_zune_jpeg_rejects_is_not_counted() {
+    // `progressive_jpeg_with_a_second_frame_header_counts_the_larger_one`
+    // with one field of the 4:4:4 frame header in the comment set to a value
+    // zune-jpeg rejects in the image's own frame header.
+    let (width, height) = (MAX_IMPORT_DIMENSION, 5456);
+    let jpeg = progressive_jpeg(width, height, &[0x22, 0x11, 0x11]);
+    let frame = jpeg
+        .windows(2)
+        .position(|marker| marker == [0xFF, 0xC2])
+        .expect("the fixture has a frame header");
+    for (precision, factors, table, rejection) in [
+        (12, 0x22, 0, "8-bit"),
+        (8, 0x32, 0, "Horizontal sample is not a power of two"),
+        (8, 0x22, 4, "Too large quantization number"),
+    ] {
+        let mut header = vec![0xFF, 0xC2, 0x00, 17, precision];
+        header.extend_from_slice(&(height as u16).to_be_bytes());
+        header.extend_from_slice(&(width as u16).to_be_bytes());
+        header.push(3);
+        for id in 1..=3 {
+            header.extend_from_slice(&[id, factors, table]);
+        }
+
+        let mut own = jpeg.clone();
+        own.splice(frame..frame + header.len(), header.iter().copied());
+        match decode_tip_image(&own) {
+            Err(TipImageError::Decode(msg)) => assert!(msg.contains(rejection), "{msg}"),
+            other => panic!("{rejection}: expected zune-jpeg to reject it, got {other:?}"),
+        }
+
+        let mut comment = vec![0xFF, 0xFE, 0x00, 21];
+        comment.extend_from_slice(&header);
+        let mut skipped = jpeg.clone();
+        skipped.splice(2..2, comment);
+        match decode_tip_image(&skipped) {
+            Ok(tip) => assert_eq!((tip.width, tip.height), (width, height)),
+            Err(err) => panic!("{rejection}: the rejected frame header was counted, got {err:?}"),
+        }
+    }
 }
