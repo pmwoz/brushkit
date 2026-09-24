@@ -45,8 +45,10 @@ zune-core = "0.5.3"
 [profile.dev.package."*"]
 opt-level = 1
 
-# Generic dependency code is compiled in the crate that instantiates it, so
-# `JpegDecoder<HideMetadata<R>>` builds at this crate's level, not at the one
-# above.
-[profile.dev.package.brushkit-preview]
+# The same tests spend most of their time in their own fixture builders and in
+# generic dependency code that brushkit-preview instantiates, such as
+# `JpegDecoder<HideMetadata<R>>`. Generic code is compiled in the crate that
+# instantiates it, so the override above does not reach it. Set in the test
+# profile so that `cargo build` keeps brushkit-preview unoptimized.
+[profile.test.package.brushkit-preview]
 opt-level = 1
