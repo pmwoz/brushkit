@@ -17,6 +17,8 @@ cargo +nightly fuzz run preview_brushset
 ```
 
 The preview targets use `max_cell: 8` to exercise decoding and downsampling.
+They also assert that every available tip has pixels, no side over `max_cell`,
+and one byte per pixel.
 Each target reads seeds from `fuzz/corpus/<target>`. The ABR seeds are synthetic
 fixtures. The Procreate seeds cover valid ZIP archives, binary plists, PNG
 shapes, missing and corrupt shapes, oversized PNG dimensions, and plist depth.

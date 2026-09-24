@@ -1,4 +1,6 @@
 mod common;
+#[path = "../../../fuzz/fuzz_targets/tip_shapes.rs"]
+mod tip_shapes;
 
 use brushkit_preview::procreate::MAX_PLIST_DEPTH;
 use brushkit_preview::{
@@ -12,6 +14,7 @@ use common::{
 use std::collections::BTreeSet;
 use std::io::{Cursor, Read};
 use std::path::PathBuf;
+use tip_shapes::assert_tip_shapes;
 
 const OPTIONS: PreviewOptions = PreviewOptions { max_cell: 8 };
 /// The first depth the guard rejects. Deleting one `<array>` takes a mutant
@@ -37,16 +40,16 @@ const ABR_SEEDS: [&str; 9] = [
 type Reader = fn(&[u8]);
 const TARGETS: [(&str, Reader); 3] = [
     ("preview_abr", |bytes| {
-        let _ = preview_abr(bytes, OPTIONS);
-        let _ = preview_abr_first_available(bytes, OPTIONS, 4);
+        assert_tip_shapes(preview_abr(bytes, OPTIONS), OPTIONS);
+        assert_tip_shapes(preview_abr_first_available(bytes, OPTIONS, 4), OPTIONS);
     }),
     ("preview_brush", |bytes| {
-        let _ = preview_brush(bytes, OPTIONS);
-        let _ = preview_brush_first_available(bytes, OPTIONS, 4);
+        assert_tip_shapes(preview_brush(bytes, OPTIONS), OPTIONS);
+        assert_tip_shapes(preview_brush_first_available(bytes, OPTIONS, 4), OPTIONS);
     }),
     ("preview_brushset", |bytes| {
-        let _ = preview_brushset(bytes, OPTIONS);
-        let _ = preview_brushset_first_available(bytes, OPTIONS, 4);
+        assert_tip_shapes(preview_brushset(bytes, OPTIONS), OPTIONS);
+        assert_tip_shapes(preview_brushset_first_available(bytes, OPTIONS, 4), OPTIONS);
     }),
 ];
 
