@@ -47,7 +47,8 @@ cargo test -p brushkit-preview --test fuzz_corpus regenerate_fuzz_seeds -- --ign
 ```
 
 The generator copies the nine original ABR seeds into `preview_abr` and writes
-a sampled ABR tip and the named Procreate seeds. It preserves other files,
+sampled ABR tips that need downsampling, fit `max_cell` or have zero area, and
+the named Procreate seeds. It preserves other files,
 including regression inputs. Review and commit the changed seeds with their
 generator changes.
 

@@ -9,7 +9,8 @@ use brushkit_preview::{
     UnavailableReason,
 };
 use common::{
-    brush_archive, brushset_plist, depth_bomb_plist_xml, dimension_bomb_png, gray_png, zip_with,
+    brush_archive, brushset_plist, depth_bomb_plist_xml, dimension_bomb_png, gray_png, legacy_abr,
+    samp_abr, zip_with, SampTip,
 };
 use std::collections::BTreeSet;
 use std::io::{Cursor, Read};
@@ -59,29 +60,27 @@ fn corpus(target: &str) -> PathBuf {
         .join(target)
 }
 
-fn sampled_abr() -> Vec<u8> {
-    let mut entry = Vec::new();
-    for value in [0u32, 0, 0, 8, 16] {
-        entry.extend_from_slice(&value.to_be_bytes());
-    }
-    entry.extend_from_slice(&8u16.to_be_bytes());
-    entry.push(0); // Uncompressed 8-bit samples.
-    entry.extend_from_slice(&[200; 16 * 8]);
-    let mut payload = (entry.len() as u32).to_be_bytes().to_vec();
-    payload.extend_from_slice(&entry);
-    payload.resize(payload.len().next_multiple_of(4), 0);
-    let mut file = vec![0, 6, 0, 2];
-    file.extend_from_slice(b"8BIMsamp");
-    file.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-    file.extend_from_slice(&payload);
-    file
-}
-
 fn generated_seeds() -> Vec<(&'static str, &'static str, Vec<u8>)> {
     let archive_a = brush_archive("A");
     let archive_b = brush_archive("B");
     let shape = gray_png(16, 8, 200);
-    let mut seeds = vec![("preview_abr", "sampled_tip", sampled_abr())];
+    let tip = |width, height| SampTip {
+        width,
+        height,
+        fill: 200,
+        corrupt: false,
+    };
+    // The v6 parser rejects a zero-area tip, so that seed is legacy. Its other
+    // side fits max_cell: past that, downsample would widen the zero side to 1.
+    let mut seeds = vec![
+        ("preview_abr", "sampled_tip", samp_abr(&[tip(16, 8)])),
+        ("preview_abr", "small_tip", samp_abr(&[tip(4, 4)])),
+        (
+            "preview_abr",
+            "zero_area_tip",
+            legacy_abr(&[tip(1, 1), tip(0, 4)]),
+        ),
+    ];
     for name in ABR_SEEDS {
         seeds.push((
             "preview_abr",
@@ -164,7 +163,7 @@ fn generated_seeds() -> Vec<(&'static str, &'static str, Vec<u8>)> {
 }
 
 #[test]
-fn every_corpus_file_replays_without_panic() {
+fn every_corpus_file_replays_with_valid_tip_shapes() {
     for (target, read) in TARGETS {
         let mut count = 0;
         for entry in std::fs::read_dir(corpus(target)).expect("corpus directory must exist") {
@@ -229,17 +228,31 @@ fn valid_seeds_decode_names_order_and_downsampled_tips() {
             assert_eq!(tip.data, vec![200; 32]);
         }
     }
-    let bytes = std::fs::read(corpus("preview_abr").join("sampled_tip")).unwrap();
-    let set = preview_abr(&bytes, OPTIONS).expect("valid ABR seed decodes");
-    assert_eq!(set.entries.len(), 1);
-    let TipPreview::Available(tip) = &set.entries[0].tip else {
-        panic!(
-            "sampled_tip: expected a decoded tip, got {:?}",
-            set.entries[0].tip
-        );
-    };
-    assert_eq!((tip.width, tip.height), (8, 4));
-    assert_eq!(tip.data, vec![200; 32]);
+    for (name, (width, height)) in [("sampled_tip", (8, 4)), ("small_tip", (4, 4))] {
+        let bytes = std::fs::read(corpus("preview_abr").join(name)).unwrap();
+        let set = preview_abr(&bytes, OPTIONS).expect("valid ABR seed decodes");
+        assert_eq!(set.entries.len(), 1);
+        let TipPreview::Available(tip) = &set.entries[0].tip else {
+            panic!(
+                "{name}: expected a decoded tip, got {:?}",
+                set.entries[0].tip
+            );
+        };
+        assert_eq!((tip.width, tip.height), (width, height));
+        assert_eq!(tip.data, vec![200; (width * height) as usize]);
+    }
+    let bytes = std::fs::read(corpus("preview_abr").join("zero_area_tip")).unwrap();
+    let set = preview_abr(&bytes, OPTIONS).expect("zero_area_tip decodes");
+    assert!(
+        matches!(
+            set.entries.as_slice(),
+            [zero, drawable]
+                if matches!(&zero.tip, TipPreview::Unavailable(UnavailableReason::Corrupt(msg)) if msg == "tip has zero area")
+                    && matches!(&drawable.tip, TipPreview::Available(tip) if (tip.width, tip.height) == (1, 1))
+        ),
+        "zero_area_tip: {:?}",
+        set.entries
+    );
 }
 
 #[test]
