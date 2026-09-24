@@ -1,3 +1,19 @@
 [target.wasm32-wasip1]
 # Tests open files by absolute host path and read CARGO_MANIFEST_DIR at runtime.
 runner = ["wasmtime", "run", "--dir=/", "--env", "CARGO_MANIFEST_DIR"]
+
+# The profiles live here, not in Cargo.toml, because Swatinem/rust-cache
+# keys its CI cache on this file but not on the root manifest.
+
+# The preview tests decode JPEGs at `MAX_IMPORT_DIMENSION`, which is slow with
+# unoptimized dependencies. Level 1 ran them faster on wasm32-wasip1 than 2 or 3.
+[profile.dev.package."*"]
+opt-level = 1
+
+# The same tests spend most of their time in their own fixture builders and in
+# generic dependency code that brushkit-preview instantiates, such as
+# `JpegDecoder<HideMetadata<R>>`. Generic code is compiled in the crate that
+# instantiates it, so the override above does not reach it. Set in the test
+# profile so that `cargo build` keeps brushkit-preview unoptimized.
+[profile.test.package.brushkit-preview]
+opt-level = 1
