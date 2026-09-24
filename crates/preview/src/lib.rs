@@ -541,6 +541,41 @@ mod tests {
     }
 
     #[test]
+    fn abr_zero_area_tip_is_unavailable_and_does_not_count_toward_n() {
+        let tip = |width, height| SampTip {
+            width,
+            height,
+            fill: 0x80,
+            corrupt: false,
+        };
+        // Legacy entries are listed in reverse, so the drawable tip comes last.
+        // A 0x20 tip is taller than max_cell, which downsample would widen to 1.
+        let bytes = legacy_abr(&[tip(1, 1), tip(0, 20), tip(0, 1), tip(0, 1), tip(0, 1)]);
+
+        let entries = preview_abr(&bytes, OPTS).unwrap().entries;
+        assert_eq!(entries.len(), 5);
+        for entry in &entries[..4] {
+            assert!(
+                matches!(
+                    &entry.tip,
+                    TipPreview::Unavailable(UnavailableReason::Corrupt(msg)) if msg == "tip has zero area"
+                ),
+                "{entry:?}"
+            );
+        }
+
+        let entries = preview_abr_first_available(&bytes, OPTS, 4)
+            .unwrap()
+            .entries;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].index, 4);
+        assert!(matches!(
+            &entries[0].tip,
+            TipPreview::Available(b) if (b.width, b.height, b.data.as_slice()) == (1, 1, &[0x80][..])
+        ));
+    }
+
+    #[test]
     fn brushset_reads_only_the_members_it_returns() {
         let archive = brush_archive("Tip");
         let shape = gray_png(4, 4, 200);
