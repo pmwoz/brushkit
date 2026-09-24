@@ -44,3 +44,9 @@ zune-core = "0.5.3"
 # unoptimized dependencies. Level 1 ran them faster on wasm32-wasip1 than 2 or 3.
 [profile.dev.package."*"]
 opt-level = 1
+
+# Generic dependency code is compiled in the crate that instantiates it, so
+# `JpegDecoder<HideMetadata<R>>` builds at this crate's level, not at the one
+# above.
+[profile.dev.package.brushkit-preview]
+opt-level = 1
