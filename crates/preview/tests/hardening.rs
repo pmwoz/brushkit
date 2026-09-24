@@ -400,8 +400,9 @@ fn frame_header_with_other_components_than_the_parsed_one_is_not_counted() {
 #[test]
 fn frame_header_zune_jpeg_would_reject_is_not_counted() {
     // A comment holding a frame header of the image's size with 255 components
-    // sampled 15x15, which would count about 2.4 GB of coefficients. zune-jpeg
-    // accepts at most 4 components and factors up to 4.
+    // sampled 15x15, which would count about 2.4 GB of coefficients. Its
+    // component count differs from the one component of the frame zune-jpeg
+    // parses.
     let (width, height) = (2048u16, 2048u16);
     let mut jpeg = progressive_jpeg(width.into(), height.into(), &[0x11]);
     let mut header = vec![0xFF, 0xC2];
