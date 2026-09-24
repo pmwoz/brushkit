@@ -291,8 +291,9 @@ fn abr_entry(
     }
 }
 
-/// A full-size tip downsampled to `max_cell`. The area check runs first
-/// because `downsample` widens a zero side to 1.
+/// A full-size tip downsampled to `max_cell`. A zero-area tip is not
+/// drawable, and `downsample` would widen its zero side to 1 when the other
+/// side exceeds `max_cell`.
 fn tip_preview(bitmap: &GrayscaleBitmap, max_cell: u32) -> TipPreview {
     if bitmap.width == 0 || bitmap.height == 0 {
         return TipPreview::Unavailable(UnavailableReason::Corrupt(
@@ -555,15 +556,22 @@ mod tests {
 
     #[test]
     fn abr_zero_area_tip_is_unavailable_and_does_not_count_toward_n() {
-        let tip = |width, height| SampTip {
+        let sized = |width, height| SampTip {
             width,
             height,
             fill: 0x80,
             corrupt: false,
         };
         // Legacy entries are listed in reverse, so the drawable tip comes last.
-        // A 0x20 tip is taller than max_cell, which downsample would widen to 1.
-        let bytes = legacy_abr(&[tip(1, 1), tip(0, 20), tip(0, 1), tip(0, 1), tip(0, 1)]);
+        // The 0x20 and 20x0 tips exceed max_cell on one side, which downsample
+        // would widen to 1.
+        let bytes = legacy_abr(&[
+            sized(1, 1),
+            sized(0, 20),
+            sized(0, 1),
+            sized(0, 1),
+            sized(20, 0),
+        ]);
 
         let entries = preview_abr(&bytes, OPTS).unwrap().entries;
         assert_eq!(entries.len(), 5);

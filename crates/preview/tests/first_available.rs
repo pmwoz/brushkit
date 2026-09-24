@@ -45,6 +45,10 @@ fn assert_first_available(full: &PreviewSet, first: &PreviewSet, n: usize, conte
         else {
             panic!("{context}: n = {n}: entry {} is not available", want.index);
         };
+        assert!(
+            got.width > 0 && got.height > 0,
+            "{context}: n = {n}: zero-area tip"
+        );
         assert_eq!(
             (got.width, got.height, &got.data),
             (want.width, want.height, &want.data),
