@@ -17,6 +17,8 @@ cargo +nightly fuzz run preview_brushset
 ```
 
 The preview targets use `max_cell: 8` to exercise decoding and downsampling.
+They also assert that every available tip has pixels, no side over `max_cell`,
+and one byte per pixel.
 Each target reads seeds from `fuzz/corpus/<target>`. The ABR seeds are synthetic
 fixtures. The Procreate seeds cover valid ZIP archives, binary plists, PNG
 shapes, missing and corrupt shapes, oversized PNG dimensions, and plist depth.
@@ -45,7 +47,8 @@ cargo test -p brushkit-preview --test fuzz_corpus regenerate_fuzz_seeds -- --ign
 ```
 
 The generator copies the nine original ABR seeds into `preview_abr` and writes
-a sampled ABR tip and the named Procreate seeds. It preserves other files,
+sampled ABR tips that need downsampling, fit `max_cell` or have zero area, and
+the named Procreate seeds. It preserves other files,
 including regression inputs. Review and commit the changed seeds with their
 generator changes.
 
