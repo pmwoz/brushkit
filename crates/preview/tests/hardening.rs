@@ -425,17 +425,20 @@ fn frame_header_zune_jpeg_would_reject_is_not_counted() {
 #[test]
 fn frame_header_with_a_field_zune_jpeg_rejects_is_not_counted() {
     // `progressive_jpeg_with_a_second_frame_header_counts_the_larger_one`
-    // with one field of the 4:4:4 frame header in the comment set to a value
-    // zune-jpeg rejects in the image's own frame header.
+    // with a comment per field of the 4:4:4 frame header, each holding the
+    // header with that field set to a value zune-jpeg rejects in the image's
+    // own frame header.
     let (width, height) = (MAX_IMPORT_DIMENSION, 5456);
     let jpeg = progressive_jpeg(width, height, &[0x22, 0x11, 0x11]);
     let frame = jpeg
         .windows(2)
         .position(|marker| marker == [0xFF, 0xC2])
         .expect("the fixture has a frame header");
+    let mut skipped = jpeg.clone();
     for (precision, factors, table, rejection) in [
         (12, 0x22, 0, "8-bit"),
         (8, 0x32, 0, "Horizontal sample is not a power of two"),
+        (8, 0x25, 0, "Bogus Vertical Sampling Factor"),
         (8, 0x22, 4, "Too large quantization number"),
     ] {
         let mut header = vec![0xFF, 0xC2, 0x00, 17, precision];
@@ -455,11 +458,12 @@ fn frame_header_with_a_field_zune_jpeg_rejects_is_not_counted() {
 
         let mut comment = vec![0xFF, 0xFE, 0x00, 21];
         comment.extend_from_slice(&header);
-        let mut skipped = jpeg.clone();
         skipped.splice(2..2, comment);
-        match decode_tip_image(&skipped) {
-            Ok(tip) => assert_eq!((tip.width, tip.height), (width, height)),
-            Err(err) => panic!("{rejection}: the rejected frame header was counted, got {err:?}"),
-        }
+    }
+
+    // One decode for all of them, since a decode at this size holds 512 MiB.
+    match decode_tip_image(&skipped) {
+        Ok(tip) => assert_eq!((tip.width, tip.height), (width, height)),
+        Err(err) => panic!("a rejected frame header was counted, got {err:?}"),
     }
 }
