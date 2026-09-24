@@ -73,6 +73,8 @@ pub struct PreviewEntry {
 
 #[derive(Debug, Clone)]
 pub enum TipPreview {
+    /// A bitmap with a nonzero width and height. A tip that decodes to zero
+    /// area is `Unavailable` with [`UnavailableReason::Corrupt`].
     Available(GrayscaleBitmap),
     Unavailable(UnavailableReason),
 }
@@ -241,7 +243,7 @@ fn abr_entry(
                 brush.name.clone()
             };
             let tip = match deferred.decode_tip(i) {
-                Ok(tip) => TipPreview::Available(downsample(&to_grayscale(&tip), max_cell)),
+                Ok(tip) => tip_preview(&to_grayscale(&tip), max_cell),
                 Err(e) => TipPreview::Unavailable(UnavailableReason::Corrupt(e.to_string())),
             };
             (
@@ -259,7 +261,7 @@ fn abr_entry(
                 .filter(|geom| can_synthesize(geom))
                 .and_then(synthesize_computed_tip)
             {
-                Some(bitmap) => TipPreview::Available(downsample(&bitmap, max_cell)),
+                Some(bitmap) => tip_preview(&bitmap, max_cell),
                 None => TipPreview::Unavailable(UnavailableReason::UnsupportedTipKind(
                     "computed".to_string(),
                 )),
@@ -287,6 +289,18 @@ fn abr_entry(
         tip,
         source_dimensions,
     }
+}
+
+/// A full-size tip downsampled to `max_cell`. A zero-area tip is not
+/// drawable, and `downsample` would widen its zero side to 1 when the other
+/// side exceeds `max_cell`.
+fn tip_preview(bitmap: &GrayscaleBitmap, max_cell: u32) -> TipPreview {
+    if bitmap.width == 0 || bitmap.height == 0 {
+        return TipPreview::Unavailable(UnavailableReason::Corrupt(
+            "tip has zero area".to_string(),
+        ));
+    }
+    TipPreview::Available(downsample(bitmap, max_cell))
 }
 
 /// Tips for a Procreate `.brushset`.
@@ -437,7 +451,7 @@ fn shape_tip(shape: Option<Result<Vec<u8>, String>>, max_cell: u32) -> TipPrevie
         Some(Ok(png)) => png,
     };
     match procreate::decode_tip_png(&png) {
-        Ok(bitmap) => TipPreview::Available(downsample(&bitmap, max_cell)),
+        Ok(bitmap) => tip_preview(&bitmap, max_cell),
         Err(procreate::ShapePngError::TooLarge { width, height }) => {
             TipPreview::Unavailable(UnavailableReason::TooLarge { width, height })
         }
@@ -538,6 +552,48 @@ mod tests {
             TipPreview::Unavailable(UnavailableReason::Corrupt(_))
         ));
         assert!(matches!(entries[2].tip, TipPreview::Available(_)));
+    }
+
+    #[test]
+    fn abr_zero_area_tip_is_unavailable_and_does_not_count_toward_n() {
+        let sized = |width, height| SampTip {
+            width,
+            height,
+            fill: 0x80,
+            corrupt: false,
+        };
+        // Legacy entries are listed in reverse, so the drawable tip comes last.
+        // The 0x20 and 20x0 tips exceed max_cell on one side, which downsample
+        // would widen to 1.
+        let bytes = legacy_abr(&[
+            sized(1, 1),
+            sized(0, 20),
+            sized(0, 1),
+            sized(0, 1),
+            sized(20, 0),
+        ]);
+
+        let entries = preview_abr(&bytes, OPTS).unwrap().entries;
+        assert_eq!(entries.len(), 5);
+        for entry in &entries[..4] {
+            assert!(
+                matches!(
+                    &entry.tip,
+                    TipPreview::Unavailable(UnavailableReason::Corrupt(msg)) if msg == "tip has zero area"
+                ),
+                "{entry:?}"
+            );
+        }
+
+        let entries = preview_abr_first_available(&bytes, OPTS, 4)
+            .unwrap()
+            .entries;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].index, 4);
+        assert!(matches!(
+            &entries[0].tip,
+            TipPreview::Available(b) if (b.width, b.height, b.data.as_slice()) == (1, 1, &[0x80][..])
+        ));
     }
 
     #[test]
