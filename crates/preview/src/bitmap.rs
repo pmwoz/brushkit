@@ -667,7 +667,10 @@ pub(crate) fn header_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 /// sampling factors are read from the bytes. Every frame header of that type
 /// in `to_first_scan` that zune-jpeg would accept at the parsed size and
 /// component count is read, and the largest count wins. zune-jpeg parses one
-/// of them, so the count is never below zune-jpeg's.
+/// of them, so the count is never below zune-jpeg's. It can be above, because
+/// a header that names a quantization table no DQT segment defines is still
+/// counted. zune-jpeg parses such a header and fails on the table only when
+/// the decode starts, before it allocates the coefficients.
 fn coefficient_bytes(to_first_scan: &[u8], frame: &ImageInfo) -> u64 {
     let bytes = to_first_scan;
     let progressive = frame.sof.is_progressive();
@@ -700,7 +703,9 @@ fn scan_components(bytes: &[u8]) -> u8 {
 /// The coefficients of a frame header that matches `frame` and that zune-jpeg
 /// would accept: 64 two-byte coefficients for each block of every MCU, with
 /// each side padded to whole MCUs. The blocks per MCU are the sum of each
-/// component's sampling factors multiplied.
+/// component's sampling factors multiplied. The quantization tables the header
+/// names are not checked against the DQT segments, so a header zune-jpeg
+/// parses but fails to decode is counted.
 fn frame_coefficients(header: &[u8], frame: &ImageInfo) -> Option<u64> {
     // Length, precision, height, width, component count, then an id, the
     // sampling factors and a table per component.
