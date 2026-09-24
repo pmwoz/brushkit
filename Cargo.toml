@@ -44,3 +44,11 @@ zune-core = "0.5.3"
 # unoptimized dependencies. Level 1 ran them faster on wasm32-wasip1 than 2 or 3.
 [profile.dev.package."*"]
 opt-level = 1
+
+# The same tests spend most of their time in their own fixture builders and in
+# generic dependency code that brushkit-preview instantiates, such as
+# `JpegDecoder<HideMetadata<R>>`. Generic code is compiled in the crate that
+# instantiates it, so the override above does not reach it. Set in the test
+# profile so that `cargo build` keeps brushkit-preview unoptimized.
+[profile.test.package.brushkit-preview]
+opt-level = 1
