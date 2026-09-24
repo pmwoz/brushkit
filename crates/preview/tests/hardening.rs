@@ -412,6 +412,7 @@ fn frame_header_with_a_field_zune_jpeg_rejects_is_not_counted() {
     let mut skipped = jpeg.clone();
     for (length, precision, factors, table, rejection) in [
         (18, 8, 0x22, 0, "Length of start of frame"),
+        (16, 8, 0x22, 0, "Length of start of frame"),
         (17, 12, 0x22, 0, "8-bit"),
         (17, 8, 0x32, 0, "Horizontal sample is not a power of two"),
         (17, 8, 0x25, 0, "Bogus Vertical Sampling Factor"),
