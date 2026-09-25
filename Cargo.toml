@@ -16,7 +16,7 @@ brushkit-preview = { path = "crates/preview", version = "0.3.1", default-feature
 thiserror = "2"
 byteorder = "1"
 flate2 = "1"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "2", default-features = false, features = ["deflate", "unreserved"] }
 plist = { version = "~1.8", features = ["enable_unstable_features_that_may_break_with_minor_version_bumps"] } # tilde pin: the streaming API is unstable across plist minor bumps
 image = { version = "0.25", default-features = false, features = ["png"] }
 ab_glyph = "0.2"
