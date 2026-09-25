@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Build, check and run the brushkit probe, and keep the evidence.
+#
+#   verify-brushkit build
+#   verify-brushkit doctor
+#   verify-brushkit run <label> <probe args...>   # probe args without --out
+#   verify-brushkit cleanup
+#
+# Evidence goes to $VERIFY_BRUSHKIT_EVIDENCE/<run id>/<label>/ (default root
+# /tmp/verify-brushkit). Set RUN_ID to group several runs; it defaults to the
+# current time. cleanup never touches the evidence root.
+set -euo pipefail
+
+SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO="$(cd "$SKILL_DIR/../../.." && pwd)"
+MANIFEST="$SKILL_DIR/probe/Cargo.toml"
+TARGET_DIR="$REPO/target/verify-brushkit"
+PROBE="$TARGET_DIR/release/brushkit-probe"
+EVIDENCE_ROOT="${VERIFY_BRUSHKIT_EVIDENCE:-/tmp/verify-brushkit}"
+
+build() {
+  cargo build --quiet --release --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR"
+}
+
+doctor() {
+  local status=0
+  echo "repo:      $REPO"
+  echo "head:      $(git -C "$REPO" rev-parse --short HEAD)$(git -C "$REPO" diff --quiet HEAD -- crates || echo ' (crates/ has uncommitted changes)')"
+  echo "toolchain: $(rustc --version)"
+  if build; then
+    echo "probe:     $PROBE"
+    echo "links:     $(cargo tree --quiet --manifest-path "$MANIFEST" -i brushkit --depth 0 2>/dev/null | head -1)"
+  else
+    echo "probe:     BUILD FAILED"
+    status=1
+  fi
+  if [[ -n "${BRUSHKIT_CORPUS_DIR:-}" && -d "$BRUSHKIT_CORPUS_DIR" ]]; then
+    local abr brushset brush
+    abr=$(find -L "$BRUSHKIT_CORPUS_DIR" -type f -iname '*.abr' | wc -l | tr -d ' ')
+    brushset=$(find -L "$BRUSHKIT_CORPUS_DIR" -type f -iname '*.brushset' | wc -l | tr -d ' ')
+    brush=$(find -L "$BRUSHKIT_CORPUS_DIR" -type f -iname '*.brush' | wc -l | tr -d ' ')
+    echo "corpus:    $BRUSHKIT_CORPUS_DIR ($abr .abr, $brushset .brushset, $brush .brush)"
+  else
+    echo "corpus:    BRUSHKIT_CORPUS_DIR unset or not a directory; only the synthetic fuzz seeds are available"
+  fi
+  mkdir -p "$EVIDENCE_ROOT" && echo "evidence:  $EVIDENCE_ROOT" || { echo "evidence:  $EVIDENCE_ROOT NOT WRITABLE"; status=1; }
+  return $status
+}
+
+run() {
+  local label="${1:?usage: verify-brushkit run <label> <probe args...>}"
+  shift
+  build
+  local dir="$EVIDENCE_ROOT/${RUN_ID:-$(date +%Y%m%d-%H%M%S)}/$label"
+  mkdir -p "$dir"
+  {
+    echo "probe $* --out $dir"
+    echo "head $(git -C "$REPO" rev-parse HEAD)"
+    git -C "$REPO" diff --quiet HEAD -- crates || echo "crates/ has uncommitted changes"
+  } > "$dir/command.txt"
+  local code=0
+  "$PROBE" "$@" --out "$dir" > "$dir/stdout.txt" 2> "$dir/stderr.txt" || code=$?
+  echo "$code" > "$dir/exit_code.txt"
+  echo "evidence: $dir (exit $code)"
+  cat "$dir/stderr.txt" >&2
+  return 0
+}
+
+cleanup() {
+  rm -rf "$TARGET_DIR" "$SKILL_DIR/probe/Cargo.lock"
+  echo "removed probe build; evidence kept in $EVIDENCE_ROOT"
+}
+
+cmd="${1:-}"
+shift || true
+case "$cmd" in
+  build) build ;;
+  doctor) doctor ;;
+  run) run "$@" ;;
+  cleanup) cleanup ;;
+  *) sed -n '2,11p' "$0"; exit 2 ;;
+esac
