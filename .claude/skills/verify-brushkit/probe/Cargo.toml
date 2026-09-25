@@ -1,0 +1,13 @@
+# A downstream consumer of the `brushkit` facade, used by the verify-brushkit
+# skill. Own workspace root so the repo workspace does not claim it.
+[workspace]
+
+[package]
+name = "brushkit-probe"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[dependencies]
+brushkit = { path = "../../../../crates/brushkit", features = ["serde"] }
+serde_json = "1"
