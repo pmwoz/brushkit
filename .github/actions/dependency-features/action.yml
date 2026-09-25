@@ -1,0 +1,22 @@
+name: Dependency features
+description: Hash the features and default-features of each entry in the root [workspace.dependencies]. Swatinem/rust-cache does not hash the root Cargo.toml and Cargo.lock does not record features, so each rust-cache step passes this hash as its key.
+outputs:
+  hash:
+    description: The first 8 hex digits of the SHA-256 of the feature settings.
+    value: ${{ steps.hash.outputs.hash }}
+runs:
+  using: composite
+  steps:
+    - id: hash
+      shell: python
+      run: |
+        import hashlib, json, os, tomllib
+        with open("Cargo.toml", "rb") as f:
+            deps = tomllib.load(f)["workspace"]["dependencies"]
+        features = {}
+        for name, dep in deps.items():
+            dep = dep if isinstance(dep, dict) else {}
+            features[name] = [dep.get("default-features", True), sorted(dep.get("features", []))]
+        digest = hashlib.sha256(json.dumps(features, sort_keys=True).encode()).hexdigest()[:8]
+        with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+            print(f"hash={digest}", file=out)
