@@ -1,0 +1,31 @@
+name: Rust cache
+description: Swatinem/rust-cache with the dependency features of the root Cargo.toml in its key. rust-cache does not hash the root manifest and Cargo.lock does not record features, so without this a feature edit in [workspace.dependencies] keeps the old key and the rebuilt dependencies are never saved.
+inputs:
+  key:
+    description: Passed to rust-cache in front of the features hash.
+    default: ""
+  workspaces:
+    description: Passed to rust-cache.
+    default: ""
+runs:
+  using: composite
+  steps:
+    - id: features
+      shell: python
+      run: |
+        import hashlib, json, os, tomllib
+        with open("Cargo.toml", "rb") as f:
+            deps = tomllib.load(f)["workspace"]["dependencies"]
+        features = {}
+        for name, dep in deps.items():
+            dep = dep if isinstance(dep, dict) else {}
+            setting = [dep.get("default-features", True), sorted(dep.get("features", []))]
+            if setting != [True, []]:
+                features[name] = setting
+        digest = hashlib.sha256(json.dumps(features, sort_keys=True).encode()).hexdigest()[:8]
+        with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+            print(f"hash={digest}", file=out)
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: ${{ inputs.key && format('{0}-', inputs.key) }}${{ steps.features.outputs.hash }}
+        workspaces: ${{ inputs.workspaces }}

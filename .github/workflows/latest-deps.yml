@@ -13,10 +13,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with: { targets: wasm32-unknown-unknown }
       - run: cargo update
-      - id: features
-        uses: ./.github/actions/dependency-features
-      - uses: Swatinem/rust-cache@v2
-        with: { key: "${{ steps.features.outputs.hash }}" }
+      - uses: ./.github/actions/rust-cache
       - uses: ./.github/actions/single-copy
       - run: cargo test --workspace
       - run: cargo build --workspace --target wasm32-unknown-unknown
