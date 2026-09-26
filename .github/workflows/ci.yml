@@ -44,6 +44,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
+      # rust-cache sees only fuzz/Cargo.toml in this workspace, and fuzz/Cargo.lock is gitignored.
+      # Keep the manifest hash out of the action. The other jobs hash the manifests in the exact key.
       - uses: ./.github/actions/rust-cache
         with:
           workspaces: fuzz
