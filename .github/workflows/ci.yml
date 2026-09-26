@@ -47,7 +47,7 @@ jobs:
       - uses: ./.github/actions/rust-cache
         with:
           workspaces: fuzz
-          key: fuzz-${{ matrix.target }}
+          key: fuzz-${{ matrix.target }}-${{ hashFiles('crates/*/Cargo.toml') }}
       - run: cargo install cargo-fuzz --version 0.13.2 --locked
       - name: Replay committed corpus
         run: cargo +nightly fuzz run ${{ matrix.target }} -- -runs=0 -timeout=10 -rss_limit_mb=2048 -max_len=1048576
