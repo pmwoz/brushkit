@@ -9,7 +9,7 @@ readme.workspace = true
 
 [dependencies]
 brushkit-abr.workspace = true
-zip.workspace = true
+zip = { workspace = true, features = ["unreserved"] }
 plist.workspace = true
 image.workspace = true
 png.workspace = true
