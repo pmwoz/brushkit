@@ -27,6 +27,7 @@ pub use sheet::*;
 pub use synth::*;
 
 use brushkit_abr::{parse_abr_all_deferred_without_patterns, DeferredPack, ShapeTipFamily};
+use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::num::NonZeroU32;
 
@@ -417,11 +418,33 @@ fn brushset(
         (None, members)
     };
 
-    let mut budget = Budget::new(budget_bytes);
-    let entries = prefixes
+    // Whether a later plist entry lists the same member, so the member is
+    // kept after this entry instead of read again.
+    let mut later = HashSet::new();
+    let mut listed_again: Vec<bool> = prefixes
         .iter()
-        .enumerate()
-        .map(|(index, prefix)| member_entry(&mut zip, index, prefix, max_cell, &mut budget));
+        .rev()
+        .map(|prefix| !later.insert(prefix.as_str()))
+        .collect();
+    listed_again.reverse();
+
+    let mut budget = Budget::new(budget_bytes);
+    let mut kept: HashMap<&str, Member> = HashMap::new();
+    let entries =
+        prefixes
+            .iter()
+            .zip(listed_again)
+            .enumerate()
+            .map(|(index, (prefix, listed_again))| {
+                let member = match kept.remove(prefix.as_str()) {
+                    Some(member) => member.again(&mut budget),
+                    None => read_member(&mut zip, prefix, max_cell, &mut budget),
+                };
+                if listed_again {
+                    kept.insert(prefix, member.clone());
+                }
+                member.entry(index)
+            });
 
     Ok(PreviewSet {
         set_name,
@@ -460,7 +483,7 @@ fn brush(
     }
 
     let mut budget = Budget::new(budget_bytes);
-    let entry = std::iter::once_with(|| member_entry(&mut zip, 0, "", max_cell, &mut budget));
+    let entry = std::iter::once_with(|| read_member(&mut zip, "", max_cell, &mut budget).entry(0));
     Ok(PreviewSet {
         set_name: None,
         entries: take.collect(entry),
@@ -472,19 +495,49 @@ fn open_zip(bytes: &[u8]) -> Result<zip::ZipArchive<Cursor<&[u8]>>, PreviewError
         .map_err(|e| PreviewError(format!("failed to open zip: {e}")))
 }
 
-/// One member of a Procreate archive. `prefix` is `"{uuid}/"` for a
+/// One member of a Procreate archive, as the entry for one reference to it.
+#[derive(Clone)]
+struct Member {
+    name: String,
+    source_dimensions: Option<SourceDimensions>,
+    /// `Err` for a reason found without decoding the tip, which holds for
+    /// every reference. `Ok` for the tip after the budget.
+    tip: Result<TipPreview, UnavailableReason>,
+}
+
+impl Member {
+    /// The member for a later reference: its tip goes through the budget
+    /// again, so a repeated member still spends budget and is `OverBudget`
+    /// after the stop, as it would be if read again.
+    fn again(self, budget: &mut Budget) -> Member {
+        Member {
+            tip: self.tip.map(|tip| budget.render(|| tip)),
+            ..self
+        }
+    }
+
+    fn entry(self, index: usize) -> PreviewEntry {
+        PreviewEntry {
+            index,
+            name: self.name,
+            tip: self.tip.unwrap_or_else(TipPreview::Unavailable),
+            source_dimensions: self.source_dimensions,
+        }
+    }
+}
+
+/// Reads one member of a Procreate archive. `prefix` is `"{uuid}/"` for a
 /// `.brushset` member and `""` for a root-layout `.brush`.
 ///
 /// A member is always an entry: an archive that cannot be read names the entry
 /// after its directory and reports why, rather than shifting every index after
 /// it. A readable `Shape.png` reports its size either way.
-fn member_entry(
+fn read_member(
     zip: &mut zip::ZipArchive<Cursor<&[u8]>>,
-    index: usize,
     prefix: &str,
     max_cell: u32,
     budget: &mut Budget,
-) -> PreviewEntry {
+) -> Member {
     #[cfg(test)]
     tests::record_read();
     let fallback_name = if prefix.is_empty() {
@@ -513,17 +566,13 @@ fn member_entry(
             name.unwrap_or(fallback_name),
             shape_tip(shape, max_cell, budget),
         ),
-        Err(msg) => (
-            fallback_name,
-            TipPreview::Unavailable(UnavailableReason::Corrupt(msg)),
-        ),
+        Err(msg) => (fallback_name, Err(UnavailableReason::Corrupt(msg))),
     };
 
-    PreviewEntry {
-        index,
+    Member {
         name,
-        tip,
         source_dimensions,
+        tip,
     }
 }
 
@@ -533,13 +582,13 @@ fn shape_tip(
     shape: Option<Result<Vec<u8>, String>>,
     max_cell: u32,
     budget: &mut Budget,
-) -> TipPreview {
+) -> Result<TipPreview, UnavailableReason> {
     let png = match shape {
-        None => return TipPreview::Unavailable(UnavailableReason::NoShapePng),
-        Some(Err(msg)) => return TipPreview::Unavailable(UnavailableReason::Corrupt(msg)),
+        None => return Err(UnavailableReason::NoShapePng),
+        Some(Err(msg)) => return Err(UnavailableReason::Corrupt(msg)),
         Some(Ok(png)) => png,
     };
-    budget.render(|| match procreate::decode_tip_png(&png) {
+    Ok(budget.render(|| match procreate::decode_tip_png(&png) {
         Ok(bitmap) => tip_preview(&bitmap, max_cell),
         Err(procreate::ShapePngError::TooLarge { width, height }) => {
             TipPreview::Unavailable(UnavailableReason::TooLarge { width, height })
@@ -547,7 +596,7 @@ fn shape_tip(
         Err(procreate::ShapePngError::Corrupt(msg)) => {
             TipPreview::Unavailable(UnavailableReason::Corrupt(msg))
         }
-    })
+    }))
 }
 
 // The integration tests' fixture builders, shared with the unit tests below.
