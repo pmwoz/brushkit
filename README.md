@@ -1,31 +1,28 @@
 # brushkit
 
-Rust crates that read brush files and render their tip shapes. They read
-only. Nothing here writes or converts a brush file.
+Read Photoshop and Procreate brush files in Rust and draw their tip shapes.
 
-- Photoshop `.abr`, versions 1, 2, 6, 7, 9 and 10: brush names (v1 files
-  have none), sampled tip bitmaps (8 or 16 bit, raw, RLE or zlib), computed-tip geometry, the full
-  brush descriptor and embedded patterns.
-- Procreate `.brush` and `.brushset`: brush names, set order from
-  `brushset.plist`, tip shapes from `Shape.png`.
-- Tip rendering: grayscale bitmaps, thumbnails sized for a grid, contact
-  sheets.
+Give brushkit the bytes of an `.abr`, `.brush` or `.brushset` file and you get
+back every brush's name and a grayscale picture of its tip. That is enough to
+show a brush pack as a grid of thumbnails or to list what a pack contains.
+brushkit only reads. It never writes or converts a brush file.
 
-## Crates
-
-| Crate | Purpose |
-|---|---|
-| `brushkit` | One dependency over the two readers, exposed as `brushkit::abr` and `brushkit::preview`. |
-| `brushkit-abr` | Parses an `.abr` pack into brushes (name, tip bitmap, descriptor), computed presets, patterns, and a per-file report of what was dropped and why. |
-| `brushkit-preview` | One tip bitmap per brush for any supported file, plus contact sheets. |
-| `brushkit-fixture` | Byte writers for the descriptor encoding, used by `brushkit-abr`'s own tests to build synthetic descriptors. |
-
-## Usage
+## Install
 
 ```toml
 [dependencies]
 brushkit = "0.4"
 ```
+
+`brushkit` re-exports `brushkit-abr` as `brushkit::abr` and
+`brushkit-preview` as `brushkit::preview`. If you need only one of them,
+depend on that crate instead. The API reference is on
+[docs.rs](https://docs.rs/brushkit).
+
+## Example
+
+This program lists the brushes in a Photoshop pack and the size of each
+preview:
 
 ```rust
 use brushkit::abr::parse_abr_deferred_without_patterns;
@@ -54,60 +51,86 @@ fn main() {
 }
 ```
 
-The same code is `crates/brushkit/examples/readme.rs`. A test checks the two
-are identical, so the block compiles whenever the test suite does.
+To run it on your own file, put the file at `pack.abr` in the repository root
+and run `cargo run -p brushkit --example readme`.
 
-`preview_abr`, `preview_brush` and `preview_brushset` return every brush in
-file order exactly once, available or not. A brush whose tip cannot be
-rendered carries a reason (`NoShapePng`, `UnsupportedTipKind`, `Corrupt`,
-`TooLarge`, `OverBudget`) rather than being dropped, so a caller can lay out a
-complete grid. The available tips of one call hold at most
-`MAX_PREVIEW_BYTES` (256 MiB) of bitmap data. The first tip that would pass it
-is `OverBudget`, and so is every later tip to render, which is not decoded.
-Each entry also carries optional `source_dimensions` for the original raster,
-independent of the preview size and retained if pixel decoding fails.
-Computed tips have no source raster dimensions. No returned bitmap has a side
-larger than `max_cell`, and a tip that already fits keeps its size. A tip with
-a zero width or height is `Corrupt`, so every available tip has pixels. A
-`.brushset` without `brushset.plist` is read in zip order and has no set name.
+## Supported files
 
-`preview_abr_first_available`, `preview_brush_first_available` and
-`preview_brushset_first_available` take a count `n` and return only the
-first `n` available entries of the full preview, in the same order. Each
-entry keeps its index from the full preview, so indices may skip. Entries
-after the `n`th available one are not built, which suits a thumbnail that
-draws a few tips under a time budget. An `.abr` pack is still parsed in full,
-but the parse decodes no tip.
+- Photoshop `.abr`, versions 1, 2, 6, 7, 9 and 10. You get brush names,
+  sampled tips, computed tips, the full brush descriptor and embedded
+  patterns. A sampled tip is a bitmap stored in the file (8 or 16 bit, raw,
+  RLE or zlib). A computed tip has no bitmap. The file describes it with a
+  diameter and, optionally, hardness, angle and roundness. brushkit draws the
+  tip when the diameter is at least 1 pixel and uses defaults for any of the
+  other three that are missing. Version 1 files store no brush names.
+- Procreate `.brush`. You get the brush name from `Brush.archive` and its tip
+  from `Shape.png`.
+- Procreate `.brushset`. You get the set name, the brush order from
+  `brushset.plist`, and the name and tip of each brush. A set without
+  `brushset.plist` is read in zip order and has no name.
 
-`parse_abr` decodes every tip up front. `parse_abr_deferred` and
-`parse_abr_deferred_without_patterns` keep tips as byte ranges to decode on
-demand, except that they decode every tip of a v1 or v2 pack and every
-dual-brush tip up front. `parse_abr_all_deferred_without_patterns` decodes no
-tip up front. The preview path uses it, so previewing a pack with a large
-pattern block does not copy or decode the patterns. A `DeferredPack` borrows
-the input bytes instead of copying its tips out of them, so it cannot outlive
-them.
+## Previews
+
+`preview_abr`, `preview_brush` and `preview_brushset` return one entry per
+brush, in file order. Every brush is in the list, including one whose tip
+cannot be drawn. That entry carries the reason instead of a bitmap, so a grid
+of thumbnails has no gaps. The reasons are `NoShapePng`, `UnsupportedTipKind`,
+`Corrupt`, `TooLarge` and `OverBudget`.
+
+`max_cell` sets the largest side of a preview in pixels, and it must be at
+least 1. A larger tip is scaled down, and a smaller tip keeps its size. Each
+entry also has `source_dimensions`, the size of the original tip when the file
+stores one.
+
+To draw only the first few thumbnails, use `preview_abr_first_available`,
+`preview_brush_first_available` or `preview_brushset_first_available`. They
+return the first `n` drawable tips and stop there. Each entry keeps its index
+from the full list, so the numbers can skip.
+
+`generate_preview_png` turns one tip into a PNG of at most 200 pixels per
+side, with black ink and the tip's gray value as alpha.
+`generate_contact_sheet_png` draws many tips on one labeled sheet.
+
+## Reading an .abr pack
+
+`brushkit::abr` has four parse functions. They differ in how much they decode
+before they return:
+
+| Function | Tips | Patterns |
+|---|---|---|
+| `parse_abr` | Decoded up front | Read |
+| `parse_abr_deferred` | Decoded on demand. v1 and v2 tips and dual-brush tips are decoded up front. | Read |
+| `parse_abr_deferred_without_patterns` | Same as `parse_abr_deferred` | Skipped |
+| `parse_abr_all_deferred_without_patterns` | All decoded on demand | Skipped |
+
+A deferred parse returns a `DeferredPack`, and `DeferredPack::decode_tip(i)`
+decodes one tip when you need it. The pack borrows the input bytes, so keep
+them alive while you use it. A pack's pattern block can be hundreds of
+megabytes, so skip patterns when you only need tips.
 
 ## Features
 
-- `text` (default, `brushkit` and `brushkit-preview`): the contact-sheet
-  API. Labels need a font, so it pulls in `ab_glyph` and an embedded copy of
-  Inter Regular.
-- `serde` (`brushkit` and `brushkit-abr`): `Serialize` on the raw descriptor
-  dump in `brushkit_abr::dump`.
+- `text` (on by default) enables contact sheets. It pulls in `ab_glyph` and
+  an embedded copy of the Inter Regular font for the labels.
+- `serde` adds `Serialize` to the raw descriptor dump in
+  `brushkit_abr::dump`.
 
-Every crate builds for `wasm32-unknown-unknown`. The readers take `&[u8]` and
-touch neither the filesystem nor threads.
+Every crate builds for `wasm32-unknown-unknown`, because the readers take a
+`&[u8]` and touch neither the filesystem nor threads.
 
-## Untrusted input
+## Untrusted files
 
-Every size, count and dimension read from a file is checked against a ceiling
-before anything is allocated, and malformed input is an error, not a panic.
-Four libFuzzer targets under `fuzz/` cover both readers. CI replays their
-committed seed corpus and fuzzes each target for 30 seconds on every pull
-request and push to `main`.
+brushkit expects files from untrusted sources. It checks every size, count
+and dimension it reads against a limit before it allocates memory. A malformed
+file gives an error or an unavailable entry, not a panic. One preview call
+returns at most `MAX_PREVIEW_BYTES` (256 MiB) of bitmaps, and the tips after
+that point come back as `OverBudget`.
 
-## Building
+Four fuzz targets under `fuzz/` cover both readers. CI replays their seed
+files and fuzzes each target for 30 seconds on every pull request and every
+push to `main`.
+
+## Development
 
 ```sh
 cargo build
@@ -115,22 +138,24 @@ cargo test
 cargo +nightly fuzz run abr_parse   # needs cargo-fuzz
 ```
 
-See [fuzz/README.md](fuzz/README.md) for the other targets and seed
-regeneration.
+[fuzz/README.md](fuzz/README.md) lists the other fuzz targets and explains how
+to regenerate the seeds.
 
-## Real-file tests
+Real brush packs are copyrighted, so the repository has none. Tests that check
+real files read the directory in `BRUSHKIT_CORPUS_DIR` and are skipped when it
+is not set. Synthetic files in the unit tests and the fuzz seeds cover the
+parsing itself. `brushkit-fixture` builds
+the synthetic descriptor bytes for the `brushkit-abr` tests.
 
-Real brush packs are copyrighted and are not in the repository. Tests that
-assert facts about real files read `BRUSHKIT_CORPUS_DIR` and are skipped when
-it is unset. Synthetic files in the unit tests and the fuzz corpus cover the
-parsing mechanics without it.
+The usage example above is also `crates/brushkit/examples/readme.rs`, and a
+test fails if the two differ.
 
-## Versioning
+## Versions
 
-The crates are at 0.x. Minor releases may change the public API. Pin the
-minor version. Every release is a git tag `vX.Y.Z` on this repository.
+brushkit is at 0.x, so a minor release can change the API. Pin the minor
+version, as in the install snippet above. Each release has a `vX.Y.Z` tag.
 
 ## License
 
-MIT, see `LICENSE`. The Inter font embedded by the `text` feature is under
-the SIL Open Font License 1.1, see `crates/preview/assets/fonts/OFL.txt`.
+MIT, see `LICENSE`. The Inter font used by the `text` feature is under the SIL
+Open Font License 1.1, see `crates/preview/assets/fonts/OFL.txt`.
