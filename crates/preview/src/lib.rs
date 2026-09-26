@@ -40,6 +40,10 @@ pub struct PreviewOptions {
 /// tips of one `preview_*` or `*_first_available` call hold together.
 pub const MAX_PREVIEW_BYTES: usize = 256 * 1024 * 1024;
 
+// A `Shape.png` at the largest size the reader accepts must fit on its own, or
+// such a tip could never be available.
+const _: () = assert!(MAX_PREVIEW_BYTES >= (procreate::MAX_PNG_DIMENSION as usize).pow(2));
+
 #[derive(Debug, Clone)]
 pub struct PreviewSet {
     pub set_name: Option<String>,
@@ -710,8 +714,8 @@ mod tests {
     }
 
     /// A `.brushset` whose plist lists `members` in order, each a member
-    /// directory. Member `a` has a 4x4 `Shape.png`, `n` has none and `x` has
-    /// an unreadable `Brush.archive`.
+    /// directory. Member `a` has a 4x4 `Shape.png`, `c` has a `Shape.png` that
+    /// fails to decode, `n` has none and `x` has an unreadable `Brush.archive`.
     fn brushset_of(members: &[&str]) -> Vec<u8> {
         let archive = brush_archive("Tip");
         let shape = gray_png(4, 4, 200);
@@ -720,6 +724,8 @@ mod tests {
             ("brushset.plist", &plist),
             ("a/Brush.archive", &archive),
             ("a/Shape.png", &shape),
+            ("c/Brush.archive", &archive),
+            ("c/Shape.png", b"not a png"),
             ("n/Brush.archive", &archive),
             ("x/Brush.archive", b"not a plist"),
             ("x/Shape.png", &shape),
@@ -766,7 +772,9 @@ mod tests {
 
     #[test]
     fn entries_unavailable_for_their_own_reason_keep_it_past_the_budget() {
-        let bytes = brushset_of(&["a", "a", "n", "x", "a"]);
+        // `c` is `Corrupt` only when decoded, so `OverBudget` after the stop
+        // shows its tip was not decoded.
+        let bytes = brushset_of(&["c", "a", "a", "n", "x", "c", "a"]);
         let reasons: Vec<Option<UnavailableReason>> = brushset(&bytes, OPTS, Take::All, 20)
             .unwrap()
             .entries
@@ -779,10 +787,12 @@ mod tests {
         assert!(matches!(
             reasons.as_slice(),
             [
+                Some(UnavailableReason::Corrupt(_)),
                 None,
                 Some(UnavailableReason::OverBudget),
                 Some(UnavailableReason::NoShapePng),
                 Some(UnavailableReason::Corrupt(_)),
+                Some(UnavailableReason::OverBudget),
                 Some(UnavailableReason::OverBudget),
             ]
         ));
