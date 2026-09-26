@@ -419,12 +419,12 @@ fn brushset(
     };
 
     // The last index that lists each member. A member listed again later is
-    // kept after its entry instead of read again.
-    let last: HashMap<&str, usize> = prefixes
-        .iter()
-        .enumerate()
-        .map(|(index, prefix)| (prefix.as_str(), index))
-        .collect();
+    // kept after its entry instead of read again. Inserted one at a time, as
+    // `collect` would size the map for every reference, not every member.
+    let mut last: HashMap<&str, usize> = HashMap::new();
+    for (index, prefix) in prefixes.iter().enumerate() {
+        last.insert(prefix, index);
+    }
 
     let mut budget = Budget::new(budget_bytes);
     let mut kept: HashMap<&str, Member> = HashMap::new();
