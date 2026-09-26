@@ -59,9 +59,10 @@ and run `cargo run -p brushkit --example readme`.
 - Photoshop `.abr`, versions 1, 2, 6, 7, 9 and 10. You get brush names,
   sampled tips, computed tips, the full brush descriptor and embedded
   patterns. A sampled tip is a bitmap stored in the file (8 or 16 bit, raw,
-  RLE or zlib). A computed tip has no bitmap. The file stores its diameter,
-  hardness, angle and roundness, and brushkit draws the tip from them when
-  the diameter is at least 1 pixel. Version 1 files store no brush names.
+  RLE or zlib). A computed tip has no bitmap. The file describes it with a
+  diameter and, optionally, hardness, angle and roundness. brushkit draws the
+  tip when the diameter is at least 1 pixel and uses defaults for any of the
+  other three that are missing. Version 1 files store no brush names.
 - Procreate `.brush`. You get the brush name from `Brush.archive` and its tip
   from `Shape.png`.
 - Procreate `.brushset`. You get the set name, the brush order from
