@@ -484,8 +484,32 @@ fn brush(
 }
 
 fn open_zip(bytes: &[u8]) -> Result<zip::ZipArchive<Cursor<&[u8]>>, PreviewError> {
-    zip::ZipArchive::new(Cursor::new(bytes))
-        .map_err(|e| PreviewError(format!("failed to open zip: {e}")))
+    let fail = |e: zip::result::ZipError| PreviewError(format!("failed to open zip: {e}"));
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(fail)?;
+    if has_overlapping_entries(&mut zip).map_err(fail)? {
+        return Err(fail(zip::result::ZipError::InvalidArchive(
+            "entries overlap",
+        )));
+    }
+    Ok(zip)
+}
+
+/// The zip format lets many central-directory names point at one local header,
+/// or place one entry's header inside another entry's data, and the `zip` crate
+/// rejects neither. Both let two names read the same stored bytes. Disjoint
+/// `[header_start, data_start + compressed_size)` ranges keep the bytes one call
+/// reads within the file size. See <https://github.com/pmwoz/brushkit/issues/154>.
+fn has_overlapping_entries(
+    zip: &mut zip::ZipArchive<Cursor<&[u8]>>,
+) -> zip::result::ZipResult<bool> {
+    let mut ranges = Vec::with_capacity(zip.len());
+    for i in 0..zip.len() {
+        let entry = zip.by_index_raw(i)?;
+        let end = entry.data_start().saturating_add(entry.compressed_size());
+        ranges.push((entry.header_start(), end));
+    }
+    ranges.sort_unstable();
+    Ok(ranges.windows(2).any(|pair| pair[1].0 < pair[0].1))
 }
 
 /// One member of a Procreate archive, as the entry for one reference to it.
