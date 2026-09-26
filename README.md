@@ -57,10 +57,13 @@ and run `cargo run -p brushkit --example readme`.
 ## Supported files
 
 - Photoshop `.abr`, versions 1, 2, 6, 7, 9 and 10. You get brush names,
-  sampled tips (8 or 16 bit, raw, RLE or zlib), the diameter, hardness,
-  angle and roundness of computed tips, the full brush descriptor and embedded
-  patterns. Version 1 files store no brush names.
-- Procreate `.brush`. You get the brush name and its tip from `Shape.png`.
+  sampled tips, computed tips, the full brush descriptor and embedded
+  patterns. A sampled tip is a bitmap stored in the file (8 or 16 bit, raw,
+  RLE or zlib). A computed tip has no bitmap. The file stores its diameter,
+  hardness, angle and roundness, and brushkit draws the tip from them when
+  the diameter is at least 1 pixel. Version 1 files store no brush names.
+- Procreate `.brush`. You get the brush name from `Brush.archive` and its tip
+  from `Shape.png`.
 - Procreate `.brushset`. You get the set name, the brush order from
   `brushset.plist`, and the name and tip of each brush. A set without
   `brushset.plist` is read in zip order and has no name.
@@ -73,17 +76,19 @@ cannot be drawn. That entry carries the reason instead of a bitmap, so a grid
 of thumbnails has no gaps. The reasons are `NoShapePng`, `UnsupportedTipKind`,
 `Corrupt`, `TooLarge` and `OverBudget`.
 
-`max_cell` sets the largest side of a preview in pixels. A larger tip is
-scaled down, and a smaller tip keeps its size. Each entry also has
-`source_dimensions`, the size of the original tip when the file stores one.
+`max_cell` sets the largest side of a preview in pixels, and it must be at
+least 1. A larger tip is scaled down, and a smaller tip keeps its size. Each
+entry also has `source_dimensions`, the size of the original tip when the file
+stores one.
 
 To draw only the first few thumbnails, use `preview_abr_first_available`,
 `preview_brush_first_available` or `preview_brushset_first_available`. They
 return the first `n` drawable tips and stop there. Each entry keeps its index
 from the full list, so the numbers can skip.
 
-`generate_preview_png` turns one tip into a PNG. `generate_contact_sheet_png`
-draws many tips on one labeled sheet.
+`generate_preview_png` turns one tip into a PNG of at most 200 pixels per
+side, with black ink and the tip's gray value as alpha.
+`generate_contact_sheet_png` draws many tips on one labeled sheet.
 
 ## Reading an .abr pack
 
