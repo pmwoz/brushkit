@@ -296,7 +296,7 @@ fn abr_entry(
     budget: &mut Budget,
 ) -> PreviewEntry {
     #[cfg(test)]
-    tests::record_entry();
+    tests::record_read();
     let pack = &deferred.pack;
     let (name, tip, source_dimensions) = match source {
         Source::Sampled(i) => {
@@ -486,7 +486,7 @@ fn member_entry(
     budget: &mut Budget,
 ) -> PreviewEntry {
     #[cfg(test)]
-    tests::record_entry();
+    tests::record_read();
     let fallback_name = if prefix.is_empty() {
         "Brush".to_string()
     } else {
@@ -565,19 +565,20 @@ mod tests {
 
     thread_local! {
         // Thread-local because cargo runs unit tests on parallel threads.
-        static ENTRIES: Cell<usize> = const { Cell::new(0) };
+        static READS: Cell<usize> = const { Cell::new(0) };
     }
 
-    /// Called once per entry built, before any of its tip is read or decoded.
-    pub(super) fn record_entry() {
-        ENTRIES.with(|count| count.set(count.get() + 1));
+    /// Called once per `.abr` row or Procreate member read, before any of
+    /// its tip is read or decoded.
+    pub(super) fn record_read() {
+        READS.with(|count| count.set(count.get() + 1));
     }
 
-    /// Entries built by `f` on this thread.
-    fn entries_built<T>(f: impl FnOnce() -> T) -> usize {
-        ENTRIES.with(|count| count.set(0));
+    /// Rows and members read by `f` on this thread.
+    fn reads<T>(f: impl FnOnce() -> T) -> usize {
+        READS.with(|count| count.set(0));
         f();
-        ENTRIES.with(Cell::get)
+        READS.with(Cell::get)
     }
 
     const OPTS: PreviewOptions = PreviewOptions { max_cell: 8 };
@@ -602,14 +603,14 @@ mod tests {
             tip(false),
         ]);
         assert_eq!(
-            entries_built(|| preview_abr_first_available(&bytes, OPTS, 2).unwrap()),
+            reads(|| preview_abr_first_available(&bytes, OPTS, 2).unwrap()),
             2
         );
         assert_eq!(
-            entries_built(|| preview_abr_first_available(&bytes, OPTS, 0).unwrap()),
+            reads(|| preview_abr_first_available(&bytes, OPTS, 0).unwrap()),
             0
         );
-        assert_eq!(entries_built(|| preview_abr(&bytes, OPTS).unwrap()), 6);
+        assert_eq!(reads(|| preview_abr(&bytes, OPTS).unwrap()), 6);
     }
 
     #[test]
@@ -621,7 +622,7 @@ mod tests {
         ));
         let mut set = None;
         assert_eq!(
-            entries_built(|| set = Some(preview_abr_first_available(&bytes, OPTS, 1).unwrap())),
+            reads(|| set = Some(preview_abr_first_available(&bytes, OPTS, 1).unwrap())),
             2
         );
         let entries = set.unwrap().entries;
@@ -698,10 +699,26 @@ mod tests {
         let files: Vec<(&str, &[u8])> = files.iter().map(|(p, b)| (p.as_str(), *b)).collect();
         let bytes = zip_with(&files);
         assert_eq!(
-            entries_built(|| preview_brushset_first_available(&bytes, OPTS, 1).unwrap()),
+            reads(|| preview_brushset_first_available(&bytes, OPTS, 1).unwrap()),
             1
         );
-        assert_eq!(entries_built(|| preview_brushset(&bytes, OPTS).unwrap()), 4);
+        assert_eq!(reads(|| preview_brushset(&bytes, OPTS).unwrap()), 4);
+    }
+
+    #[test]
+    fn a_member_listed_many_times_is_read_once() {
+        let bytes = brushset_of(&["a"; 1000]);
+        let mut set = None;
+        assert_eq!(
+            reads(|| set = Some(preview_brushset(&bytes, OPTS).unwrap())),
+            1
+        );
+        let entries = set.unwrap().entries;
+        assert_eq!(entries.len(), 1000);
+        for (i, entry) in entries.iter().enumerate() {
+            assert_eq!((entry.index, entry.name.as_str()), (i, "Tip"));
+            assert!(matches!(&entry.tip, TipPreview::Available(b) if b.data == [200; 16]));
+        }
     }
 
     fn sized(width: u32, height: u32) -> SampTip {
@@ -803,7 +820,7 @@ mod tests {
         let bytes = samp_abr(&std::array::from_fn::<_, 6, _>(|_| tip(false)));
         let mut set = None;
         assert_eq!(
-            entries_built(|| set = Some(abr(&bytes, OPTS, Take::FirstAvailable(5), 40).unwrap())),
+            reads(|| set = Some(abr(&bytes, OPTS, Take::FirstAvailable(5), 40).unwrap())),
             3
         );
         let indices: Vec<usize> = set.unwrap().entries.iter().map(|e| e.index).collect();
