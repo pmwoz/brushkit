@@ -27,6 +27,7 @@ pub use sheet::*;
 pub use synth::*;
 
 use brushkit_abr::{parse_abr_all_deferred_without_patterns, DeferredPack, ShapeTipFamily};
+use std::collections::HashMap;
 use std::io::Cursor;
 use std::num::NonZeroU32;
 
@@ -296,7 +297,7 @@ fn abr_entry(
     budget: &mut Budget,
 ) -> PreviewEntry {
     #[cfg(test)]
-    tests::record_entry();
+    tests::record_read();
     let pack = &deferred.pack;
     let (name, tip, source_dimensions) = match source {
         Source::Sampled(i) => {
@@ -417,11 +418,26 @@ fn brushset(
         (None, members)
     };
 
+    // The last index that lists each member. A member listed again later is
+    // kept after its entry instead of read again. Inserted one at a time, as
+    // `collect` would size the map for every reference, not every member.
+    let mut last: HashMap<&str, usize> = HashMap::new();
+    for (index, prefix) in prefixes.iter().enumerate() {
+        last.insert(prefix, index);
+    }
+
     let mut budget = Budget::new(budget_bytes);
-    let entries = prefixes
-        .iter()
-        .enumerate()
-        .map(|(index, prefix)| member_entry(&mut zip, index, prefix, max_cell, &mut budget));
+    let mut kept: HashMap<&str, Member> = HashMap::new();
+    let entries = prefixes.iter().enumerate().map(|(index, prefix)| {
+        let member = match kept.remove(prefix.as_str()) {
+            Some(member) => member.again(&mut budget),
+            None => read_member(&mut zip, prefix, max_cell, &mut budget),
+        };
+        if last[prefix.as_str()] > index {
+            kept.insert(prefix, member.clone());
+        }
+        member.entry(index)
+    });
 
     Ok(PreviewSet {
         set_name,
@@ -460,7 +476,7 @@ fn brush(
     }
 
     let mut budget = Budget::new(budget_bytes);
-    let entry = std::iter::once_with(|| member_entry(&mut zip, 0, "", max_cell, &mut budget));
+    let entry = std::iter::once_with(|| read_member(&mut zip, "", max_cell, &mut budget).entry(0));
     Ok(PreviewSet {
         set_name: None,
         entries: take.collect(entry),
@@ -472,21 +488,63 @@ fn open_zip(bytes: &[u8]) -> Result<zip::ZipArchive<Cursor<&[u8]>>, PreviewError
         .map_err(|e| PreviewError(format!("failed to open zip: {e}")))
 }
 
-/// One member of a Procreate archive. `prefix` is `"{uuid}/"` for a
+/// One member of a Procreate archive, as the entry for one reference to it.
+#[derive(Clone)]
+struct Member {
+    name: String,
+    source_dimensions: Option<SourceDimensions>,
+    tip: MemberTip,
+}
+
+#[derive(Clone)]
+enum MemberTip {
+    /// A reason found without decoding the tip, which holds for every
+    /// reference.
+    Fixed(UnavailableReason),
+    /// The tip after the budget, which a later reference passes through the
+    /// budget again.
+    Budgeted(TipPreview),
+}
+
+impl Member {
+    /// The member for a later reference: its tip goes through the budget
+    /// again, so a repeated member still spends budget and is `OverBudget`
+    /// after the stop, as it would be if read again.
+    fn again(self, budget: &mut Budget) -> Member {
+        let tip = match self.tip {
+            MemberTip::Budgeted(tip) => MemberTip::Budgeted(budget.render(|| tip)),
+            fixed => fixed,
+        };
+        Member { tip, ..self }
+    }
+
+    fn entry(self, index: usize) -> PreviewEntry {
+        PreviewEntry {
+            index,
+            name: self.name,
+            tip: match self.tip {
+                MemberTip::Fixed(reason) => TipPreview::Unavailable(reason),
+                MemberTip::Budgeted(tip) => tip,
+            },
+            source_dimensions: self.source_dimensions,
+        }
+    }
+}
+
+/// Reads one member of a Procreate archive. `prefix` is `"{uuid}/"` for a
 /// `.brushset` member and `""` for a root-layout `.brush`.
 ///
 /// A member is always an entry: an archive that cannot be read names the entry
 /// after its directory and reports why, rather than shifting every index after
 /// it. A readable `Shape.png` reports its size either way.
-fn member_entry(
+fn read_member(
     zip: &mut zip::ZipArchive<Cursor<&[u8]>>,
-    index: usize,
     prefix: &str,
     max_cell: u32,
     budget: &mut Budget,
-) -> PreviewEntry {
+) -> Member {
     #[cfg(test)]
-    tests::record_entry();
+    tests::record_read();
     let fallback_name = if prefix.is_empty() {
         "Brush".to_string()
     } else {
@@ -515,15 +573,14 @@ fn member_entry(
         ),
         Err(msg) => (
             fallback_name,
-            TipPreview::Unavailable(UnavailableReason::Corrupt(msg)),
+            MemberTip::Fixed(UnavailableReason::Corrupt(msg)),
         ),
     };
 
-    PreviewEntry {
-        index,
+    Member {
         name,
-        tip,
         source_dimensions,
+        tip,
     }
 }
 
@@ -533,13 +590,13 @@ fn shape_tip(
     shape: Option<Result<Vec<u8>, String>>,
     max_cell: u32,
     budget: &mut Budget,
-) -> TipPreview {
+) -> MemberTip {
     let png = match shape {
-        None => return TipPreview::Unavailable(UnavailableReason::NoShapePng),
-        Some(Err(msg)) => return TipPreview::Unavailable(UnavailableReason::Corrupt(msg)),
+        None => return MemberTip::Fixed(UnavailableReason::NoShapePng),
+        Some(Err(msg)) => return MemberTip::Fixed(UnavailableReason::Corrupt(msg)),
         Some(Ok(png)) => png,
     };
-    budget.render(|| match procreate::decode_tip_png(&png) {
+    MemberTip::Budgeted(budget.render(|| match procreate::decode_tip_png(&png) {
         Ok(bitmap) => tip_preview(&bitmap, max_cell),
         Err(procreate::ShapePngError::TooLarge { width, height }) => {
             TipPreview::Unavailable(UnavailableReason::TooLarge { width, height })
@@ -547,7 +604,7 @@ fn shape_tip(
         Err(procreate::ShapePngError::Corrupt(msg)) => {
             TipPreview::Unavailable(UnavailableReason::Corrupt(msg))
         }
-    })
+    }))
 }
 
 // The integration tests' fixture builders, shared with the unit tests below.
@@ -565,19 +622,20 @@ mod tests {
 
     thread_local! {
         // Thread-local because cargo runs unit tests on parallel threads.
-        static ENTRIES: Cell<usize> = const { Cell::new(0) };
+        static READS: Cell<usize> = const { Cell::new(0) };
     }
 
-    /// Called once per entry built, before any of its tip is read or decoded.
-    pub(super) fn record_entry() {
-        ENTRIES.with(|count| count.set(count.get() + 1));
+    /// Called once per `.abr` row or Procreate member read, before any of
+    /// its tip is read or decoded.
+    pub(super) fn record_read() {
+        READS.with(|count| count.set(count.get() + 1));
     }
 
-    /// Entries built by `f` on this thread.
-    fn entries_built<T>(f: impl FnOnce() -> T) -> usize {
-        ENTRIES.with(|count| count.set(0));
+    /// Rows and members read by `f` on this thread.
+    fn reads<T>(f: impl FnOnce() -> T) -> usize {
+        READS.with(|count| count.set(0));
         f();
-        ENTRIES.with(Cell::get)
+        READS.with(Cell::get)
     }
 
     const OPTS: PreviewOptions = PreviewOptions { max_cell: 8 };
@@ -602,14 +660,14 @@ mod tests {
             tip(false),
         ]);
         assert_eq!(
-            entries_built(|| preview_abr_first_available(&bytes, OPTS, 2).unwrap()),
+            reads(|| preview_abr_first_available(&bytes, OPTS, 2).unwrap()),
             2
         );
         assert_eq!(
-            entries_built(|| preview_abr_first_available(&bytes, OPTS, 0).unwrap()),
+            reads(|| preview_abr_first_available(&bytes, OPTS, 0).unwrap()),
             0
         );
-        assert_eq!(entries_built(|| preview_abr(&bytes, OPTS).unwrap()), 6);
+        assert_eq!(reads(|| preview_abr(&bytes, OPTS).unwrap()), 6);
     }
 
     #[test]
@@ -621,7 +679,7 @@ mod tests {
         ));
         let mut set = None;
         assert_eq!(
-            entries_built(|| set = Some(preview_abr_first_available(&bytes, OPTS, 1).unwrap())),
+            reads(|| set = Some(preview_abr_first_available(&bytes, OPTS, 1).unwrap())),
             2
         );
         let entries = set.unwrap().entries;
@@ -698,10 +756,54 @@ mod tests {
         let files: Vec<(&str, &[u8])> = files.iter().map(|(p, b)| (p.as_str(), *b)).collect();
         let bytes = zip_with(&files);
         assert_eq!(
-            entries_built(|| preview_brushset_first_available(&bytes, OPTS, 1).unwrap()),
+            reads(|| preview_brushset_first_available(&bytes, OPTS, 1).unwrap()),
             1
         );
-        assert_eq!(entries_built(|| preview_brushset(&bytes, OPTS).unwrap()), 4);
+        assert_eq!(reads(|| preview_brushset(&bytes, OPTS).unwrap()), 4);
+    }
+
+    #[test]
+    fn a_member_listed_many_times_is_read_once() {
+        let bytes = brushset_of(&["a"; 1000]);
+        let mut set = None;
+        assert_eq!(
+            reads(|| set = Some(preview_brushset(&bytes, OPTS).unwrap())),
+            1
+        );
+        let entries = set.unwrap().entries;
+        assert_eq!(entries.len(), 1000);
+        for (i, entry) in entries.iter().enumerate() {
+            assert_eq!((entry.index, entry.name.as_str()), (i, "Tip"));
+            assert!(matches!(&entry.tip, TipPreview::Available(b) if b.data == [200; 16]));
+        }
+    }
+
+    #[test]
+    fn interleaved_members_are_each_read_once() {
+        let bytes = brushset_of(&["c", "a", "n", "c", "a", "n"]);
+        let mut set = None;
+        assert_eq!(
+            reads(|| set = Some(preview_brushset(&bytes, OPTS).unwrap())),
+            3
+        );
+        let reasons: Vec<Option<UnavailableReason>> = set
+            .unwrap()
+            .entries
+            .into_iter()
+            .map(|entry| match entry.tip {
+                TipPreview::Available(_) => None,
+                TipPreview::Unavailable(reason) => Some(reason),
+            })
+            .collect();
+        assert!(matches!(
+            reasons[..3],
+            [
+                Some(UnavailableReason::Corrupt(_)),
+                None,
+                Some(UnavailableReason::NoShapePng)
+            ]
+        ));
+        assert_eq!(reasons[..3], reasons[3..]);
     }
 
     fn sized(width: u32, height: u32) -> SampTip {
@@ -803,7 +905,7 @@ mod tests {
         let bytes = samp_abr(&std::array::from_fn::<_, 6, _>(|_| tip(false)));
         let mut set = None;
         assert_eq!(
-            entries_built(|| set = Some(abr(&bytes, OPTS, Take::FirstAvailable(5), 40).unwrap())),
+            reads(|| set = Some(abr(&bytes, OPTS, Take::FirstAvailable(5), 40).unwrap())),
             3
         );
         let indices: Vec<usize> = set.unwrap().entries.iter().map(|e| e.index).collect();
