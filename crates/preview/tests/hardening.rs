@@ -3,12 +3,14 @@ mod common;
 use brushkit_preview::procreate::MAX_PNG_DIMENSION;
 use brushkit_preview::{decode_tip_image, TipImageError, MAX_IMPORT_DIMENSION};
 use brushkit_preview::{preview_brush, preview_brushset, PreviewOptions, TipPreview};
+use brushkit_preview::{preview_brush_first_available, preview_brushset_first_available};
 use brushkit_preview::{PreviewSet, UnavailableReason};
 use common::{
-    baseline_jpeg, brush_archive, depth_bomb_plist_xml, dimension_bomb_png, gray_png,
+    baseline_jpeg, brush_archive, corpus_files, depth_bomb_plist_xml, dimension_bomb_png, gray_png,
     hand_written_jpeg, progressive_jpeg, real_4x4_png, rgba_dimension_bomb_png, zip_with,
 };
-use std::io::{self, Cursor, Read};
+use std::io::{self, Cursor, Read, Write};
+use std::path::Path;
 
 /// Deep enough that a tree parse would overflow the stack on `Drop`, so the
 /// depth guard must fire before the tree is built.
@@ -41,6 +43,82 @@ fn huge_declared_entry_is_rejected_before_inflate() {
         err.0.contains("exceeds"),
         "error must mention the exceeded limit: {err}"
     );
+}
+
+#[test]
+fn entries_that_share_one_local_header_are_rejected() {
+    let archive = brush_archive("A");
+    let png = real_4x4_png();
+    let mut zw = zip::write::ZipWriter::new(Cursor::new(Vec::new()));
+    let opts = zip::write::SimpleFileOptions::default();
+    for (path, bytes) in [
+        ("Brush.archive", &archive),
+        ("Shape.png", &png),
+        ("a/Brush.archive", &archive),
+        ("a/Shape.png", &png),
+        ("b/Brush.archive", &archive),
+    ] {
+        zw.start_file(path, opts).expect("start_file");
+        zw.write_all(bytes).expect("write entry");
+    }
+    zw.shallow_copy_file("a/Shape.png", "b/Shape.png")
+        .expect("second name for the same local header");
+    let zip_bytes = zw.finish().expect("finish zip").into_inner();
+
+    let opts = PreviewOptions { max_cell: 8 };
+    for err in [
+        preview_brushset(&zip_bytes, opts).expect_err("shared header must be rejected"),
+        preview_brush(&zip_bytes, opts).expect_err("shared header must be rejected"),
+    ] {
+        assert!(
+            err.0.contains("overlap"),
+            "error must mention the overlap: {err}"
+        );
+    }
+}
+
+#[test]
+fn entry_whose_data_runs_into_the_next_entry_is_rejected() {
+    let archive = brush_archive("A");
+    let png = real_4x4_png();
+    let mut zip_bytes = zip_with(&[("Brush.archive", &archive), ("Shape.png", &png)]);
+    // The first central-directory record's compressed size now reaches past
+    // the second local header, so the two entries differ in offset but nest.
+    let directory = zip_bytes
+        .windows(4)
+        .position(|window| window == b"PK\x01\x02")
+        .expect("central directory");
+    let covering = u32::try_from(archive.len() + 64).unwrap();
+    zip_bytes[directory + 20..directory + 24].copy_from_slice(&covering.to_le_bytes());
+
+    let err = preview_brush(&zip_bytes, PreviewOptions { max_cell: 8 })
+        .expect_err("nested entries must be rejected");
+    assert!(
+        err.0.contains("overlap"),
+        "error must mention the overlap: {err}"
+    );
+}
+
+#[test]
+fn real_procreate_files_open() {
+    let Some(root) = std::env::var_os("BRUSHKIT_CORPUS_DIR") else {
+        return;
+    };
+    let mut files = Vec::new();
+    corpus_files(Path::new(&root), &mut files);
+    let mut opened = 0;
+    for path in files {
+        let open = match path.extension().and_then(|ext| ext.to_str()) {
+            Some(ext) if ext.eq_ignore_ascii_case("brush") => preview_brush_first_available,
+            Some(ext) if ext.eq_ignore_ascii_case("brushset") => preview_brushset_first_available,
+            _ => continue,
+        };
+        let bytes = std::fs::read(&path).unwrap();
+        open(&bytes, PreviewOptions { max_cell: 8 }, 0)
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        opened += 1;
+    }
+    assert!(opened > 0, "corpus must contain Procreate files");
 }
 
 #[test]
