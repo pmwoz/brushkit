@@ -27,7 +27,7 @@ pub use sheet::*;
 pub use synth::*;
 
 use brushkit_abr::{parse_abr_all_deferred_without_patterns, DeferredPack, ShapeTipFamily};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::Cursor;
 use std::num::NonZeroU32;
 
@@ -418,33 +418,26 @@ fn brushset(
         (None, members)
     };
 
-    // Whether a later plist entry lists the same member, so the member is
-    // kept after this entry instead of read again.
-    let mut later = HashSet::new();
-    let mut listed_again: Vec<bool> = prefixes
+    // The last index that lists each member. A member listed again later is
+    // kept after its entry instead of read again.
+    let last: HashMap<&str, usize> = prefixes
         .iter()
-        .rev()
-        .map(|prefix| !later.insert(prefix.as_str()))
+        .enumerate()
+        .map(|(index, prefix)| (prefix.as_str(), index))
         .collect();
-    listed_again.reverse();
 
     let mut budget = Budget::new(budget_bytes);
     let mut kept: HashMap<&str, Member> = HashMap::new();
-    let entries =
-        prefixes
-            .iter()
-            .zip(listed_again)
-            .enumerate()
-            .map(|(index, (prefix, listed_again))| {
-                let member = match kept.remove(prefix.as_str()) {
-                    Some(member) => member.again(&mut budget),
-                    None => read_member(&mut zip, prefix, max_cell, &mut budget),
-                };
-                if listed_again {
-                    kept.insert(prefix, member.clone());
-                }
-                member.entry(index)
-            });
+    let entries = prefixes.iter().enumerate().map(|(index, prefix)| {
+        let member = match kept.remove(prefix.as_str()) {
+            Some(member) => member.again(&mut budget),
+            None => read_member(&mut zip, prefix, max_cell, &mut budget),
+        };
+        if last[prefix.as_str()] > index {
+            kept.insert(prefix, member.clone());
+        }
+        member.entry(index)
+    });
 
     Ok(PreviewSet {
         set_name,
@@ -500,9 +493,17 @@ fn open_zip(bytes: &[u8]) -> Result<zip::ZipArchive<Cursor<&[u8]>>, PreviewError
 struct Member {
     name: String,
     source_dimensions: Option<SourceDimensions>,
-    /// `Err` for a reason found without decoding the tip, which holds for
-    /// every reference. `Ok` for the tip after the budget.
-    tip: Result<TipPreview, UnavailableReason>,
+    tip: MemberTip,
+}
+
+#[derive(Clone)]
+enum MemberTip {
+    /// A reason found without decoding the tip, which holds for every
+    /// reference.
+    Fixed(UnavailableReason),
+    /// The tip after the budget, which a later reference passes through the
+    /// budget again.
+    Budgeted(TipPreview),
 }
 
 impl Member {
@@ -510,17 +511,21 @@ impl Member {
     /// again, so a repeated member still spends budget and is `OverBudget`
     /// after the stop, as it would be if read again.
     fn again(self, budget: &mut Budget) -> Member {
-        Member {
-            tip: self.tip.map(|tip| budget.render(|| tip)),
-            ..self
-        }
+        let tip = match self.tip {
+            MemberTip::Budgeted(tip) => MemberTip::Budgeted(budget.render(|| tip)),
+            fixed => fixed,
+        };
+        Member { tip, ..self }
     }
 
     fn entry(self, index: usize) -> PreviewEntry {
         PreviewEntry {
             index,
             name: self.name,
-            tip: self.tip.unwrap_or_else(TipPreview::Unavailable),
+            tip: match self.tip {
+                MemberTip::Fixed(reason) => TipPreview::Unavailable(reason),
+                MemberTip::Budgeted(tip) => tip,
+            },
             source_dimensions: self.source_dimensions,
         }
     }
@@ -566,7 +571,10 @@ fn read_member(
             name.unwrap_or(fallback_name),
             shape_tip(shape, max_cell, budget),
         ),
-        Err(msg) => (fallback_name, Err(UnavailableReason::Corrupt(msg))),
+        Err(msg) => (
+            fallback_name,
+            MemberTip::Fixed(UnavailableReason::Corrupt(msg)),
+        ),
     };
 
     Member {
@@ -582,13 +590,13 @@ fn shape_tip(
     shape: Option<Result<Vec<u8>, String>>,
     max_cell: u32,
     budget: &mut Budget,
-) -> Result<TipPreview, UnavailableReason> {
+) -> MemberTip {
     let png = match shape {
-        None => return Err(UnavailableReason::NoShapePng),
-        Some(Err(msg)) => return Err(UnavailableReason::Corrupt(msg)),
+        None => return MemberTip::Fixed(UnavailableReason::NoShapePng),
+        Some(Err(msg)) => return MemberTip::Fixed(UnavailableReason::Corrupt(msg)),
         Some(Ok(png)) => png,
     };
-    Ok(budget.render(|| match procreate::decode_tip_png(&png) {
+    MemberTip::Budgeted(budget.render(|| match procreate::decode_tip_png(&png) {
         Ok(bitmap) => tip_preview(&bitmap, max_cell),
         Err(procreate::ShapePngError::TooLarge { width, height }) => {
             TipPreview::Unavailable(UnavailableReason::TooLarge { width, height })
@@ -768,6 +776,34 @@ mod tests {
             assert_eq!((entry.index, entry.name.as_str()), (i, "Tip"));
             assert!(matches!(&entry.tip, TipPreview::Available(b) if b.data == [200; 16]));
         }
+    }
+
+    #[test]
+    fn interleaved_members_are_each_read_once() {
+        let bytes = brushset_of(&["c", "a", "n", "c", "a", "n"]);
+        let mut set = None;
+        assert_eq!(
+            reads(|| set = Some(preview_brushset(&bytes, OPTS).unwrap())),
+            3
+        );
+        let reasons: Vec<Option<UnavailableReason>> = set
+            .unwrap()
+            .entries
+            .into_iter()
+            .map(|entry| match entry.tip {
+                TipPreview::Available(_) => None,
+                TipPreview::Unavailable(reason) => Some(reason),
+            })
+            .collect();
+        assert!(matches!(
+            reasons[..3],
+            [
+                Some(UnavailableReason::Corrupt(_)),
+                None,
+                Some(UnavailableReason::NoShapePng)
+            ]
+        ));
+        assert_eq!(reasons[..3], reasons[3..]);
     }
 
     fn sized(width: u32, height: u32) -> SampTip {
