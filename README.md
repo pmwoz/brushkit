@@ -24,7 +24,7 @@ only. Nothing here writes or converts a brush file.
 
 ```toml
 [dependencies]
-brushkit = "0.2"
+brushkit = "0.4"
 ```
 
 ```rust

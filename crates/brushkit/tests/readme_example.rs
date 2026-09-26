@@ -3,13 +3,17 @@
 
 use std::path::Path;
 
-#[test]
-fn readme_usage_block_is_the_example() {
+fn readme() -> String {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let readme = [manifest.join("README.md"), manifest.join("../../README.md")]
+    [manifest.join("README.md"), manifest.join("../../README.md")]
         .iter()
         .find_map(|p| std::fs::read_to_string(p).ok())
-        .expect("README.md at the manifest or the workspace root");
+        .expect("README.md at the manifest or the workspace root")
+}
+
+#[test]
+fn readme_usage_block_is_the_example() {
+    let readme = readme();
     let block = readme
         .split("```rust\n")
         .nth(1)
@@ -27,5 +31,20 @@ fn readme_usage_block_is_the_example() {
     assert_eq!(
         block, body,
         "README.md usage block differs from examples/readme.rs"
+    );
+}
+
+/// A release commit bumps the version in Cargo.toml, and the README
+/// dependency line has to move with it.
+#[test]
+fn readme_dependency_line_is_the_current_version() {
+    let version = env!("CARGO_PKG_VERSION");
+    let major_minor = version
+        .rsplit_once('.')
+        .map_or(version, |(major_minor, _patch)| major_minor);
+    let expected = format!("brushkit = \"{major_minor}\"");
+    assert!(
+        readme().lines().any(|line| line == expected),
+        "README.md should carry `{expected}`"
     );
 }
