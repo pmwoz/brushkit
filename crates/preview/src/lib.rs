@@ -7,6 +7,10 @@
 //! has a `_first_available` twin that returns only the first `n` available
 //! entries and builds no entry after them.
 //!
+//! The available tips of one call hold at most [`MAX_PREVIEW_BYTES`] of bitmap
+//! data together. Entries past that point are
+//! [`UnavailableReason::OverBudget`] and their tips are not decoded.
+//!
 //! Every function here is pure over `&[u8]`: no filesystem, no threads, so the
 //! crate builds for `wasm32-unknown-unknown`.
 
@@ -31,6 +35,14 @@ pub struct PreviewOptions {
     /// Larger side of every returned tip is at most this many pixels (>= 1).
     pub max_cell: u32,
 }
+
+/// The most bytes of bitmap data ([`GrayscaleBitmap::data`]) the `Available`
+/// tips of one `preview_*` or `*_first_available` call hold together.
+pub const MAX_PREVIEW_BYTES: usize = 256 * 1024 * 1024;
+
+// A `Shape.png` at the largest size the reader accepts must fit on its own, or
+// such a tip could never be available.
+const _: () = assert!(MAX_PREVIEW_BYTES >= (procreate::MAX_PNG_DIMENSION as usize).pow(2));
 
 #[derive(Debug, Clone)]
 pub struct PreviewSet {
@@ -91,6 +103,10 @@ pub enum UnavailableReason {
         width: u32,
         height: u32,
     },
+    /// The tip was not returned because it would take the call's available
+    /// tips past [`MAX_PREVIEW_BYTES`]. Every later entry that has a tip to
+    /// render is `OverBudget` too, and its tip is not decoded.
+    OverBudget,
 }
 
 #[derive(Debug)]
@@ -116,7 +132,8 @@ fn check_max_cell(opts: PreviewOptions) -> Result<u32, PreviewError> {
 enum Take {
     All,
     /// The first `n` entries whose tip is available. This stops pulling after
-    /// the `n`th; it saves work only because callers pass a lazy iterator.
+    /// the `n`th, or at the first `OverBudget` entry since no later one can be
+    /// available; it saves work only because callers pass a lazy iterator.
     FirstAvailable(usize),
 }
 
@@ -125,9 +142,48 @@ impl Take {
         match self {
             Take::All => entries.collect(),
             Take::FirstAvailable(n) => entries
+                .take_while(|entry| {
+                    !matches!(
+                        entry.tip,
+                        TipPreview::Unavailable(UnavailableReason::OverBudget)
+                    )
+                })
                 .filter(|entry| matches!(entry.tip, TipPreview::Available(_)))
                 .take(n)
                 .collect(),
+        }
+    }
+}
+
+/// What is left of the bitmap byte budget of one preview call, `None` once a
+/// tip did not fit.
+struct Budget(Option<usize>);
+
+impl Budget {
+    fn new(bytes: usize) -> Self {
+        Budget(Some(bytes))
+    }
+
+    /// Runs `render` and keeps an available tip only if it fits in what is
+    /// left. The first tip that does not fit spends the budget for good, so
+    /// no later tip is rendered.
+    fn render(&mut self, render: impl FnOnce() -> TipPreview) -> TipPreview {
+        let over = TipPreview::Unavailable(UnavailableReason::OverBudget);
+        let Some(left) = self.0 else {
+            return over;
+        };
+        match render() {
+            TipPreview::Available(bitmap) => match left.checked_sub(bitmap.data.len()) {
+                Some(rest) => {
+                    self.0 = Some(rest);
+                    TipPreview::Available(bitmap)
+                }
+                None => {
+                    self.0 = None;
+                    over
+                }
+            },
+            unavailable => unavailable,
         }
     }
 }
@@ -162,13 +218,14 @@ struct Row {
 ///
 /// Embedded pattern payloads are neither copied nor decoded.
 pub fn preview_abr(bytes: &[u8], opts: PreviewOptions) -> Result<PreviewSet, PreviewError> {
-    abr(bytes, opts, Take::All)
+    abr(bytes, opts, Take::All, MAX_PREVIEW_BYTES)
 }
 
 /// The first `n` entries of [`preview_abr`] whose tip is available, in the
 /// same order and with the same `index` they have there, so indices may skip.
 /// Unavailable entries do not count toward `n`, and entries after the `n`th
-/// available one are not built, so their tips are not decoded or downsampled.
+/// available one or after the first `OverBudget` one are not built, so their
+/// tips are not decoded or downsampled.
 ///
 /// The whole pack is still parsed, but the parse decodes no tip.
 pub fn preview_abr_first_available(
@@ -176,10 +233,15 @@ pub fn preview_abr_first_available(
     opts: PreviewOptions,
     n: usize,
 ) -> Result<PreviewSet, PreviewError> {
-    abr(bytes, opts, Take::FirstAvailable(n))
+    abr(bytes, opts, Take::FirstAvailable(n), MAX_PREVIEW_BYTES)
 }
 
-fn abr(bytes: &[u8], opts: PreviewOptions, take: Take) -> Result<PreviewSet, PreviewError> {
+fn abr(
+    bytes: &[u8],
+    opts: PreviewOptions,
+    take: Take,
+    budget_bytes: usize,
+) -> Result<PreviewSet, PreviewError> {
     let max_cell = check_max_cell(opts)?;
 
     let deferred =
@@ -212,10 +274,11 @@ fn abr(bytes: &[u8], opts: PreviewOptions, take: Take) -> Result<PreviewSet, Pre
 
     rows.sort_by_key(|row| (row.key, row.source));
 
+    let mut budget = Budget::new(budget_bytes);
     let entries = rows
         .into_iter()
         .enumerate()
-        .map(|(index, row)| abr_entry(&deferred, index, row.source, max_cell));
+        .map(|(index, row)| abr_entry(&deferred, index, row.source, max_cell, &mut budget));
 
     Ok(PreviewSet {
         set_name: None,
@@ -230,6 +293,7 @@ fn abr_entry(
     index: usize,
     source: Source,
     max_cell: u32,
+    budget: &mut Budget,
 ) -> PreviewEntry {
     #[cfg(test)]
     tests::record_entry();
@@ -242,10 +306,10 @@ fn abr_entry(
             } else {
                 brush.name.clone()
             };
-            let tip = match deferred.decode_tip(i) {
+            let tip = budget.render(|| match deferred.decode_tip(i) {
                 Ok(tip) => tip_preview(&to_grayscale(&tip), max_cell),
                 Err(e) => TipPreview::Unavailable(UnavailableReason::Corrupt(e.to_string())),
-            };
+            });
             (
                 name,
                 tip,
@@ -254,17 +318,22 @@ fn abr_entry(
         }
         Source::Computed(i) => {
             let preset = &pack.computed_presets[i];
+            let unsupported = || {
+                TipPreview::Unavailable(UnavailableReason::UnsupportedTipKind(
+                    "computed".to_string(),
+                ))
+            };
             let tip = match preset
                 .descriptor
                 .computed
                 .as_ref()
                 .filter(|geom| can_synthesize(geom))
-                .and_then(synthesize_computed_tip)
             {
-                Some(bitmap) => tip_preview(&bitmap, max_cell),
-                None => TipPreview::Unavailable(UnavailableReason::UnsupportedTipKind(
-                    "computed".to_string(),
-                )),
+                Some(geom) => budget.render(|| {
+                    synthesize_computed_tip(geom)
+                        .map_or_else(unsupported, |bitmap| tip_preview(&bitmap, max_cell))
+                }),
+                None => unsupported(),
             };
             (preset.name.clone(), tip, None)
         }
@@ -309,22 +378,27 @@ fn tip_preview(bitmap: &GrayscaleBitmap, max_cell: u32) -> TipPreview {
 /// without one the members are the top-level directories that hold a
 /// `Brush.archive`, in zip order, and the set has no name.
 pub fn preview_brushset(bytes: &[u8], opts: PreviewOptions) -> Result<PreviewSet, PreviewError> {
-    brushset(bytes, opts, Take::All)
+    brushset(bytes, opts, Take::All, MAX_PREVIEW_BYTES)
 }
 
 /// The first `n` entries of [`preview_brushset`] whose tip is available, in
 /// the same order and with the same `index` they have there, so indices may
 /// skip. Unavailable entries do not count toward `n`, and members after the
-/// `n`th available one are not read.
+/// `n`th available one or after the first `OverBudget` one are not read.
 pub fn preview_brushset_first_available(
     bytes: &[u8],
     opts: PreviewOptions,
     n: usize,
 ) -> Result<PreviewSet, PreviewError> {
-    brushset(bytes, opts, Take::FirstAvailable(n))
+    brushset(bytes, opts, Take::FirstAvailable(n), MAX_PREVIEW_BYTES)
 }
 
-fn brushset(bytes: &[u8], opts: PreviewOptions, take: Take) -> Result<PreviewSet, PreviewError> {
+fn brushset(
+    bytes: &[u8],
+    opts: PreviewOptions,
+    take: Take,
+    budget_bytes: usize,
+) -> Result<PreviewSet, PreviewError> {
     let max_cell = check_max_cell(opts)?;
     let mut zip = open_zip(bytes)?;
 
@@ -343,10 +417,11 @@ fn brushset(bytes: &[u8], opts: PreviewOptions, take: Take) -> Result<PreviewSet
         (None, members)
     };
 
+    let mut budget = Budget::new(budget_bytes);
     let entries = prefixes
         .iter()
         .enumerate()
-        .map(|(index, prefix)| member_entry(&mut zip, index, prefix, max_cell));
+        .map(|(index, prefix)| member_entry(&mut zip, index, prefix, max_cell, &mut budget));
 
     Ok(PreviewSet {
         set_name,
@@ -357,7 +432,7 @@ fn brushset(bytes: &[u8], opts: PreviewOptions, take: Take) -> Result<PreviewSet
 /// The tip of a single Procreate `.brush`: one entry at index 0, read from the
 /// archive's root rather than from a member directory.
 pub fn preview_brush(bytes: &[u8], opts: PreviewOptions) -> Result<PreviewSet, PreviewError> {
-    brush(bytes, opts, Take::All)
+    brush(bytes, opts, Take::All, MAX_PREVIEW_BYTES)
 }
 
 /// [`preview_brush`] limited to available tips: its single entry when the tip
@@ -368,10 +443,15 @@ pub fn preview_brush_first_available(
     opts: PreviewOptions,
     n: usize,
 ) -> Result<PreviewSet, PreviewError> {
-    brush(bytes, opts, Take::FirstAvailable(n))
+    brush(bytes, opts, Take::FirstAvailable(n), MAX_PREVIEW_BYTES)
 }
 
-fn brush(bytes: &[u8], opts: PreviewOptions, take: Take) -> Result<PreviewSet, PreviewError> {
+fn brush(
+    bytes: &[u8],
+    opts: PreviewOptions,
+    take: Take,
+    budget_bytes: usize,
+) -> Result<PreviewSet, PreviewError> {
     let max_cell = check_max_cell(opts)?;
     let mut zip = open_zip(bytes)?;
 
@@ -379,7 +459,8 @@ fn brush(bytes: &[u8], opts: PreviewOptions, take: Take) -> Result<PreviewSet, P
         return Err(PreviewError("Brush.archive not found".to_string()));
     }
 
-    let entry = std::iter::once_with(|| member_entry(&mut zip, 0, "", max_cell));
+    let mut budget = Budget::new(budget_bytes);
+    let entry = std::iter::once_with(|| member_entry(&mut zip, 0, "", max_cell, &mut budget));
     Ok(PreviewSet {
         set_name: None,
         entries: take.collect(entry),
@@ -402,6 +483,7 @@ fn member_entry(
     index: usize,
     prefix: &str,
     max_cell: u32,
+    budget: &mut Budget,
 ) -> PreviewEntry {
     #[cfg(test)]
     tests::record_entry();
@@ -427,7 +509,10 @@ fn member_entry(
     };
 
     let (name, tip) = match archive {
-        Ok(name) => (name.unwrap_or(fallback_name), shape_tip(shape, max_cell)),
+        Ok(name) => (
+            name.unwrap_or(fallback_name),
+            shape_tip(shape, max_cell, budget),
+        ),
         Err(msg) => (
             fallback_name,
             TipPreview::Unavailable(UnavailableReason::Corrupt(msg)),
@@ -444,13 +529,17 @@ fn member_entry(
 
 /// The tip for a member's `Shape.png`: `None` when the member has no shape,
 /// otherwise the read result.
-fn shape_tip(shape: Option<Result<Vec<u8>, String>>, max_cell: u32) -> TipPreview {
+fn shape_tip(
+    shape: Option<Result<Vec<u8>, String>>,
+    max_cell: u32,
+    budget: &mut Budget,
+) -> TipPreview {
     let png = match shape {
         None => return TipPreview::Unavailable(UnavailableReason::NoShapePng),
         Some(Err(msg)) => return TipPreview::Unavailable(UnavailableReason::Corrupt(msg)),
         Some(Ok(png)) => png,
     };
-    match procreate::decode_tip_png(&png) {
+    budget.render(|| match procreate::decode_tip_png(&png) {
         Ok(bitmap) => tip_preview(&bitmap, max_cell),
         Err(procreate::ShapePngError::TooLarge { width, height }) => {
             TipPreview::Unavailable(UnavailableReason::TooLarge { width, height })
@@ -458,7 +547,7 @@ fn shape_tip(shape: Option<Result<Vec<u8>, String>>, max_cell: u32) -> TipPrevie
         Err(procreate::ShapePngError::Corrupt(msg)) => {
             TipPreview::Unavailable(UnavailableReason::Corrupt(msg))
         }
-    }
+    })
 }
 
 // The integration tests' fixture builders, shared with the unit tests below.
@@ -613,5 +702,111 @@ mod tests {
             1
         );
         assert_eq!(entries_built(|| preview_brushset(&bytes, OPTS).unwrap()), 4);
+    }
+
+    fn sized(width: u32, height: u32) -> SampTip {
+        SampTip {
+            width,
+            height,
+            fill: 0x80,
+            corrupt: false,
+        }
+    }
+
+    /// A `.brushset` whose plist lists `members` in order, each a member
+    /// directory. Member `a` has a 4x4 `Shape.png`, `c` has a `Shape.png` that
+    /// fails to decode, `n` has none and `x` has an unreadable `Brush.archive`.
+    fn brushset_of(members: &[&str]) -> Vec<u8> {
+        let archive = brush_archive("Tip");
+        let shape = gray_png(4, 4, 200);
+        let plist = brushset_plist("Set", members);
+        zip_with(&[
+            ("brushset.plist", &plist),
+            ("a/Brush.archive", &archive),
+            ("a/Shape.png", &shape),
+            ("c/Brush.archive", &archive),
+            ("c/Shape.png", b"not a png"),
+            ("n/Brush.archive", &archive),
+            ("x/Brush.archive", b"not a plist"),
+            ("x/Shape.png", &shape),
+        ])
+    }
+
+    /// Asserts that `bounded` is `full` with every tip from index `fit` on
+    /// `OverBudget`, and that the tips it keeps hold at most `budget` bytes.
+    fn assert_bounded(full: &PreviewSet, bounded: &PreviewSet, fit: usize, budget: usize) {
+        assert_eq!(bounded.entries.len(), full.entries.len());
+        let mut bytes = 0;
+        for (i, (got, want)) in bounded.entries.iter().zip(&full.entries).enumerate() {
+            assert_eq!(
+                (got.index, &got.name, got.source_dimensions),
+                (i, &want.name, want.source_dimensions)
+            );
+            match &got.tip {
+                TipPreview::Available(bitmap) if i < fit => bytes += bitmap.data.len(),
+                TipPreview::Unavailable(UnavailableReason::OverBudget) if i >= fit => {}
+                tip => panic!("entry {i}: {tip:?}"),
+            }
+        }
+        assert!(bytes <= budget, "{bytes} bytes over a budget of {budget}");
+    }
+
+    #[test]
+    fn brushset_tips_past_the_budget_are_over_budget() {
+        let bytes = brushset_of(&["a"; 6]);
+        let full = brushset(&bytes, OPTS, Take::All, MAX_PREVIEW_BYTES).unwrap();
+        // Each 4x4 tip is 16 bytes, so three fit in 50.
+        let bounded = brushset(&bytes, OPTS, Take::All, 50).unwrap();
+        assert_bounded(&full, &bounded, 3, 50);
+    }
+
+    #[test]
+    fn abr_tips_past_the_first_that_does_not_fit_are_over_budget() {
+        // Listed in reverse: 16, 16, 36 and 4 bytes. The 4-byte tip would fit
+        // after the 36-byte one does not.
+        let bytes = samp_abr(&[sized(2, 2), sized(6, 6), sized(4, 4), sized(4, 4)]);
+        let full = abr(&bytes, OPTS, Take::All, MAX_PREVIEW_BYTES).unwrap();
+        let bounded = abr(&bytes, OPTS, Take::All, 40).unwrap();
+        assert_bounded(&full, &bounded, 2, 40);
+    }
+
+    #[test]
+    fn entries_unavailable_for_their_own_reason_keep_it_past_the_budget() {
+        // `c` is `Corrupt` only when decoded, so `OverBudget` after the stop
+        // shows its tip was not decoded.
+        let bytes = brushset_of(&["c", "a", "a", "n", "x", "c", "a"]);
+        let reasons: Vec<Option<UnavailableReason>> = brushset(&bytes, OPTS, Take::All, 20)
+            .unwrap()
+            .entries
+            .into_iter()
+            .map(|entry| match entry.tip {
+                TipPreview::Available(_) => None,
+                TipPreview::Unavailable(reason) => Some(reason),
+            })
+            .collect();
+        assert!(matches!(
+            reasons.as_slice(),
+            [
+                Some(UnavailableReason::Corrupt(_)),
+                None,
+                Some(UnavailableReason::OverBudget),
+                Some(UnavailableReason::NoShapePng),
+                Some(UnavailableReason::Corrupt(_)),
+                Some(UnavailableReason::OverBudget),
+                Some(UnavailableReason::OverBudget),
+            ]
+        ));
+    }
+
+    #[test]
+    fn first_available_stops_at_the_first_over_budget_entry() {
+        let bytes = samp_abr(&std::array::from_fn::<_, 6, _>(|_| tip(false)));
+        let mut set = None;
+        assert_eq!(
+            entries_built(|| set = Some(abr(&bytes, OPTS, Take::FirstAvailable(5), 40).unwrap())),
+            3
+        );
+        let indices: Vec<usize> = set.unwrap().entries.iter().map(|e| e.index).collect();
+        assert_eq!(indices, [0, 1]);
     }
 }

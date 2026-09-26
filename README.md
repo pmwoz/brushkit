@@ -60,9 +60,12 @@ are identical, so the block compiles whenever the test suite does.
 `preview_abr`, `preview_brush` and `preview_brushset` return every brush in
 file order exactly once, available or not. A brush whose tip cannot be
 rendered carries a reason (`NoShapePng`, `UnsupportedTipKind`, `Corrupt`,
-`TooLarge`) rather than being dropped, so a caller can lay out a complete
-grid. Each entry also carries optional `source_dimensions` for the original
-raster, independent of the preview size and retained if pixel decoding fails.
+`TooLarge`, `OverBudget`) rather than being dropped, so a caller can lay out a
+complete grid. The available tips of one call hold at most
+`MAX_PREVIEW_BYTES` (256 MiB) of bitmap data. The first tip that would pass it
+is `OverBudget`, and so is every later tip to render, which is not decoded.
+Each entry also carries optional `source_dimensions` for the original raster,
+independent of the preview size and retained if pixel decoding fails.
 Computed tips have no source raster dimensions. No returned bitmap has a side
 larger than `max_cell`, and a tip that already fits keeps its size. A tip with
 a zero width or height is `Corrupt`, so every available tip has pixels. A
