@@ -87,6 +87,14 @@ To draw only the first few thumbnails, use `preview_abr_first_available`,
 return the first `n` drawable tips and stop there. Each entry keeps its index
 from the full list, so the numbers can skip.
 
+To stop a preview part way, for example to show previews under a time limit,
+call `preview` with a `Format`, a `Take` (`All` or `FirstAvailable(n)`) and a
+`keep_going` callback. brushkit has no clock, so it calls `keep_going` before
+it builds each entry and stops at the first `false`. The result holds the
+entries built so far, and `not_reached` counts the entries that were not
+built. The work before the first entry, such as opening the zip, and the
+entry being built are not interrupted.
+
 `generate_preview_png` turns one tip into a PNG of at most 200 pixels per
 side, with black ink and the tip's gray value as alpha.
 `generate_contact_sheet_png` draws many tips on one labeled sheet.

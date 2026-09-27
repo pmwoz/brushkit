@@ -7,6 +7,10 @@
 //! has a `_first_available` twin that returns only the first `n` available
 //! entries and builds no entry after them.
 //!
+//! [`preview`] is the function all six call. It also takes a `keep_going`
+//! callback that can stop the call between entries, for a host that shows
+//! previews under a time limit.
+//!
 //! The available tips of one call hold at most [`MAX_PREVIEW_BYTES`] of bitmap
 //! data together. Entries past that point are
 //! [`UnavailableReason::OverBudget`] and their tips are not decoded.
@@ -38,7 +42,8 @@ pub struct PreviewOptions {
 }
 
 /// The most bytes of bitmap data ([`GrayscaleBitmap::data`]) the `Available`
-/// tips of one `preview_*` or `*_first_available` call hold together.
+/// tips of one [`preview`] call, or one call of a function built on it, hold
+/// together.
 pub const MAX_PREVIEW_BYTES: usize = 256 * 1024 * 1024;
 
 // A `Shape.png` at the largest size the reader accepts must fit on its own, or
@@ -49,6 +54,10 @@ const _: () = assert!(MAX_PREVIEW_BYTES >= (procreate::MAX_PNG_DIMENSION as usiz
 pub struct PreviewSet {
     pub set_name: Option<String>,
     pub entries: Vec<PreviewEntry>,
+    /// Entries of the file that were not built because the `keep_going`
+    /// callback of [`preview`] returned `false`. 0 when the call ran to its
+    /// end.
+    pub not_reached: usize,
 }
 
 /// File-declared raster dimensions, independent of the returned preview size.
@@ -128,21 +137,51 @@ fn check_max_cell(opts: PreviewOptions) -> Result<u32, PreviewError> {
     Ok(opts.max_cell)
 }
 
-/// Which entries a preview returns.
-#[derive(Clone, Copy)]
-enum Take {
+/// The kind of brush file [`preview`] reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Abr,
+    Brush,
+    Brushset,
+}
+
+/// Which entries a [`preview`] returns.
+#[derive(Debug, Clone, Copy)]
+pub enum Take {
+    /// Every entry, available or not.
     All,
-    /// The first `n` entries whose tip is available. This stops pulling after
-    /// the `n`th, or at the first `OverBudget` entry since no later one can be
-    /// available; it saves work only because callers pass a lazy iterator.
+    /// The first `n` entries whose tip is available, with the `index` they
+    /// have under `All`, so indices may skip. No entry is built after the
+    /// `n`th available one or after the first `OverBudget` one, since no
+    /// later entry can be available.
     FirstAvailable(usize),
 }
 
 impl Take {
-    fn collect(self, entries: impl Iterator<Item = PreviewEntry>) -> Vec<PreviewEntry> {
-        match self {
-            Take::All => entries.collect(),
-            Take::FirstAvailable(n) => entries
+    /// The entries to return and how many were not reached because
+    /// `keep_going` returned `false`. `entries` must be lazy, as it is pulled
+    /// only as far as needed.
+    fn collect(
+        self,
+        mut entries: impl ExactSizeIterator<Item = PreviewEntry>,
+        keep_going: &mut dyn FnMut() -> bool,
+    ) -> (Vec<PreviewEntry>, usize) {
+        let mut stopped = false;
+        let gated = std::iter::from_fn(|| {
+            // Checked first so `keep_going` is not asked about an entry that
+            // does not exist.
+            if entries.len() == 0 {
+                return None;
+            }
+            if !keep_going() {
+                stopped = true;
+                return None;
+            }
+            entries.next()
+        });
+        let taken = match self {
+            Take::All => gated.collect(),
+            Take::FirstAvailable(n) => gated
                 .take_while(|entry| {
                     !matches!(
                         entry.tip,
@@ -152,7 +191,34 @@ impl Take {
                 .filter(|entry| matches!(entry.tip, TipPreview::Available(_)))
                 .take(n)
                 .collect(),
-        }
+        };
+        let not_reached = if stopped { entries.len() } else { 0 };
+        (taken, not_reached)
+    }
+}
+
+/// Tips for a brush file of `format`, as `take` selects them.
+///
+/// `keep_going` is called before each entry is built. The first `false` stops
+/// the call: it returns the entries `take` selected so far and counts the
+/// entries not built in [`PreviewSet::not_reached`]. The work before the
+/// first entry, such as opening a zip or parsing the `.abr` index, and the
+/// entry being built are not interrupted. A call that ends because `take` has
+/// all it needs is not stopped, and `keep_going` is not called after that.
+///
+/// The entries of a file are the rows of an `.abr` preview, the members a
+/// `.brushset` lists, or the single brush of a `.brush`.
+pub fn preview(
+    bytes: &[u8],
+    format: Format,
+    opts: PreviewOptions,
+    take: Take,
+    keep_going: &mut dyn FnMut() -> bool,
+) -> Result<PreviewSet, PreviewError> {
+    match format {
+        Format::Abr => abr(bytes, opts, take, keep_going, MAX_PREVIEW_BYTES),
+        Format::Brush => brush(bytes, opts, take, keep_going, MAX_PREVIEW_BYTES),
+        Format::Brushset => brushset(bytes, opts, take, keep_going, MAX_PREVIEW_BYTES),
     }
 }
 
@@ -219,7 +285,7 @@ struct Row {
 ///
 /// Embedded pattern payloads are neither copied nor decoded.
 pub fn preview_abr(bytes: &[u8], opts: PreviewOptions) -> Result<PreviewSet, PreviewError> {
-    abr(bytes, opts, Take::All, MAX_PREVIEW_BYTES)
+    preview(bytes, Format::Abr, opts, Take::All, &mut || true)
 }
 
 /// The first `n` entries of [`preview_abr`] whose tip is available, in the
@@ -234,13 +300,20 @@ pub fn preview_abr_first_available(
     opts: PreviewOptions,
     n: usize,
 ) -> Result<PreviewSet, PreviewError> {
-    abr(bytes, opts, Take::FirstAvailable(n), MAX_PREVIEW_BYTES)
+    preview(
+        bytes,
+        Format::Abr,
+        opts,
+        Take::FirstAvailable(n),
+        &mut || true,
+    )
 }
 
 fn abr(
     bytes: &[u8],
     opts: PreviewOptions,
     take: Take,
+    keep_going: &mut dyn FnMut() -> bool,
     budget_bytes: usize,
 ) -> Result<PreviewSet, PreviewError> {
     let max_cell = check_max_cell(opts)?;
@@ -281,9 +354,11 @@ fn abr(
         .enumerate()
         .map(|(index, row)| abr_entry(&deferred, index, row.source, max_cell, &mut budget));
 
+    let (entries, not_reached) = take.collect(entries, keep_going);
     Ok(PreviewSet {
         set_name: None,
-        entries: take.collect(entries),
+        entries,
+        not_reached,
     })
 }
 
@@ -379,7 +454,7 @@ fn tip_preview(bitmap: &GrayscaleBitmap, max_cell: u32) -> TipPreview {
 /// without one the members are the top-level directories that hold a
 /// `Brush.archive`, in zip order, and the set has no name.
 pub fn preview_brushset(bytes: &[u8], opts: PreviewOptions) -> Result<PreviewSet, PreviewError> {
-    brushset(bytes, opts, Take::All, MAX_PREVIEW_BYTES)
+    preview(bytes, Format::Brushset, opts, Take::All, &mut || true)
 }
 
 /// The first `n` entries of [`preview_brushset`] whose tip is available, in
@@ -391,13 +466,20 @@ pub fn preview_brushset_first_available(
     opts: PreviewOptions,
     n: usize,
 ) -> Result<PreviewSet, PreviewError> {
-    brushset(bytes, opts, Take::FirstAvailable(n), MAX_PREVIEW_BYTES)
+    preview(
+        bytes,
+        Format::Brushset,
+        opts,
+        Take::FirstAvailable(n),
+        &mut || true,
+    )
 }
 
 fn brushset(
     bytes: &[u8],
     opts: PreviewOptions,
     take: Take,
+    keep_going: &mut dyn FnMut() -> bool,
     budget_bytes: usize,
 ) -> Result<PreviewSet, PreviewError> {
     let max_cell = check_max_cell(opts)?;
@@ -439,16 +521,18 @@ fn brushset(
         member.entry(index)
     });
 
+    let (entries, not_reached) = take.collect(entries, keep_going);
     Ok(PreviewSet {
         set_name,
-        entries: take.collect(entries),
+        entries,
+        not_reached,
     })
 }
 
 /// The tip of a single Procreate `.brush`: one entry at index 0, read from the
 /// archive's root rather than from a member directory.
 pub fn preview_brush(bytes: &[u8], opts: PreviewOptions) -> Result<PreviewSet, PreviewError> {
-    brush(bytes, opts, Take::All, MAX_PREVIEW_BYTES)
+    preview(bytes, Format::Brush, opts, Take::All, &mut || true)
 }
 
 /// [`preview_brush`] limited to available tips: its single entry when the tip
@@ -459,13 +543,20 @@ pub fn preview_brush_first_available(
     opts: PreviewOptions,
     n: usize,
 ) -> Result<PreviewSet, PreviewError> {
-    brush(bytes, opts, Take::FirstAvailable(n), MAX_PREVIEW_BYTES)
+    preview(
+        bytes,
+        Format::Brush,
+        opts,
+        Take::FirstAvailable(n),
+        &mut || true,
+    )
 }
 
 fn brush(
     bytes: &[u8],
     opts: PreviewOptions,
     take: Take,
+    keep_going: &mut dyn FnMut() -> bool,
     budget_bytes: usize,
 ) -> Result<PreviewSet, PreviewError> {
     let max_cell = check_max_cell(opts)?;
@@ -477,9 +568,11 @@ fn brush(
 
     let mut budget = Budget::new(budget_bytes);
     let entry = std::iter::once_with(|| read_member(&mut zip, "", max_cell, &mut budget).entry(0));
+    let (entries, not_reached) = take.collect(entry, keep_going);
     Ok(PreviewSet {
         set_name: None,
-        entries: take.collect(entry),
+        entries,
+        not_reached,
     })
 }
 
@@ -880,9 +973,9 @@ mod tests {
     #[test]
     fn brushset_tips_past_the_budget_are_over_budget() {
         let bytes = brushset_of(&["a"; 6]);
-        let full = brushset(&bytes, OPTS, Take::All, MAX_PREVIEW_BYTES).unwrap();
+        let full = brushset(&bytes, OPTS, Take::All, &mut || true, MAX_PREVIEW_BYTES).unwrap();
         // Each 4x4 tip is 16 bytes, so three fit in 50.
-        let bounded = brushset(&bytes, OPTS, Take::All, 50).unwrap();
+        let bounded = brushset(&bytes, OPTS, Take::All, &mut || true, 50).unwrap();
         assert_bounded(&full, &bounded, 3, 50);
     }
 
@@ -891,8 +984,8 @@ mod tests {
         // Listed in reverse: 16, 16, 36 and 4 bytes. The 4-byte tip would fit
         // after the 36-byte one does not.
         let bytes = samp_abr(&[sized(2, 2), sized(6, 6), sized(4, 4), sized(4, 4)]);
-        let full = abr(&bytes, OPTS, Take::All, MAX_PREVIEW_BYTES).unwrap();
-        let bounded = abr(&bytes, OPTS, Take::All, 40).unwrap();
+        let full = abr(&bytes, OPTS, Take::All, &mut || true, MAX_PREVIEW_BYTES).unwrap();
+        let bounded = abr(&bytes, OPTS, Take::All, &mut || true, 40).unwrap();
         assert_bounded(&full, &bounded, 2, 40);
     }
 
@@ -901,15 +994,16 @@ mod tests {
         // `c` is `Corrupt` only when decoded, so `OverBudget` after the stop
         // shows its tip was not decoded.
         let bytes = brushset_of(&["c", "a", "a", "n", "x", "c", "a"]);
-        let reasons: Vec<Option<UnavailableReason>> = brushset(&bytes, OPTS, Take::All, 20)
-            .unwrap()
-            .entries
-            .into_iter()
-            .map(|entry| match entry.tip {
-                TipPreview::Available(_) => None,
-                TipPreview::Unavailable(reason) => Some(reason),
-            })
-            .collect();
+        let reasons: Vec<Option<UnavailableReason>> =
+            brushset(&bytes, OPTS, Take::All, &mut || true, 20)
+                .unwrap()
+                .entries
+                .into_iter()
+                .map(|entry| match entry.tip {
+                    TipPreview::Available(_) => None,
+                    TipPreview::Unavailable(reason) => Some(reason),
+                })
+                .collect();
         assert!(matches!(
             reasons.as_slice(),
             [
@@ -929,10 +1023,174 @@ mod tests {
         let bytes = samp_abr(&std::array::from_fn::<_, 6, _>(|_| tip(false)));
         let mut set = None;
         assert_eq!(
-            reads(|| set = Some(abr(&bytes, OPTS, Take::FirstAvailable(5), 40).unwrap())),
+            reads(|| set =
+                Some(abr(&bytes, OPTS, Take::FirstAvailable(5), &mut || true, 40).unwrap())),
             3
         );
         let indices: Vec<usize> = set.unwrap().entries.iter().map(|e| e.index).collect();
         assert_eq!(indices, [0, 1]);
+    }
+
+    /// A `keep_going` that returns `true` for its first `k` calls and `false`
+    /// after that.
+    fn stop_after(k: usize) -> impl FnMut() -> bool {
+        let mut calls = 0;
+        move || {
+            calls += 1;
+            calls <= k
+        }
+    }
+
+    fn debug(entries: &[PreviewEntry]) -> Vec<String> {
+        entries.iter().map(|entry| format!("{entry:?}")).collect()
+    }
+
+    fn brush_file() -> Vec<u8> {
+        zip_with(&[
+            ("Brush.archive", &brush_archive("Tip")),
+            ("Shape.png", &gray_png(4, 4, 200)),
+        ])
+    }
+
+    #[test]
+    fn a_stop_returns_the_entries_built_before_it() {
+        let files = [
+            (
+                Format::Abr,
+                samp_abr(&[tip(false), tip(true), tip(false), tip(false), tip(true)]),
+            ),
+            (
+                Format::Brushset,
+                brushset_of(&["a", "c", "n", "a", "x", "a"]),
+            ),
+        ];
+        for (format, bytes) in files {
+            let mut calls = 0;
+            let full = preview(&bytes, format, OPTS, Take::All, &mut || {
+                calls += 1;
+                true
+            })
+            .unwrap();
+            let total = full.entries.len();
+            assert_eq!(calls, total, "{format:?}");
+            for k in 0..=total {
+                let all = preview(&bytes, format, OPTS, Take::All, &mut stop_after(k)).unwrap();
+                assert_eq!(all.set_name, full.set_name);
+                assert_eq!(
+                    debug(&all.entries),
+                    debug(&full.entries[..k]),
+                    "{format:?} {k}"
+                );
+                assert_eq!(all.not_reached, total - k, "{format:?} {k}");
+
+                let take = Take::FirstAvailable(total);
+                let first = preview(&bytes, format, OPTS, take, &mut stop_after(k)).unwrap();
+                let available: Vec<PreviewEntry> = full.entries[..k]
+                    .iter()
+                    .filter(|entry| matches!(entry.tip, TipPreview::Available(_)))
+                    .cloned()
+                    .collect();
+                assert_eq!(debug(&first.entries), debug(&available), "{format:?} {k}");
+                assert_eq!(first.not_reached, total - k, "{format:?} {k}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_stop_on_the_first_call_builds_no_entry() {
+        let files = [
+            (
+                Format::Abr,
+                samp_abr(&[tip(false), tip(false), tip(false)]),
+                3,
+            ),
+            (Format::Brushset, brushset_of(&["a", "n", "a", "c"]), 4),
+            (Format::Brush, brush_file(), 1),
+        ];
+        for (format, bytes, total) in files {
+            for take in [Take::All, Take::FirstAvailable(total)] {
+                let mut set = None;
+                assert_eq!(
+                    reads(|| set = Some(preview(&bytes, format, OPTS, take, &mut || false))),
+                    0,
+                    "{format:?} {take:?}"
+                );
+                let set = set.unwrap().unwrap();
+                assert!(set.entries.is_empty(), "{format:?} {take:?}");
+                assert_eq!(set.not_reached, total, "{format:?} {take:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_stopped_brushset_does_not_read_later_members() {
+        // `c` is `Corrupt` only once its `Shape.png` is read and decoded.
+        let bytes = brushset_of(&["a", "c"]);
+        let full = preview_brushset(&bytes, OPTS).unwrap();
+        assert!(matches!(
+            full.entries[1].tip,
+            TipPreview::Unavailable(UnavailableReason::Corrupt(_))
+        ));
+
+        let mut set = None;
+        let stop = || {
+            preview(
+                &bytes,
+                Format::Brushset,
+                OPTS,
+                Take::All,
+                &mut stop_after(1),
+            )
+        };
+        assert_eq!(reads(|| set = Some(stop())), 1);
+        let set = set.unwrap().unwrap();
+        assert!(set.entries.iter().all(|entry| !matches!(
+            entry.tip,
+            TipPreview::Unavailable(UnavailableReason::Corrupt(_))
+        )));
+        assert_eq!(set.not_reached, 1);
+    }
+
+    #[test]
+    fn first_available_that_takes_all_it_needs_is_not_stopped() {
+        let bytes = samp_abr(&std::array::from_fn::<_, 6, _>(|_| tip(false)));
+        let set = abr(
+            &bytes,
+            OPTS,
+            Take::FirstAvailable(1),
+            &mut stop_after(1),
+            MAX_PREVIEW_BYTES,
+        )
+        .unwrap();
+        assert_eq!((set.entries.len(), set.not_reached), (1, 0));
+
+        // Two 16-byte tips fit in 40, so the third entry is `OverBudget`.
+        let set = abr(
+            &bytes,
+            OPTS,
+            Take::FirstAvailable(5),
+            &mut stop_after(3),
+            40,
+        )
+        .unwrap();
+        assert_eq!((set.entries.len(), set.not_reached), (2, 0));
+    }
+
+    #[test]
+    fn the_preview_functions_run_to_the_end() {
+        let abr_bytes = samp_abr(&[tip(false), tip(false), tip(false)]);
+        let set_bytes = brushset_of(&["a", "a", "a"]);
+        let brush_bytes = brush_file();
+        let sets = [
+            preview_abr(&abr_bytes, OPTS),
+            preview_abr_first_available(&abr_bytes, OPTS, 1),
+            preview_brushset(&set_bytes, OPTS),
+            preview_brushset_first_available(&set_bytes, OPTS, 1),
+            preview_brush(&brush_bytes, OPTS),
+            preview_brush_first_available(&brush_bytes, OPTS, 0),
+        ];
+        for set in sets {
+            assert_eq!(set.unwrap().not_reached, 0);
+        }
     }
 }
