@@ -27,26 +27,46 @@ pub const MAX_PLIST_VALUES: usize = 100_000;
 /// The same census found at most 7 KiB.
 pub const MAX_PLIST_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 
-/// The declared uncompressed size is an attacker-controlled zip-header field,
-/// so it is only a clamped pre-allocation hint and the read is capped
-/// independently — a small declared size can hide a huge inflate.
+/// Reads a zip entry of at most [`MAX_ENTRY_BYTES`].
 pub fn read_zip_entry(
     zip: &mut zip::ZipArchive<Cursor<&[u8]>>,
     path: &str,
 ) -> Result<Vec<u8>, String> {
-    let file = zip.by_name(path).map_err(|_| format!("{path} not found"))?;
-    if file.size() > MAX_ENTRY_BYTES as u64 {
-        return Err(format!(
-            "{path}: declared size {} exceeds limit",
-            file.size()
-        ));
+    read_capped(zip, path, MAX_ENTRY_BYTES)
+}
+
+/// [`read_zip_entry`] capped at [`MAX_PLIST_BYTES`], so an oversize plist
+/// fails before more than the plist ceiling is read.
+pub fn read_zip_plist(
+    zip: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    path: &str,
+) -> Result<Vec<u8>, String> {
+    read_capped(zip, path, MAX_PLIST_BYTES)
+}
+
+/// The declared uncompressed size is an attacker-controlled zip-header field,
+/// and a small declared size can hide a huge inflate. So the read stops at the
+/// declared size, which fits the buffer allocated for it, and one byte more
+/// rejects the entry. That extra read also reaches the end of the entry, where
+/// the zip reader checks the CRC.
+fn read_capped(
+    zip: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    path: &str,
+    limit: usize,
+) -> Result<Vec<u8>, String> {
+    let mut file = zip.by_name(path).map_err(|_| format!("{path} not found"))?;
+    let size = file.size();
+    if size > limit as u64 {
+        return Err(format!("{path}: declared size {size} exceeds limit"));
     }
-    let mut buf = Vec::with_capacity((file.size() as usize).min(MAX_ENTRY_BYTES));
-    file.take(MAX_ENTRY_BYTES as u64 + 1)
+    let read_error = |e: std::io::Error| format!("failed to read {path}: {e}");
+    let mut buf = Vec::with_capacity(size as usize);
+    (&mut file)
+        .take(size)
         .read_to_end(&mut buf)
-        .map_err(|e| format!("failed to read {path}: {e}"))?;
-    if buf.len() > MAX_ENTRY_BYTES {
-        return Err(format!("{path}: entry exceeds size limit"));
+        .map_err(read_error)?;
+    if file.read(&mut [0]).map_err(read_error)? > 0 {
+        return Err(format!("{path}: entry exceeds its declared size"));
     }
     Ok(buf)
 }

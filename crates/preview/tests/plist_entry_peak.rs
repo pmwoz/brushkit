@@ -35,7 +35,7 @@ fn growth(read: impl FnOnce()) -> usize {
 }
 
 #[test]
-fn an_oversize_plist_entry_is_read_no_further_than_the_plist_limit() {
+fn an_oversize_plist_entry_is_rejected_before_it_is_read() {
     let plist = oversize_plist();
     let honest = zip_with(&[("brushset.plist", &plist)]);
     let understated = declare_size(honest.clone(), 1024);
@@ -48,7 +48,7 @@ fn an_oversize_plist_entry_is_read_no_further_than_the_plist_limit() {
         });
         println!("brushset.plist, {label} size: {peak} bytes");
         assert!(
-            peak <= MAX_PLIST_BYTES + MIB,
+            peak <= MIB,
             "{label}: a {} MiB brushset.plist grew the heap by {peak} bytes",
             plist.len() / MIB
         );
@@ -66,7 +66,7 @@ fn an_oversize_plist_entry_is_read_no_further_than_the_plist_limit() {
     });
     println!("Brush.archive: {peak} bytes");
     assert!(
-        peak <= MAX_PLIST_BYTES + MIB,
+        peak <= MIB,
         "a {} MiB Brush.archive grew the heap by {peak} bytes",
         plist.len() / MIB
     );
