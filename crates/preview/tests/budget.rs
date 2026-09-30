@@ -2,6 +2,7 @@ mod common;
 
 use std::io::Cursor;
 
+use brushkit_preview::procreate::MAX_PLIST_VALUES;
 use brushkit_preview::{
     preview_brushset, PreviewOptions, TipPreview, UnavailableReason, MAX_PREVIEW_BYTES,
 };
@@ -11,10 +12,12 @@ use image::{DynamicImage, GrayImage, ImageFormat, Luma};
 /// A tip keeps its size at `max_cell = SIDE`, so each available one holds
 /// `SIDE * SIDE` bytes. A large tip reaches the budget in few decodes.
 const SIDE: u32 = 1024;
-const REFERENCES: usize = 100_000;
+/// Half the value guard, so the member list is the largest the plist reader
+/// accepts by a wide margin.
+const REFERENCES: usize = MAX_PLIST_VALUES / 2;
 
 #[test]
-fn one_member_listed_100_000_times_stays_within_the_budget() {
+fn one_member_listed_many_times_stays_within_the_budget() {
     let mut shape = Cursor::new(Vec::new());
     DynamicImage::from(GrayImage::from_pixel(SIDE, SIDE, Luma([200])))
         .write_to(&mut shape, ImageFormat::Png)

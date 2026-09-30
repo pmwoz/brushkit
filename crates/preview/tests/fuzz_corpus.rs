@@ -2,7 +2,7 @@ mod common;
 #[path = "../../../fuzz/fuzz_targets/tip_shapes.rs"]
 mod tip_shapes;
 
-use brushkit_preview::procreate::{MAX_PLIST_DEPTH, MAX_PLIST_PAYLOAD_BYTES};
+use brushkit_preview::procreate::{MAX_PLIST_DEPTH, MAX_PLIST_PAYLOAD_BYTES, MAX_PLIST_VALUES};
 use brushkit_preview::{
     preview_abr, preview_abr_first_available, preview_brush, preview_brush_first_available,
     preview_brushset, preview_brushset_first_available, PreviewOptions, TipPreview,
@@ -10,7 +10,7 @@ use brushkit_preview::{
 };
 use common::{
     brush_archive, brushset_plist, depth_bomb_plist_xml, dimension_bomb_png, gray_png, legacy_abr,
-    samp_abr, shared_arrays_plist, shared_data_plist, zip_with, SampTip,
+    samp_abr, shared_array_values, shared_arrays_plist, shared_data_plist, zip_with, SampTip,
 };
 use std::collections::BTreeSet;
 use std::io::{Cursor, Read};
@@ -22,12 +22,16 @@ const OPTIONS: PreviewOptions = PreviewOptions { max_cell: 8 };
 /// below the guard, so the fuzzer explores both sides of the limit.
 const SEED_DEPTH: usize = MAX_PLIST_DEPTH + 1;
 /// One reference over the payload guard, so deleting a reference takes a
-/// mutant below it.
-const SEED_DATA_CHUNK: usize = 128 * 1024;
+/// mutant below it. A small chunk keeps the seed near 10 KiB.
+const SEED_DATA_CHUNK: usize = 8 * 1024;
 const SEED_DATA_REFS: usize = MAX_PLIST_PAYLOAD_BYTES / SEED_DATA_CHUNK + 1;
-/// Four levels of 32 references expand to just over the event guard.
-const SEED_ARRAY_LEVELS: usize = 4;
-const SEED_ARRAY_FANOUT: usize = 32;
+/// Three levels of 47 references expand to 6% over the value guard.
+const SEED_ARRAY_LEVELS: usize = 3;
+const SEED_ARRAY_FANOUT: usize = 47;
+const _: () = {
+    let values = shared_array_values(SEED_ARRAY_LEVELS, SEED_ARRAY_FANOUT);
+    assert!(values > MAX_PLIST_VALUES && values < MAX_PLIST_VALUES + MAX_PLIST_VALUES / 10);
+};
 /// A 64x32 8-bit grayscale PNG written once with Python's zlib at level 9, one
 /// IDAT holding one dynamic Huffman block. Row `y` uses filter `y % 5`. The
 /// pixels vary, but every 8x8 block averages 200, so its 8x4 preview matches
@@ -317,9 +321,12 @@ fn depth_seeds_reach_the_depth_guard() {
 
 #[test]
 fn expansion_seeds_reach_the_expansion_guards() {
+    let payload_guard =
+        format!("plist expands to over {MAX_PLIST_PAYLOAD_BYTES} bytes of strings and data");
+    let values_guard = format!("plist expands to over {MAX_PLIST_VALUES} values");
     for (name, guard) in [
-        ("shared_data_archive", "bytes of strings and data"),
-        ("shared_arrays_archive", "values"),
+        ("shared_data_archive", &payload_guard),
+        ("shared_arrays_archive", &values_guard),
     ] {
         let bytes = std::fs::read(corpus("preview_brush").join(name)).unwrap();
         let set = preview_brush(&bytes, OPTIONS).expect("brush reads");
@@ -329,15 +336,15 @@ fn expansion_seeds_reach_the_expansion_guards() {
         let TipPreview::Unavailable(UnavailableReason::Corrupt(msg)) = &entry.tip else {
             panic!("expected Corrupt, got {:?}", entry.tip);
         };
-        assert!(msg.contains(guard), "{name}: {msg}");
+        assert_eq!(msg, &format!("Brush.archive: {guard}"), "{name}");
     }
     for (name, guard) in [
-        ("shared_data_metadata", "bytes of strings and data"),
-        ("shared_arrays_metadata", "values"),
+        ("shared_data_metadata", &payload_guard),
+        ("shared_arrays_metadata", &values_guard),
     ] {
         let bytes = std::fs::read(corpus("preview_brushset").join(name)).unwrap();
         let err = preview_brushset(&bytes, OPTIONS).expect_err("expansion bomb must be rejected");
-        assert!(err.0.contains(guard), "{name}: {err}");
+        assert_eq!(err.0, format!("brushset.plist: {guard}"), "{name}");
     }
 }
 

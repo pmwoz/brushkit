@@ -244,7 +244,19 @@ pub fn shared_data_plist(count: usize, bytes_each: usize) -> Vec<u8> {
 /// nested arrays, each holding `fanout` references to the one array below it,
 /// down to one string. Written by hand because the plist writer does not
 /// share collections: the file holds `levels + 8` objects and expands to
-/// `fanout ^ levels` strings.
+/// `fanout ^ levels` strings, [`shared_array_values`] values in all.
+pub const fn shared_array_values(levels: usize, fanout: usize) -> usize {
+    // The root dictionary, its three keys, the set name, the member array and
+    // its one member, then one array or string per node of the reference tree.
+    let mut values = 7;
+    let mut level = 0;
+    while level <= levels {
+        values += fanout.pow(level as u32);
+        level += 1;
+    }
+    values
+}
+
 pub fn shared_arrays_plist(levels: usize, fanout: usize) -> Vec<u8> {
     fn marker(kind: u8, count: usize) -> Vec<u8> {
         if count < 15 {
@@ -260,20 +272,21 @@ pub fn shared_arrays_plist(levels: usize, fanout: usize) -> Vec<u8> {
         out.extend_from_slice(s.as_bytes());
         out
     };
+    let reference = |index: usize| u16::try_from(index).expect("reference fits").to_be_bytes();
     let array = |refs: &[usize]| {
         let mut out = marker(0xA0, refs.len());
         for r in refs {
-            out.extend_from_slice(&(*r as u16).to_be_bytes());
+            out.extend_from_slice(&reference(*r));
         }
         out
     };
     let dict = |pairs: &[(usize, usize)]| {
         let mut out = marker(0xD0, pairs.len());
         for (k, _) in pairs {
-            out.extend_from_slice(&(*k as u16).to_be_bytes());
+            out.extend_from_slice(&reference(*k));
         }
         for (_, v) in pairs {
-            out.extend_from_slice(&(*v as u16).to_be_bytes());
+            out.extend_from_slice(&reference(*v));
         }
         out
     };
