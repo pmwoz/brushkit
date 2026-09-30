@@ -19,7 +19,8 @@ pub const MAX_PLIST_DEPTH: usize = 64;
 /// reference is expanded into its own value, so the tree can be far larger
 /// than the file. Every value costs a `plist::Value` slot of about 80 bytes,
 /// so this keeps the largest accepted tree near 8 MiB. A census of 5803 real
-/// `Brush.archive` and `brushset.plist` files found at most 949 values.
+/// `Brush.archive` and `brushset.plist` files found at most 949 values. It
+/// also caps the objects and collection references a binary plist declares.
 pub const MAX_PLIST_VALUES: usize = 100_000;
 /// The expanded string and data bytes of one plist. Equal to
 /// [`MAX_PLIST_BYTES`], so a plist that shares nothing can never reach it.
@@ -55,12 +56,14 @@ pub fn read_zip_entry(
 /// call stack, and a small binary plist whose objects reference one another
 /// many times expands into a tree far larger than the file. The stream yields
 /// one event per expanded value, so counting values and payload bytes bounds
-/// the tree before it is built. The bytes are parsed twice, stream then tree.
+/// the tree before it is built. A table scan runs first, then the bytes are
+/// parsed twice, stream then tree.
 pub fn parse_plist_guarded(bytes: &[u8], label: &str) -> Result<plist::Value, String> {
     use plist::stream::Event;
     if bytes.len() > MAX_PLIST_BYTES {
         return Err(format!("{label}: plist size {} exceeds limit", bytes.len()));
     }
+    check_binary_tables(bytes, label)?;
     let mut depth: usize = 0;
     let mut values: usize = 0;
     let mut payload: usize = 0;
@@ -94,6 +97,84 @@ pub fn parse_plist_guarded(bytes: &[u8], label: &str) -> Result<plist::Value, St
     }
     plist::Value::from_reader(Cursor::new(bytes))
         .map_err(|e| format!("failed to parse {label}: {e}"))
+}
+
+/// plist 1.8's binary reader allocates the offset table and each collection's
+/// references before the event the stream guard counts. When every object is
+/// reachable, the object count and the declared references are each at most
+/// the expanded value count that guard caps, so a plist it accepts passes
+/// here. A bad magic or offset width, or an offset table that does not fit,
+/// is left to plist.
+fn check_binary_tables(bytes: &[u8], label: &str) -> Result<(), String> {
+    let Some(tail) = bytes
+        .strip_prefix(b"bplist00")
+        .and_then(|body| body.last_chunk::<32>())
+    else {
+        return Ok(());
+    };
+    let trailer = bytes.len() - tail.len();
+    let width = usize::from(tail[6]);
+    let count = big_endian(&tail[8..16]);
+    let table = big_endian(&tail[24..32]);
+    if !matches!(width, 1 | 2 | 3 | 4 | 8) {
+        return Ok(());
+    }
+    let Some(entries) = count
+        .checked_mul(width as u64)
+        .and_then(|n| n.checked_add(table))
+        .filter(|&end| end <= trailer as u64)
+        .and_then(|end| bytes.get(table as usize..end as usize))
+    else {
+        return Ok(());
+    };
+    if count > MAX_PLIST_VALUES as u64 {
+        return Err(format!(
+            "{label}: plist declares over {MAX_PLIST_VALUES} objects"
+        ));
+    }
+    let mut references: u64 = 0;
+    for entry in entries.chunks_exact(width) {
+        let offset = big_endian(entry);
+        if offset >= trailer as u64 {
+            continue;
+        }
+        references = references.saturating_add(declared_references(bytes, offset as usize));
+        if references > MAX_PLIST_VALUES as u64 {
+            return Err(format!(
+                "{label}: plist collections declare over {MAX_PLIST_VALUES} references"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The references the object at `at` makes the reader allocate: its length
+/// for an array, twice it for a dictionary, read as plist reads it.
+fn declared_references(bytes: &[u8], at: usize) -> u64 {
+    let Some(&token) = bytes.get(at) else {
+        return 0;
+    };
+    let per_entry: u64 = match token >> 4 {
+        0xA => 1,
+        0xD => 2,
+        _ => return 0,
+    };
+    let len = if token & 0xF == 0xF {
+        bytes.get(at.saturating_add(1)).and_then(|marker| {
+            let start = at.saturating_add(2);
+            bytes
+                .get(start..start.saturating_add(1 << (marker & 3)))
+                .map(big_endian)
+        })
+    } else {
+        Some(u64::from(token & 0xF))
+    };
+    len.unwrap_or(0).saturating_mul(per_entry)
+}
+
+/// `field`, at most eight bytes, as a big-endian unsigned integer.
+fn big_endian(field: &[u8]) -> u64 {
+    field.iter().fold(0, |n, &b| n << 8 | u64::from(b))
 }
 
 /// Why a `Shape.png` did not decode.
@@ -225,4 +306,55 @@ pub fn members_in_zip_order(zip: &mut zip::ZipArchive<Cursor<&[u8]>>) -> Vec<Str
             (!dir.is_empty() && !dir.contains('/')).then(|| dir.to_string())
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `body` after the magic, then a trailer with one-byte references.
+    fn bplist(body: &[u8], offset_width: u8, count: u64, table: u64) -> Vec<u8> {
+        let mut out = b"bplist00".to_vec();
+        out.extend_from_slice(body);
+        out.extend_from_slice(&[0, 0, 0, 0, 0, 0, offset_width, 1]);
+        out.extend_from_slice(&count.to_be_bytes());
+        out.extend_from_slice(&0u64.to_be_bytes());
+        out.extend_from_slice(&table.to_be_bytes());
+        out
+    }
+
+    #[test]
+    fn tables_that_overflow_or_do_not_fit_are_left_to_plist() {
+        let over = MAX_PLIST_VALUES as u64 + 1;
+        for (width, count, table) in [
+            (8, u64::MAX, 8),
+            (1, 1, u64::MAX),
+            (1, over, 8),
+            (5, over, 8),
+        ] {
+            let plist = bplist(&[0x10, 0, 8], width, count, table);
+            let case = format!("{width} {count} {table}");
+            assert_eq!(check_binary_tables(&plist, "t"), Ok(()), "{case}");
+            let err = parse_plist_guarded(&plist, "t").expect_err(&case);
+            assert!(err.starts_with("failed to parse t:"), "{case}: {err}");
+        }
+    }
+
+    #[test]
+    fn extended_lengths_are_read_at_the_marked_width() {
+        let over = (MAX_PLIST_VALUES as u64 + 1).to_be_bytes();
+        let rejected = Err(format!(
+            "t: plist collections declare over {MAX_PLIST_VALUES} references"
+        ));
+        for (marker, expected) in [(0x10, Ok(())), (0x13, rejected.clone()), (0xF3, rejected)] {
+            let mut body = vec![0xAF, marker];
+            body.extend_from_slice(&over);
+            body.push(8);
+            assert_eq!(
+                check_binary_tables(&bplist(&body, 1, 1, 18), "t"),
+                expected,
+                "{marker:#x}"
+            );
+        }
+    }
 }

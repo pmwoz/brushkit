@@ -1,6 +1,6 @@
 mod common;
 
-use brushkit_preview::procreate::MAX_PNG_DIMENSION;
+use brushkit_preview::procreate::{parse_plist_guarded, MAX_PNG_DIMENSION};
 use brushkit_preview::{decode_tip_image, TipImageError, MAX_IMPORT_DIMENSION};
 use brushkit_preview::{preview_brush, preview_brushset, PreviewOptions, TipPreview};
 use brushkit_preview::{preview_brush_first_available, preview_brushset_first_available};
@@ -119,6 +119,39 @@ fn real_procreate_files_open() {
         opened += 1;
     }
     assert!(opened > 0, "corpus must contain Procreate files");
+}
+
+#[test]
+fn real_procreate_plists_pass_the_guards() {
+    let Some(root) = std::env::var_os("BRUSHKIT_CORPUS_DIR") else {
+        return;
+    };
+    let mut files = Vec::new();
+    corpus_files(Path::new(&root), &mut files);
+    let mut parsed = 0;
+    for path in files {
+        let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+        if !ext.eq_ignore_ascii_case("brush") && !ext.eq_ignore_ascii_case("brushset") {
+            continue;
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        let mut zip = zip::ZipArchive::new(Cursor::new(&bytes[..]))
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        for index in 0..zip.len() {
+            let mut entry = zip.by_index(index).unwrap();
+            let name = entry.name().to_string();
+            if !name.ends_with("Brush.archive") && !name.ends_with("brushset.plist") {
+                continue;
+            }
+            let mut plist = Vec::new();
+            entry.read_to_end(&mut plist).unwrap();
+            parse_plist_guarded(&plist, &name)
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            parsed += 1;
+        }
+    }
+    println!("{parsed} real plists passed the guards");
+    assert!(parsed > 0, "corpus must contain Procreate plists");
 }
 
 #[test]
