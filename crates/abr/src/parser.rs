@@ -588,8 +588,7 @@ fn parse_legacy(
     version: AbrVersion,
     defer: bool,
 ) -> Result<ParsedAbr, AbrError> {
-    let mut brushes = Vec::new();
-    let mut tips = Vec::new();
+    let mut entries = Vec::new();
 
     for _ in 0..brush_count {
         let brush_type = cursor
@@ -701,6 +700,12 @@ fn parse_legacy(
             1 => entry_end,
             _ => {
                 cursor.set_position(entry_end);
+                entries.push(Err(UnavailableBrush {
+                    id: format!("brush_{}", entries.len()),
+                    name,
+                    preset_index: None,
+                    cause: UnavailableTip::Unreadable(format!("unknown compression {compression}")),
+                }));
                 continue;
             }
         };
@@ -741,8 +746,8 @@ fn parse_legacy(
             (Vec::new(), Some(tip))
         };
 
-        brushes.push(AbrBrush {
-            id: format!("brush_{}", brushes.len()),
+        let brush = AbrBrush {
+            id: format!("brush_{}", entries.len()),
             name,
             tip: TipBitmap {
                 width,
@@ -753,13 +758,23 @@ fn parse_legacy(
             descriptor: BrushDescriptor::default(),
             synthesized: false,
             preset_index: None,
-        });
-        tips.push(deferred);
+        };
+        entries.push(Ok((brush, deferred)));
     }
 
-    brushes.reverse();
-    tips.reverse();
-    let sampled_brushes = (0..brushes.len()).map(SampledBrush::Readable).collect();
+    let mut brushes = Vec::new();
+    let mut tips = Vec::new();
+    let mut sampled_brushes = Vec::new();
+    for entry in entries.into_iter().rev() {
+        match entry {
+            Ok((brush, deferred)) => {
+                sampled_brushes.push(SampledBrush::Readable(brushes.len()));
+                brushes.push(brush);
+                tips.push(deferred);
+            }
+            Err(unavailable) => sampled_brushes.push(SampledBrush::Unavailable(unavailable)),
+        }
+    }
     let pack = AbrPack {
         version,
         brushes,
@@ -3354,6 +3369,43 @@ mod tests {
                 matches!(&result, Err(AbrError::Decompression(msg)) if msg == "truncated raw data"),
                 "got {result:?}"
             );
+        }
+    }
+
+    #[test]
+    fn a_legacy_entry_with_an_unknown_compression_is_an_unavailable_brush_in_its_place() {
+        for version in [1, 2] {
+            let raw = |pixel: u8| legacy_entry(version, 1, 1, 8, 0, &[pixel], None);
+            let unknown = legacy_entry(version, 1, 1, 8, 2, &[5], None);
+            let d = legacy_stream(version, &[raw(7), unknown, raw(9)]);
+
+            let pack = parse_abr(&d).unwrap();
+            let deferred = parse_abr_all_deferred_without_patterns(&d).unwrap();
+            let eager_pixels: Vec<&[u8]> =
+                pack.brushes.iter().map(|b| b.tip.data.as_slice()).collect();
+            let deferred_pixels: Vec<Vec<u8>> = (0..deferred.pack.brushes.len())
+                .map(|i| deferred.decode_tip(i).unwrap().data)
+                .collect();
+            assert_eq!(eager_pixels, [[9], [7]], "v{version}");
+            assert_eq!(deferred_pixels, [[9], [7]], "v{version}");
+            for pack in [pack, deferred.pack] {
+                let ids: Vec<&str> = pack.brushes.iter().map(|b| b.id.as_str()).collect();
+                assert_eq!(ids, ["brush_2", "brush_0"], "v{version}");
+                assert_eq!(
+                    pack.sampled_brushes,
+                    [
+                        SampledBrush::Readable(0),
+                        SampledBrush::Unavailable(UnavailableBrush {
+                            id: "brush_1".to_string(),
+                            name: String::new(),
+                            preset_index: None,
+                            cause: UnavailableTip::Unreadable("unknown compression 2".to_string()),
+                        }),
+                        SampledBrush::Readable(1),
+                    ],
+                    "v{version}"
+                );
+            }
         }
     }
 
