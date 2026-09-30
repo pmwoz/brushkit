@@ -41,6 +41,6 @@ Preconditions:
 
 - `eager` and `deferred` read patterns, the other two modes skip them, so `patterns` is empty there by design.
 - The corpus and the fuzz seeds other than `unavailable_tips` have no computed presets. `computed_presets` stays empty unless the user supplies a pack with computed tips.
-- A tip whose header parses but whose pixels do not decode is `unreadable` in `sampled_brushes` only in `eager`. The deferred modes list it as `readable` and put the error in its `brushes[i].tip.error`. On such a pack `sampled_brushes` and `brushes` differ across modes by design.
+- A tip whose header parses but whose pixels do not decode is `unreadable` in `sampled_brushes` only in some modes. A v6/v7/v10 tip is `unreadable` only in `eager`. A v1/v2 RLE entry is `unreadable` in every mode but `all-deferred`. Where it is not `unreadable`, it is `readable` with the error in its `brushes[i].tip.error`. On such a pack `sampled_brushes` and `brushes` differ across modes by design.
 - Exit `101` means a panic inside the library, which is a bug on any input.
 - Eager parsing of a 30 MB pack holds every decoded tip in memory. Prefer `all-deferred` for corpus sweeps.
