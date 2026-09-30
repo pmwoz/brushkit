@@ -689,25 +689,14 @@ fn parse_legacy(
 
         let input: &[u8] = cursor.get_ref();
         let pixel_start = cursor.position();
-        let pixel_end = match compression {
-            0 => {
-                let end = pixel_start + expected as u64;
-                if end > input.len() as u64 {
-                    return Err(AbrError::Decompression("truncated raw data".into()));
-                }
-                end
+        let pixel_end = if compression == 0 {
+            let end = pixel_start + expected as u64;
+            if end > input.len() as u64 {
+                return Err(AbrError::Decompression("truncated raw data".into()));
             }
-            1 => entry_end,
-            _ => {
-                cursor.set_position(entry_end);
-                entries.push(Err(UnavailableBrush {
-                    id: format!("brush_{}", entries.len()),
-                    name,
-                    preset_index: None,
-                    cause: UnavailableTip::Unreadable(format!("unknown compression {compression}")),
-                }));
-                continue;
-            }
+            end
+        } else {
+            entry_end
         };
         // A raw entry may declare more or fewer bytes than its pixels. GIMP
         // ignores the declared length of a sampled entry, so a short one still
@@ -715,19 +704,22 @@ fn parse_legacy(
         cursor.set_position(entry_end.max(pixel_end));
         let pixels = &input[pixel_start as usize..pixel_end as usize];
 
-        let (pixel_data, deferred) = if !defer {
-            #[cfg(test)]
-            tests::record_decode();
-            let data = if compression == 0 {
-                pixels.to_vec()
-            } else {
-                decode_rle(pixels, height as usize, width as usize, bpp, expected)?
-            };
-            (data, None)
+        let tip = if compression > 1 {
+            Err(format!("unknown compression {compression}"))
         } else if expected == 0 {
             // Nothing to decode, and `bitmap_geometry` rejects an empty pixel
             // region.
-            (Vec::new(), None)
+            Ok((Vec::new(), None))
+        } else if !defer {
+            #[cfg(test)]
+            tests::record_decode();
+            if compression == 0 {
+                Ok((pixels.to_vec(), None))
+            } else {
+                decode_rle(pixels, height as usize, width as usize, bpp, expected)
+                    .map(|data| (data, None))
+                    .map_err(|e| format!("bitmap decode failed: {e}"))
+            }
         } else {
             let header = BitmapHeader {
                 rect_offset: 0,
@@ -743,23 +735,34 @@ fn parse_legacy(
                 header,
                 decoded_len: expected,
             };
-            (Vec::new(), Some(tip))
+            Ok((Vec::new(), Some(tip)))
         };
 
-        let brush = AbrBrush {
-            id: format!("brush_{}", entries.len()),
-            name,
-            tip: TipBitmap {
-                width,
-                height,
-                depth,
-                data: pixel_data,
-            },
-            descriptor: BrushDescriptor::default(),
-            synthesized: false,
-            preset_index: None,
-        };
-        entries.push(Ok((brush, deferred)));
+        let id = format!("brush_{}", entries.len());
+        entries.push(match tip {
+            Ok((data, deferred)) => {
+                let brush = AbrBrush {
+                    id,
+                    name,
+                    tip: TipBitmap {
+                        width,
+                        height,
+                        depth,
+                        data,
+                    },
+                    descriptor: BrushDescriptor::default(),
+                    synthesized: false,
+                    preset_index: None,
+                };
+                Ok((brush, deferred))
+            }
+            Err(message) => Err(UnavailableBrush {
+                id,
+                name,
+                preset_index: None,
+                cause: UnavailableTip::Unreadable(message),
+            }),
+        });
     }
 
     let mut brushes = Vec::new();
