@@ -30,7 +30,10 @@ pub use bitmap::*;
 pub use sheet::*;
 pub use synth::*;
 
-use brushkit_abr::{parse_abr_all_deferred_without_patterns, DeferredPack, ShapeTipFamily};
+use brushkit_abr::{
+    parse_abr_all_deferred_without_patterns, DeferredPack, SampledBrush, ShapeTipFamily,
+    UnavailableTip,
+};
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::num::NonZeroU32;
@@ -255,7 +258,7 @@ impl Budget {
     }
 }
 
-/// Where an `.abr` preview row came from: an index into `brushes`,
+/// Where an `.abr` preview row came from: an index into `sampled_brushes`,
 /// `computed_presets` or `unsupported_tip_presets` of the parsed pack. The
 /// derived order, variant first and then index, orders rows that share a
 /// preset ordinal: sampled first, then computed, then unsupported, each in
@@ -278,10 +281,10 @@ struct Row {
 /// Sampled tips are decoded one at a time and downsampled immediately, so the
 /// peak footprint holds one full-size tip rather than the whole pack. Computed
 /// presets are synthesized from their geometry; a preset that declares neither
-/// is reported as an unsupported tip kind. A sampled tip whose pixels fail to
-/// decode is a `Corrupt` entry, not an error for the whole preview. The
-/// exception is a raw v1 or v2 tip whose pixels run past the end of the input,
-/// which fails the whole preview.
+/// is reported as an unsupported tip kind. A sampled tip that is missing, or
+/// whose samp record or pixels fail to decode, is a `Corrupt` entry, not an
+/// error for the whole preview. The exception is a raw v1 or v2 tip whose
+/// pixels run past the end of the input, which fails the whole preview.
 ///
 /// Embedded pattern payloads are neither copied nor decoded.
 pub fn preview_abr(bytes: &[u8], opts: PreviewOptions) -> Result<PreviewSet, PreviewError> {
@@ -323,9 +326,15 @@ fn abr(
     let pack = &deferred.pack;
 
     let mut rows: Vec<Row> = Vec::new();
-    rows.extend(pack.brushes.iter().enumerate().map(|(i, brush)| Row {
-        key: brush.preset_index.unwrap_or(usize::MAX),
-        source: Source::Sampled(i),
+    rows.extend(pack.sampled_brushes.iter().enumerate().map(|(j, sampled)| {
+        let preset_index = match sampled {
+            SampledBrush::Readable(i) => pack.brushes[*i].preset_index,
+            SampledBrush::Unavailable(brush) => brush.preset_index,
+        };
+        Row {
+            key: preset_index.unwrap_or(usize::MAX),
+            source: Source::Sampled(j),
+        }
     }));
     rows.extend(
         pack.computed_presets
@@ -375,23 +384,31 @@ fn abr_entry(
     tests::record_read();
     let pack = &deferred.pack;
     let (name, tip, source_dimensions) = match source {
-        Source::Sampled(i) => {
-            let brush = &pack.brushes[i];
-            let name = if brush.name.is_empty() {
-                brush.id.clone()
-            } else {
-                brush.name.clone()
-            };
-            let tip = budget.render(|| match deferred.decode_tip(i) {
-                Ok(tip) => tip_preview(&to_grayscale(&tip), max_cell),
-                Err(e) => TipPreview::Unavailable(UnavailableReason::Corrupt(e.to_string())),
-            });
-            (
-                name,
-                tip,
-                SourceDimensions::new(brush.tip.width, brush.tip.height),
-            )
-        }
+        Source::Sampled(j) => match &pack.sampled_brushes[j] {
+            &SampledBrush::Readable(i) => {
+                let brush = &pack.brushes[i];
+                let tip = budget.render(|| match deferred.decode_tip(i) {
+                    Ok(tip) => tip_preview(&to_grayscale(&tip), max_cell),
+                    Err(e) => TipPreview::Unavailable(UnavailableReason::Corrupt(e.to_string())),
+                });
+                (
+                    name_or_id(&brush.name, &brush.id),
+                    tip,
+                    SourceDimensions::new(brush.tip.width, brush.tip.height),
+                )
+            }
+            SampledBrush::Unavailable(brush) => {
+                let text = match &brush.cause {
+                    UnavailableTip::Missing => format!("sampled tip {} is missing", brush.id),
+                    UnavailableTip::Unreadable(message) => message.clone(),
+                };
+                (
+                    name_or_id(&brush.name, &brush.id),
+                    TipPreview::Unavailable(UnavailableReason::Corrupt(text)),
+                    None,
+                )
+            }
+        },
         Source::Computed(i) => {
             let preset = &pack.computed_presets[i];
             let unsupported = || {
@@ -434,6 +451,10 @@ fn abr_entry(
         tip,
         source_dimensions,
     }
+}
+
+fn name_or_id(name: &str, id: &str) -> String {
+    if name.is_empty() { id } else { name }.to_string()
 }
 
 /// A full-size tip downsampled to `max_cell`. A zero-area tip is not

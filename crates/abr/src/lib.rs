@@ -34,8 +34,8 @@ pub struct AbrPack {
     /// (unresolvable/computed presets are counted but not surfaced here, and
     /// dual-brush component tips in the samp block are intentionally dropped). On
     /// the fallback path (desc missing/unparseable, or no resolvable uuids)
-    /// `brushes` holds one entry per samp bitmap, so `preset_count` may be LESS
-    /// than `brushes.len()` (bitmaps decode without descriptors). Consumers must
+    /// `brushes` holds one entry per readable samp record, so `preset_count`
+    /// may be LESS than `brushes.len()` (bitmaps decode without descriptors). Consumers must
     /// tolerate `preset_count` differing from `brushes.len()` in either direction.
     ///
     /// v1/v2: the entry count from the file header; type-1 (computed) entries are
@@ -70,11 +70,12 @@ pub struct AbrPack {
     /// brushes). Only the presets-first path produces a nonzero value; the
     /// index-fallback path and v2 files always report 0.
     pub dropped_samp_count: usize,
-    /// Presets whose `sampledData` uuid resolved to no samp bitmap (dangling
-    /// references), so they surface as neither a paired brush nor a computed
-    /// preset. Presets carrying NO uuid are excluded here (they are computed
-    /// candidates counted via `computed_presets`). Presets-first path only; 0
-    /// on the fallback path and for v2 files.
+    /// Presets whose `sampledData` uuid resolved to no samp record (dangling
+    /// references), so they surface in `sampled_brushes` as
+    /// [`UnavailableTip::Missing`] and not in `brushes`. Presets carrying NO
+    /// uuid are excluded here (they are computed candidates counted via
+    /// `computed_presets`). Presets-first path only; 0 on the fallback path
+    /// and for v2 files.
     pub skipped_preset_count: usize,
     /// Per-item detail for the dropped samp tips. Invariant:
     /// `dropped_samp_count == dropped_tip_details.len()`. Empty on the fallback
@@ -98,6 +99,11 @@ pub struct AbrPack {
     /// contain zero presets. Informative only: a failing desc block still takes
     /// the index-fallback pairing path exactly as before. v2 files always `None`.
     pub desc_parse_error: Option<String>,
+    /// Every sampled brush the pack declares, in pack order: each brush in
+    /// `brushes`, plus each one whose tip is missing or unreadable, at the
+    /// place it would have had. A samp record no preset references and whose
+    /// tip is unreadable is not a brush and is not listed.
+    pub sampled_brushes: Vec<SampledBrush>,
 }
 
 /// An empty pack: no brushes, no presets, no diagnostics, version `V10`.
@@ -121,6 +127,7 @@ impl Default for AbrPack {
             unsupported_tip_count: 0,
             unsupported_tip_presets: Vec::new(),
             desc_parse_error: None,
+            sampled_brushes: Vec::new(),
         }
     }
 }
@@ -143,6 +150,38 @@ pub struct DroppedTipDetail {
 pub struct SkippedPresetDetail {
     pub name: String,
     pub uuid: String,
+}
+
+/// One entry of [`AbrPack::sampled_brushes`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SampledBrush {
+    /// `brushes[i]`.
+    Readable(usize),
+    Unavailable(UnavailableBrush),
+}
+
+/// A sampled brush the pack declares whose tip cannot be read, so it is absent
+/// from `brushes`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnavailableBrush {
+    /// As [`AbrBrush::id`]: the samp uuid, with a `-N` suffix for a repeat, or
+    /// `brush_{i}`.
+    pub id: String,
+    /// Preset name from the descriptor, or empty if absent.
+    pub name: String,
+    /// As [`AbrBrush::preset_index`].
+    pub preset_index: Option<usize>,
+    pub cause: UnavailableTip,
+}
+
+/// Why an [`UnavailableBrush`] has no tip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnavailableTip {
+    /// The preset names a `sampledData` uuid that no samp record carries.
+    Missing,
+    /// The samp record is there but its bitmap header or geometry did not
+    /// parse. Carries the parser's message.
+    Unreadable(String),
 }
 
 /// Which Photoshop dynamic-tip family a `Shp `-carrying preset belongs to,

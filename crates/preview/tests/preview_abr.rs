@@ -16,8 +16,9 @@ fn every_preset_becomes_one_entry_that_fits_the_cell() {
     for name in SEEDS {
         let bytes = seed(name);
         let pack = brushkit_abr::parse_abr(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
-        let expected =
-            pack.brushes.len() + pack.computed_presets.len() + pack.unsupported_tip_presets.len();
+        let expected = pack.sampled_brushes.len()
+            + pack.computed_presets.len()
+            + pack.unsupported_tip_presets.len();
 
         let set = preview_abr(&bytes, PreviewOptions { max_cell: 4 })
             .unwrap_or_else(|e| panic!("{name}: {e}"));

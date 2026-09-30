@@ -30,7 +30,8 @@ use super::descriptor::{extract_all_brush_info_inner, BrushDescInfo};
 use super::pattern::parse_patt_block;
 use super::{
     AbrBrush, AbrError, AbrPack, AbrVersion, BrushDescriptor, ComputedPreset, DroppedTipDetail,
-    SkippedPresetDetail, TipBitmap, UnsupportedTipPresetDetail,
+    SampledBrush, SkippedPresetDetail, TipBitmap, UnavailableBrush, UnavailableTip,
+    UnsupportedTipPresetDetail,
 };
 use crate::limits::{MAX_DIMENSION, MAX_NAME_CODE_UNITS};
 
@@ -81,7 +82,7 @@ fn parse_abr_with(bytes: &[u8], tips: Tips, patterns: PatternMode) -> Result<Par
 
     let blocks = read_blocks(&mut cursor, patterns)?;
 
-    let mut bitmaps: Vec<Option<SampEntry>> = Vec::new();
+    let mut bitmaps: Vec<SampEntry> = Vec::new();
     for block in &blocks {
         if block.block_type == "samp" {
             let block_mode = match tips {
@@ -144,16 +145,16 @@ fn parse_abr_with(bytes: &[u8], tips: Tips, patterns: PatternMode) -> Result<Par
         Tips::Eager | Tips::Deferred(Defer::All) => HashSet::new(),
     };
 
-    let valid_bitmaps: Vec<SampEntry> = bitmaps.into_iter().flatten().collect();
     let PairedBrushes {
         brushes,
         dropped_samp_count,
         skipped_preset_count,
         dropped_tip_details,
         skipped_preset_details,
+        sampled_brushes,
         tips,
         dropped_tips,
-    } = pair_brushes(valid_bitmaps, &desc_infos);
+    } = pair_brushes(bitmaps, &desc_infos);
 
     let computed_presets = desc_infos
         .iter()
@@ -187,6 +188,7 @@ fn parse_abr_with(bytes: &[u8], tips: Tips, patterns: PatternMode) -> Result<Par
             unsupported_tip_count: unsupported_tip_presets.len(),
             unsupported_tip_presets,
             desc_parse_error,
+            sampled_brushes,
         },
         tips,
         dropped_tips,
@@ -372,17 +374,23 @@ struct PairedBrushes {
     skipped_preset_count: usize,
     dropped_tip_details: Vec<DroppedTipDetail>,
     skipped_preset_details: Vec<SkippedPresetDetail>,
+    sampled_brushes: Vec<SampledBrush>,
     /// Aligned with `brushes`; all `None` in `TipMode::Eager`.
     tips: Vec<Option<DeferredTip>>,
     /// Aligned with `dropped_tip_details`; all `None` in `TipMode::Eager`.
     dropped_tips: Vec<Option<DeferredTip>>,
 }
 
-fn pair_brushes(valid_bitmaps: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> PairedBrushes {
+fn pair_brushes(entries: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> PairedBrushes {
     let mut uuid_to_samp: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    for (i, samp) in valid_bitmaps.iter().enumerate() {
+    for (i, samp) in entries.iter().enumerate() {
         if let Some(ref uuid) = samp.uuid {
-            uuid_to_samp.insert(uuid.as_str(), i);
+            let keeps_readable = uuid_to_samp
+                .get(uuid.as_str())
+                .is_some_and(|&kept| entries[kept].tip.is_ok() && samp.tip.is_err());
+            if !keeps_readable {
+                uuid_to_samp.insert(uuid.as_str(), i);
+            }
         }
     }
 
@@ -395,6 +403,7 @@ fn pair_brushes(valid_bitmaps: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> 
     if presets_first {
         let mut brushes = Vec::new();
         let mut tips: Vec<Option<DeferredTip>> = Vec::new();
+        let mut sampled_brushes = Vec::new();
         let mut seen: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
         let mut used: std::collections::HashSet<usize> = std::collections::HashSet::new();
         let mut skipped_preset_details: Vec<SkippedPresetDetail> = Vec::new();
@@ -402,14 +411,6 @@ fn pair_brushes(valid_bitmaps: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> 
             let Some(uuid) = info.sampled_data_uuid.as_deref() else {
                 continue;
             };
-            let Some(&idx) = uuid_to_samp.get(uuid) else {
-                skipped_preset_details.push(SkippedPresetDetail {
-                    name: info.name.clone(),
-                    uuid: uuid.to_string(),
-                });
-                continue;
-            };
-            used.insert(idx);
             let count = seen.entry(uuid).or_insert(0);
             *count += 1;
             let id = if *count == 1 {
@@ -417,15 +418,40 @@ fn pair_brushes(valid_bitmaps: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> 
             } else {
                 format!("{uuid}-{count}")
             };
-            brushes.push(AbrBrush {
-                id,
-                name: info.name.clone(),
-                tip: valid_bitmaps[idx].bitmap.clone(),
-                descriptor: info.descriptor.clone(),
-                synthesized: false,
-                preset_index: Some(pi),
-            });
-            tips.push(valid_bitmaps[idx].deferred.clone());
+            let unavailable = |cause| {
+                SampledBrush::Unavailable(UnavailableBrush {
+                    id: id.clone(),
+                    name: info.name.clone(),
+                    preset_index: Some(pi),
+                    cause,
+                })
+            };
+            let Some(&idx) = uuid_to_samp.get(uuid) else {
+                skipped_preset_details.push(SkippedPresetDetail {
+                    name: info.name.clone(),
+                    uuid: uuid.to_string(),
+                });
+                sampled_brushes.push(unavailable(UnavailableTip::Missing));
+                continue;
+            };
+            used.insert(idx);
+            match &entries[idx].tip {
+                Ok(tip) => {
+                    sampled_brushes.push(SampledBrush::Readable(brushes.len()));
+                    brushes.push(AbrBrush {
+                        id,
+                        name: info.name.clone(),
+                        tip: tip.bitmap.clone(),
+                        descriptor: info.descriptor.clone(),
+                        synthesized: false,
+                        preset_index: Some(pi),
+                    });
+                    tips.push(tip.deferred.clone());
+                }
+                Err(message) => {
+                    sampled_brushes.push(unavailable(UnavailableTip::Unreadable(message.clone())));
+                }
+            }
         }
         let mut owners: std::collections::HashMap<&str, Vec<String>> =
             std::collections::HashMap::new();
@@ -438,27 +464,29 @@ fn pair_brushes(valid_bitmaps: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> 
             }
         }
 
-        let dropped_tips: Vec<Option<DeferredTip>> = valid_bitmaps
+        let unused_readable: Vec<(&Option<String>, &SampTip)> = entries
             .iter()
             .enumerate()
             .filter(|(idx, _)| !used.contains(idx))
-            .map(|(_, samp)| samp.deferred.clone())
+            .filter_map(|(_, samp)| Some((&samp.uuid, samp.tip.as_ref().ok()?)))
             .collect();
 
-        let dropped_tip_details: Vec<DroppedTipDetail> = valid_bitmaps
+        let dropped_tips: Vec<Option<DeferredTip>> = unused_readable
             .iter()
-            .enumerate()
-            .filter(|(idx, _)| !used.contains(idx))
-            .map(|(_, samp)| DroppedTipDetail {
-                uuid: samp.uuid.clone(),
-                width: samp.bitmap.width,
-                height: samp.bitmap.height,
-                owner_preset_names: samp
-                    .uuid
+            .map(|(_, tip)| tip.deferred.clone())
+            .collect();
+
+        let dropped_tip_details: Vec<DroppedTipDetail> = unused_readable
+            .iter()
+            .map(|(uuid, tip)| DroppedTipDetail {
+                uuid: (*uuid).clone(),
+                width: tip.bitmap.width,
+                height: tip.bitmap.height,
+                owner_preset_names: uuid
                     .as_deref()
                     .and_then(|u| owners.get(u).cloned())
                     .unwrap_or_default(),
-                bitmap: samp.bitmap.clone(),
+                bitmap: tip.bitmap.clone(),
             })
             .collect();
 
@@ -468,6 +496,7 @@ fn pair_brushes(valid_bitmaps: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> 
             brushes,
             dropped_tip_details,
             skipped_preset_details,
+            sampled_brushes,
             tips,
             dropped_tips,
         };
@@ -475,34 +504,47 @@ fn pair_brushes(valid_bitmaps: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> 
 
     let mut brushes = Vec::new();
     let mut tips: Vec<Option<DeferredTip>> = Vec::new();
-    for (i, samp) in valid_bitmaps.into_iter().enumerate() {
-        let id = samp.uuid.clone().unwrap_or_else(|| format!("brush_{i}"));
+    let mut sampled_brushes = Vec::new();
+    for (i, samp) in entries.into_iter().enumerate().rev() {
+        let id = samp.uuid.unwrap_or_else(|| format!("brush_{i}"));
 
         let matched = desc_infos.get(i);
         let name = matched.map(|info| info.name.clone()).unwrap_or_default();
-        let descriptor = matched
-            .map(|info| info.descriptor.clone())
-            .unwrap_or_default();
+        let preset_index = matched.map(|_| i);
 
-        brushes.push(AbrBrush {
-            id,
-            name,
-            tip: samp.bitmap,
-            descriptor,
-            synthesized: false,
-            preset_index: matched.map(|_| i),
-        });
-        tips.push(samp.deferred);
+        match samp.tip {
+            Ok(tip) => {
+                sampled_brushes.push(SampledBrush::Readable(brushes.len()));
+                brushes.push(AbrBrush {
+                    id,
+                    name,
+                    tip: tip.bitmap,
+                    descriptor: matched
+                        .map(|info| info.descriptor.clone())
+                        .unwrap_or_default(),
+                    synthesized: false,
+                    preset_index,
+                });
+                tips.push(tip.deferred);
+            }
+            Err(message) => {
+                sampled_brushes.push(SampledBrush::Unavailable(UnavailableBrush {
+                    id,
+                    name,
+                    preset_index,
+                    cause: UnavailableTip::Unreadable(message),
+                }));
+            }
+        }
     }
 
-    brushes.reverse();
-    tips.reverse();
     PairedBrushes {
         brushes,
         dropped_samp_count: 0,
         skipped_preset_count: 0,
         dropped_tip_details: Vec::new(),
         skipped_preset_details: Vec::new(),
+        sampled_brushes,
         tips,
         dropped_tips: Vec::new(),
     }
@@ -694,6 +736,7 @@ fn parse_legacy(
 
     brushes.reverse();
     tips.reverse();
+    let sampled_brushes = (0..brushes.len()).map(SampledBrush::Readable).collect();
     let pack = AbrPack {
         version,
         brushes,
@@ -712,6 +755,7 @@ fn parse_legacy(
         unsupported_tip_count: 0,
         unsupported_tip_presets: Vec::new(),
         desc_parse_error: None,
+        sampled_brushes,
     };
     Ok(ParsedAbr {
         pack,
@@ -851,6 +895,10 @@ fn read_blocks<'a>(
 
 struct SampEntry {
     uuid: Option<String>,
+    tip: Result<SampTip, String>,
+}
+
+struct SampTip {
     bitmap: TipBitmap,
     /// `Some` only in `TipMode::Deferred`, where `bitmap.data` is empty and
     /// this says where the pixels are.
@@ -917,7 +965,7 @@ fn parse_samp_block(
     version: AbrVersion,
     subversion: u16,
     mode: TipMode,
-) -> Vec<Option<SampEntry>> {
+) -> Vec<SampEntry> {
     let uuids = find_all_uuid_offsets(data);
     let documented = documented_rect_offset(version, subversion);
     let (frames, clean) = frame_samp_entries_by_length(data);
@@ -1004,7 +1052,7 @@ fn parse_samp_block_by_uuids(
     uuids: &[(usize, String)],
     documented: Option<usize>,
     mode: TipMode,
-) -> Vec<Option<SampEntry>> {
+) -> Vec<SampEntry> {
     let mut entries = Vec::new();
 
     for (i, (uuid_offset, uuid_str)) in uuids.iter().enumerate() {
@@ -1012,27 +1060,15 @@ fn parse_samp_block_by_uuids(
             .get(i + 1)
             .map_or(data.len(), |(next_offset, _)| *next_offset);
         let search_data = &data[*uuid_offset..entry_end];
-        match locate_bitmap_header(search_data, documented) {
-            Some(header) => {
-                match read_entry_bitmap(search_data, &header, mode, *uuid_offset..entry_end) {
-                    Ok((bitmap, deferred)) => {
-                        entries.push(Some(SampEntry {
-                            uuid: Some(uuid_str.clone()),
-                            bitmap,
-                            deferred,
-                        }));
-                    }
-                    Err(e) => {
-                        eprintln!("warning: bitmap decode failed for {uuid_str}: {e}");
-                        entries.push(None);
-                    }
-                }
-            }
-            None => {
-                eprintln!("warning: no bitmap header found for UUID {uuid_str}");
-                entries.push(None);
-            }
-        }
+        let tip = match locate_bitmap_header(search_data, documented) {
+            Some(header) => read_entry_bitmap(search_data, &header, mode, *uuid_offset..entry_end)
+                .map_err(|e| format!("bitmap decode failed for {uuid_str}: {e}")),
+            None => Err(format!("no bitmap header found for UUID {uuid_str}")),
+        };
+        entries.push(SampEntry {
+            uuid: Some(uuid_str.clone()),
+            tip,
+        });
     }
 
     entries
@@ -1043,30 +1079,21 @@ fn parse_samp_block_by_lengths(
     frames: &[(usize, usize)],
     documented: Option<usize>,
     mode: TipMode,
-) -> Vec<Option<SampEntry>> {
+) -> Vec<SampEntry> {
     let mut entries = Vec::new();
 
     for &(start, end) in frames {
         let entry_data = &data[start..end];
         let uuid = extract_entry_uuid(entry_data);
 
-        match locate_bitmap_header(entry_data, documented) {
-            Some(header) => match read_entry_bitmap(entry_data, &header, mode, start..end) {
-                Ok((bitmap, deferred)) => entries.push(Some(SampEntry {
-                    uuid,
-                    bitmap,
-                    deferred,
-                })),
-                Err(e) => {
-                    eprintln!("warning: bitmap decode failed at offset {start}: {e}");
-                    entries.push(None);
-                }
-            },
-            None => {
-                eprintln!("warning: no bitmap header found in samp entry at offset {start}");
-                entries.push(None);
-            }
-        }
+        let tip = match locate_bitmap_header(entry_data, documented) {
+            Some(header) => read_entry_bitmap(entry_data, &header, mode, start..end)
+                .map_err(|e| format!("bitmap decode failed at offset {start}: {e}")),
+            None => Err(format!(
+                "no bitmap header found in samp entry at offset {start}"
+            )),
+        };
+        entries.push(SampEntry { uuid, tip });
     }
 
     entries
@@ -1195,13 +1222,19 @@ fn read_entry_bitmap(
     header: &BitmapHeader,
     mode: TipMode,
     entry: Range<usize>,
-) -> Result<(TipBitmap, Option<DeferredTip>), AbrError> {
+) -> Result<SampTip, AbrError> {
     match mode {
-        TipMode::Eager => Ok((decode_bitmap(data, header)?, None)),
+        TipMode::Eager => Ok(SampTip {
+            bitmap: decode_bitmap(data, header)?,
+            deferred: None,
+        }),
         TipMode::Deferred { block_start } => {
             let entry = block_start + entry.start..block_start + entry.end;
             let (bitmap, deferred) = defer_bitmap(data, header, entry)?;
-            Ok((bitmap, Some(deferred)))
+            Ok(SampTip {
+                bitmap,
+                deferred: Some(deferred),
+            })
         }
     }
 }
@@ -1458,8 +1491,17 @@ mod tests {
     fn samp(uuid: Option<&str>) -> SampEntry {
         SampEntry {
             uuid: uuid.map(str::to_string),
-            bitmap: tiny_bitmap(),
-            deferred: None,
+            tip: Ok(SampTip {
+                bitmap: tiny_bitmap(),
+                deferred: None,
+            }),
+        }
+    }
+
+    fn unreadable_samp(uuid: Option<&str>) -> SampEntry {
+        SampEntry {
+            uuid: uuid.map(str::to_string),
+            tip: Err("no bitmap header".to_string()),
         }
     }
 
@@ -1760,6 +1802,170 @@ mod tests {
         assert_eq!(dropped_tip_details.len(), 1);
         assert_eq!(dropped_tip_details[0].uuid.as_deref(), Some("uuid-b"));
         assert!(dropped_tip_details[0].owner_preset_names.is_empty());
+    }
+
+    fn unavailable(
+        id: &str,
+        name: &str,
+        preset_index: Option<usize>,
+        cause: UnavailableTip,
+    ) -> SampledBrush {
+        SampledBrush::Unavailable(UnavailableBrush {
+            id: id.to_string(),
+            name: name.to_string(),
+            preset_index,
+            cause,
+        })
+    }
+
+    fn unreadable() -> UnavailableTip {
+        UnavailableTip::Unreadable("no bitmap header".to_string())
+    }
+
+    #[test]
+    fn fallback_keeps_an_unreadable_record_in_place_and_names_aligned() {
+        let bitmaps = vec![samp(None), unreadable_samp(None), samp(None)];
+        let infos = vec![
+            info("A", None, None),
+            info("B", None, None),
+            info("C", None, None),
+        ];
+        let PairedBrushes {
+            brushes,
+            sampled_brushes,
+            ..
+        } = pair_brushes(bitmaps, &infos);
+        let names: Vec<_> = brushes
+            .iter()
+            .map(|b| (b.id.as_str(), b.name.as_str(), b.preset_index))
+            .collect();
+        assert_eq!(
+            names,
+            [("brush_2", "C", Some(2)), ("brush_0", "A", Some(0))]
+        );
+        assert_eq!(
+            sampled_brushes,
+            [
+                SampledBrush::Readable(0),
+                unavailable("brush_1", "B", Some(1), unreadable()),
+                SampledBrush::Readable(1),
+            ]
+        );
+    }
+
+    #[test]
+    fn preset_naming_an_unreadable_record_is_an_unavailable_brush() {
+        let bitmaps = vec![samp(Some("uuid-a")), unreadable_samp(Some("uuid-b"))];
+        let infos = vec![
+            info("A", Some("uuid-a"), None),
+            info("B", Some("uuid-b"), None),
+        ];
+        let PairedBrushes {
+            brushes,
+            sampled_brushes,
+            skipped_preset_details,
+            dropped_tip_details,
+            ..
+        } = pair_brushes(bitmaps, &infos);
+        assert_eq!(brushes.len(), 1);
+        assert_eq!(
+            sampled_brushes,
+            [
+                SampledBrush::Readable(0),
+                unavailable("uuid-b", "B", Some(1), unreadable()),
+            ]
+        );
+        assert!(skipped_preset_details.is_empty());
+        assert!(dropped_tip_details.is_empty());
+    }
+
+    #[test]
+    fn dangling_preset_is_a_missing_brush_and_still_skipped() {
+        let bitmaps = vec![samp(Some("uuid-x"))];
+        let infos = vec![
+            info("Y", Some("uuid-y-dangling"), None),
+            info("X", Some("uuid-x"), None),
+        ];
+        let PairedBrushes {
+            sampled_brushes,
+            skipped_preset_details,
+            ..
+        } = pair_brushes(bitmaps, &infos);
+        assert_eq!(
+            sampled_brushes,
+            [
+                unavailable("uuid-y-dangling", "Y", Some(0), UnavailableTip::Missing),
+                SampledBrush::Readable(0),
+            ]
+        );
+        assert_eq!(skipped_preset_details.len(), 1);
+        assert_eq!(skipped_preset_details[0].name, "Y");
+    }
+
+    #[test]
+    fn unreferenced_unreadable_record_is_not_a_brush() {
+        let bitmaps = vec![samp(Some("uuid-a")), unreadable_samp(Some("uuid-b"))];
+        let infos = vec![info_dual("P1", Some("uuid-a"), "uuid-b")];
+        let PairedBrushes {
+            sampled_brushes,
+            dropped_tip_details,
+            ..
+        } = pair_brushes(bitmaps, &infos);
+        assert_eq!(sampled_brushes, [SampledBrush::Readable(0)]);
+        assert!(dropped_tip_details.is_empty());
+    }
+
+    #[test]
+    fn readable_record_wins_a_uuid_shared_with_an_unreadable_one() {
+        for bitmaps in [
+            vec![samp(Some("uuid-x")), unreadable_samp(Some("uuid-x"))],
+            vec![unreadable_samp(Some("uuid-x")), samp(Some("uuid-x"))],
+        ] {
+            let infos = vec![info("X", Some("uuid-x"), None)];
+            let PairedBrushes {
+                brushes,
+                sampled_brushes,
+                dropped_tip_details,
+                ..
+            } = pair_brushes(bitmaps, &infos);
+            assert_eq!(brushes.len(), 1);
+            assert_eq!(sampled_brushes, [SampledBrush::Readable(0)]);
+            assert!(dropped_tip_details.is_empty());
+        }
+    }
+
+    #[test]
+    fn named_preset_whose_samp_record_is_unreadable_parses_as_unavailable() {
+        let mut bad = build_v10_entry_with_uuid(TIP_B, 5, 5, 0x22);
+        let depth_at = 1 + TIP_B.len() + 1 + 200 + 16;
+        bad[depth_at..depth_at + 2].copy_from_slice(&0x20u16.to_be_bytes());
+        let mut samp = Vec::new();
+        push_framed(&mut samp, &build_v10_entry_with_uuid(TIP_A, 4, 4, 0x11));
+        push_framed(&mut samp, &bad);
+        let desc = build_dual_desc_block(&[("First", TIP_A, None), ("Second", TIP_B, None)]);
+        let mut d = v10_header();
+        push_block(&mut d, b"samp", &samp);
+        push_block(&mut d, b"desc", &desc);
+
+        let pack = parse_abr(&d).unwrap();
+
+        assert_eq!(pack.brushes.len(), 1);
+        assert_eq!(pack.brushes[0].name, "First");
+        assert_eq!(pack.sampled_brushes.len(), 2);
+        assert_eq!(pack.sampled_brushes[0], SampledBrush::Readable(0));
+        let SampledBrush::Unavailable(second) = &pack.sampled_brushes[1] else {
+            panic!("{:?}", pack.sampled_brushes[1]);
+        };
+        assert_eq!(
+            (
+                second.id.as_str(),
+                second.name.as_str(),
+                second.preset_index
+            ),
+            (TIP_B, "Second", Some(1))
+        );
+        assert!(matches!(second.cause, UnavailableTip::Unreadable(_)));
+        assert!(pack.skipped_preset_details.is_empty());
     }
 
     #[test]
@@ -2482,9 +2688,10 @@ mod tests {
         block.extend_from_slice(&entry);
         let entries = parse_samp_block(&block, AbrVersion::V6, 1, TipMode::Eager);
         assert_eq!(entries.len(), 1);
-        let b = entries[0].as_ref().unwrap();
-        assert_eq!(b.bitmap.width, 4);
-        assert_eq!(b.bitmap.height, 4);
+        let b = &entries[0];
+        let bitmap = &b.tip.as_ref().unwrap().bitmap;
+        assert_eq!(bitmap.width, 4);
+        assert_eq!(bitmap.height, 4);
         assert!(b.uuid.is_none());
     }
 
@@ -2502,10 +2709,10 @@ mod tests {
 
         let entries = parse_samp_block(&block, AbrVersion::V10, 2, TipMode::Eager);
         assert_eq!(entries.len(), 2);
-        assert!(entries[0].is_some());
-        assert!(entries[1].is_some());
-        assert_eq!(entries[0].as_ref().unwrap().bitmap.width, 8);
-        assert_eq!(entries[1].as_ref().unwrap().bitmap.width, 16);
+        assert!(entries[0].tip.is_ok());
+        assert!(entries[1].tip.is_ok());
+        assert_eq!(entries[0].tip.as_ref().unwrap().bitmap.width, 8);
+        assert_eq!(entries[1].tip.as_ref().unwrap().bitmap.width, 16);
     }
 
     fn push_framed(block: &mut Vec<u8>, body: &[u8]) {
@@ -2531,21 +2738,23 @@ mod tests {
         let entries = parse_samp_block(&block, AbrVersion::V10, 2, TipMode::Eager);
         assert_eq!(entries.len(), 2);
 
-        let first = entries[0].as_ref().unwrap();
+        let first = &entries[0];
         assert_eq!(
             first.uuid.as_deref(),
             Some("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
         );
-        assert_eq!(first.bitmap.width, 8);
-        assert_eq!(first.bitmap.data[0], b'$');
+        let first_tip = &first.tip.as_ref().unwrap().bitmap;
+        assert_eq!(first_tip.width, 8);
+        assert_eq!(first_tip.data[0], b'$');
 
-        let second = entries[1].as_ref().unwrap();
+        let second = &entries[1];
         assert_eq!(
             second.uuid.as_deref(),
             Some("b1b2c3d4-e5f6-7890-abcd-ef1234567890")
         );
-        assert_eq!(second.bitmap.width, 4);
-        assert!(second.bitmap.data.iter().all(|&b| b == 0xEE));
+        let second_tip = &second.tip.as_ref().unwrap().bitmap;
+        assert_eq!(second_tip.width, 4);
+        assert!(second_tip.data.iter().all(|&b| b == 0xEE));
     }
 
     #[test]
@@ -2563,8 +2772,8 @@ mod tests {
 
         let entries = parse_samp_block(&block, AbrVersion::V10, 2, TipMode::Eager);
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].as_ref().unwrap().bitmap.width, 8);
-        assert_eq!(entries[1].as_ref().unwrap().bitmap.width, 4);
+        assert_eq!(entries[0].tip.as_ref().unwrap().bitmap.width, 8);
+        assert_eq!(entries[1].tip.as_ref().unwrap().bitmap.width, 4);
     }
 
     #[test]
@@ -2679,8 +2888,8 @@ mod tests {
         block.extend_from_slice(&e2);
         let entries = parse_samp_block(&block, AbrVersion::V6, 1, TipMode::Eager);
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].as_ref().unwrap().bitmap.width, 4);
-        assert_eq!(entries[1].as_ref().unwrap().bitmap.width, 8);
+        assert_eq!(entries[0].tip.as_ref().unwrap().bitmap.width, 4);
+        assert_eq!(entries[1].tip.as_ref().unwrap().bitmap.width, 8);
     }
 
     #[test]
