@@ -20,8 +20,8 @@ use counting_alloc::{live, peak, reset_peak};
 use std::time::{Duration, Instant};
 
 const MIB: usize = 1 << 20;
-/// One reference over the payload guard: 129 references to a 128 KiB data
-/// object, 131 KiB on disk and 16.1 MiB expanded.
+/// One reference over the payload guard: 9 references to a 128 KiB data
+/// object, 128 KiB on disk and 1.1 MiB expanded.
 const DATA_CHUNK: usize = 128 * 1024;
 const DATA_REFS: usize = MAX_PLIST_PAYLOAD_BYTES / DATA_CHUNK + 1;
 /// The reported shape. Six levels of 64 references expand to 64^6 strings,
@@ -187,8 +187,7 @@ fn oversized_plists_are_rejected_before_they_are_allocated() {
     assert_eq!(set.entries.len(), 1);
     assert_eq!(set.entries[0].name, "a");
 
-    // The two guards share one budget: the largest accepted tree costs less
-    // than the payload ceiling, so an accepted plist stays under twice it.
+    // The value guard alone keeps the largest accepted tree under 8 MiB.
     let accepted = zip_with(&[(
         "brushset.plist",
         &shared_arrays_plist(ACCEPTED_LEVELS, ACCEPTED_FANOUT),
@@ -200,8 +199,23 @@ fn oversized_plists_are_rejected_before_they_are_allocated() {
     assert_eq!(set.set_name.as_deref(), Some("Shared arrays"));
     println!("largest accepted tree grew the heap by {growth} bytes");
     assert!(
-        growth < MAX_PLIST_PAYLOAD_BYTES,
+        growth < 8 * MIB,
         "largest accepted tree grew the heap by {growth} bytes"
+    );
+
+    // plist decodes an accepted string once per parse, and each decode holds
+    // the UTF-16 units and the UTF-8 copy at once.
+    let name = "\u{5b57}".repeat(MAX_PLIST_PAYLOAD_BYTES / 3 - 16);
+    let accepted = zip_with(&[("brushset.plist", &brushset_plist(&name, &["a"]))]);
+    let before = live();
+    reset_peak();
+    let set = preview_brushset(&accepted, OPTIONS).expect("largest accepted string reads");
+    let growth = peak() - before;
+    assert_eq!(set.set_name.as_deref(), Some(name.as_str()));
+    println!("largest accepted string grew the heap by {growth} bytes");
+    assert!(
+        growth < 8 * MIB,
+        "largest accepted string grew the heap by {growth} bytes"
     );
 
     // A plist the value guard accepts declares fewer references than it
