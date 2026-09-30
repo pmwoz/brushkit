@@ -4,7 +4,7 @@ use brushkit_preview::{
 use std::path::Path;
 
 mod common;
-use common::{desc_abr, legacy_abr, DescPreset, SampTip};
+use common::{desc_abr, legacy_abr, DescPreset, SampTip, TIP_A, TIP_B, TIP_C};
 
 const SEEDS: [&str; 2] = ["wellformed_v6_min", "wellformed_v6_patt"];
 
@@ -142,10 +142,6 @@ fn a_legacy_entry_with_an_unknown_compression_stays_a_corrupt_entry_in_its_place
     assert_eq!((readable.index, readable.name.as_str()), (1, "brush_0"));
     assert!(matches!(readable.tip, TipPreview::Available(_)));
 }
-
-const TIP_A: &str = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
-const TIP_B: &str = "a1b2c3d4-e5f6-7890-abcd-ef1234567891";
-const TIP_C: &str = "a1b2c3d4-e5f6-7890-abcd-ef1234567892";
 
 fn names_and_tips(set: &PreviewSet) -> Vec<(&str, String)> {
     set.entries
