@@ -11,7 +11,7 @@ brushkit only reads. It never writes or converts a brush file.
 
 ```toml
 [dependencies]
-brushkit = "0.5"
+brushkit = "0.6"
 ```
 
 `brushkit` re-exports `brushkit-abr` as `brushkit::abr` and
