@@ -24,8 +24,10 @@ pub const MAX_PLIST_DEPTH: usize = 64;
 pub const MAX_PLIST_VALUES: usize = 100_000;
 /// The expanded string and data bytes of one plist. The same census found at
 /// most 7 KiB. Each accepted string is decoded twice, once per parse, and a
-/// UTF-16 string holds its code units and its UTF-8 copy at once, so this
-/// ceiling, not [`MAX_PLIST_BYTES`], sets what an accepted plist costs.
+/// UTF-16 string holds its code units and its UTF-8 copy at once, so in a
+/// binary plist this ceiling bounds what strings cost beyond the entry
+/// itself. An XML plist's string is allocated before the stream guard sees
+/// it, so only [`MAX_PLIST_BYTES`] bounds it.
 pub const MAX_PLIST_PAYLOAD_BYTES: usize = 1024 * 1024;
 
 /// Reads a zip entry of at most [`MAX_ENTRY_BYTES`]. Plist entries go through

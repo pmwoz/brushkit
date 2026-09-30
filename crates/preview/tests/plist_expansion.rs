@@ -20,10 +20,10 @@ use counting_alloc::{live, peak, reset_peak};
 use std::time::{Duration, Instant};
 
 const MIB: usize = 1 << 20;
-/// One reference over the payload guard: 9 references to a 128 KiB data
-/// object, 128 KiB on disk and 1.1 MiB expanded.
+/// The fewest references to one shared 128 KiB data object that take the
+/// plist over the payload guard. The plist's own strings are the extra bytes.
 const DATA_CHUNK: usize = 128 * 1024;
-const DATA_REFS: usize = MAX_PLIST_PAYLOAD_BYTES / DATA_CHUNK + 1;
+const DATA_REFS: usize = MAX_PLIST_PAYLOAD_BYTES / DATA_CHUNK;
 /// The reported shape. Six levels of 64 references expand to 64^6 strings,
 /// which a walk that does not stop at the value guard takes hours over.
 const ARRAY_LEVELS: usize = 6;
@@ -180,14 +180,14 @@ fn oversized_plists_are_rejected_before_they_are_allocated() {
         assert!(elapsed < BOUNDED, "{name} archive took {elapsed:?}");
     }
 
-    let under = shared_data_plist(DATA_REFS / 2, DATA_CHUNK);
+    let under = shared_data_plist(DATA_REFS - 1, DATA_CHUNK);
     let set = preview_brushset(&zip_with(&[("brushset.plist", &under)]), OPTIONS)
         .expect("shared data under the guard reads");
     assert_eq!(set.set_name.as_deref(), Some("Shared data"));
     assert_eq!(set.entries.len(), 1);
     assert_eq!(set.entries[0].name, "a");
 
-    // The value guard alone keeps the largest accepted tree under 8 MiB.
+    // The widest shared-array tree the value guard accepts stays under 16 MiB.
     let accepted = zip_with(&[(
         "brushset.plist",
         &shared_arrays_plist(ACCEPTED_LEVELS, ACCEPTED_FANOUT),
@@ -199,13 +199,14 @@ fn oversized_plists_are_rejected_before_they_are_allocated() {
     assert_eq!(set.set_name.as_deref(), Some("Shared arrays"));
     println!("largest accepted tree grew the heap by {growth} bytes");
     assert!(
-        growth < 8 * MIB,
+        growth < 16 * MIB,
         "largest accepted tree grew the heap by {growth} bytes"
     );
 
     // plist decodes an accepted string once per parse, and each decode holds
-    // the UTF-16 units and the UTF-8 copy at once.
-    let name = "\u{5b57}".repeat(MAX_PLIST_PAYLOAD_BYTES / 3 - 16);
+    // the UTF-16 units and the UTF-8 copy at once. The keys and the member
+    // uuid take the other 12 bytes.
+    let name = "\u{5b57}".repeat((MAX_PLIST_PAYLOAD_BYTES - 12) / 3);
     let accepted = zip_with(&[("brushset.plist", &brushset_plist(&name, &["a"]))]);
     let before = live();
     reset_peak();

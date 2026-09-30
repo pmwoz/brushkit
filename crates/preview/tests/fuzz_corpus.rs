@@ -21,10 +21,11 @@ const OPTIONS: PreviewOptions = PreviewOptions { max_cell: 8 };
 /// The first depth the guard rejects. Deleting one `<array>` takes a mutant
 /// below the guard, so the fuzzer explores both sides of the limit.
 const SEED_DEPTH: usize = MAX_PLIST_DEPTH + 1;
-/// One reference over the payload guard, so deleting a reference takes a
-/// mutant below it. A small chunk keeps the seed near 10 KiB.
+/// The fewest references that take the plist over the payload guard, so
+/// deleting one takes a mutant below it. A small chunk keeps the seed near
+/// 10 KiB.
 const SEED_DATA_CHUNK: usize = 8 * 1024;
-const SEED_DATA_REFS: usize = MAX_PLIST_PAYLOAD_BYTES / SEED_DATA_CHUNK + 1;
+const SEED_DATA_REFS: usize = MAX_PLIST_PAYLOAD_BYTES / SEED_DATA_CHUNK;
 /// Three levels of 47 references expand to 6% over the value guard.
 const SEED_ARRAY_LEVELS: usize = 3;
 const SEED_ARRAY_FANOUT: usize = 47;
