@@ -689,25 +689,14 @@ fn parse_legacy(
 
         let input: &[u8] = cursor.get_ref();
         let pixel_start = cursor.position();
-        let pixel_end = match compression {
-            0 => {
-                let end = pixel_start + expected as u64;
-                if end > input.len() as u64 {
-                    return Err(AbrError::Decompression("truncated raw data".into()));
-                }
-                end
+        let pixel_end = if compression == 0 {
+            let end = pixel_start + expected as u64;
+            if end > input.len() as u64 {
+                return Err(AbrError::Decompression("truncated raw data".into()));
             }
-            1 => entry_end,
-            _ => {
-                cursor.set_position(entry_end);
-                entries.push(Err(UnavailableBrush {
-                    id: format!("brush_{}", entries.len()),
-                    name,
-                    preset_index: None,
-                    cause: UnavailableTip::Unreadable(format!("unknown compression {compression}")),
-                }));
-                continue;
-            }
+            end
+        } else {
+            entry_end
         };
         // A raw entry may declare more or fewer bytes than its pixels. GIMP
         // ignores the declared length of a sampled entry, so a short one still
@@ -715,19 +704,22 @@ fn parse_legacy(
         cursor.set_position(entry_end.max(pixel_end));
         let pixels = &input[pixel_start as usize..pixel_end as usize];
 
-        let (pixel_data, deferred) = if !defer {
-            #[cfg(test)]
-            tests::record_decode();
-            let data = if compression == 0 {
-                pixels.to_vec()
-            } else {
-                decode_rle(pixels, height as usize, width as usize, bpp, expected)?
-            };
-            (data, None)
+        let tip = if compression > 1 {
+            Err(format!("unknown compression {compression}"))
         } else if expected == 0 {
             // Nothing to decode, and `bitmap_geometry` rejects an empty pixel
             // region.
-            (Vec::new(), None)
+            Ok((Vec::new(), None))
+        } else if !defer {
+            #[cfg(test)]
+            tests::record_decode();
+            if compression == 0 {
+                Ok((pixels.to_vec(), None))
+            } else {
+                decode_rle(pixels, height as usize, width as usize, bpp, expected)
+                    .map(|data| (data, None))
+                    .map_err(|e| format!("bitmap decode failed: {e}"))
+            }
         } else {
             let header = BitmapHeader {
                 rect_offset: 0,
@@ -743,23 +735,34 @@ fn parse_legacy(
                 header,
                 decoded_len: expected,
             };
-            (Vec::new(), Some(tip))
+            Ok((Vec::new(), Some(tip)))
         };
 
-        let brush = AbrBrush {
-            id: format!("brush_{}", entries.len()),
-            name,
-            tip: TipBitmap {
-                width,
-                height,
-                depth,
-                data: pixel_data,
-            },
-            descriptor: BrushDescriptor::default(),
-            synthesized: false,
-            preset_index: None,
-        };
-        entries.push(Ok((brush, deferred)));
+        let id = format!("brush_{}", entries.len());
+        entries.push(match tip {
+            Ok((data, deferred)) => {
+                let brush = AbrBrush {
+                    id,
+                    name,
+                    tip: TipBitmap {
+                        width,
+                        height,
+                        depth,
+                        data,
+                    },
+                    descriptor: BrushDescriptor::default(),
+                    synthesized: false,
+                    preset_index: None,
+                };
+                Ok((brush, deferred))
+            }
+            Err(message) => Err(UnavailableBrush {
+                id,
+                name,
+                preset_index: None,
+                cause: UnavailableTip::Unreadable(message),
+            }),
+        });
     }
 
     let mut brushes = Vec::new();
@@ -3286,24 +3289,22 @@ mod tests {
     }
 
     #[test]
-    fn all_deferred_parse_does_not_decode_a_zero_area_legacy_tip() {
+    fn a_zero_area_legacy_rle_tip_is_empty_in_every_parse() {
         // Width 0, height 3, RLE, and none of the 3 row byte counts.
         let d = legacy_stream(2, &[legacy_entry(2, 0, 3, 8, 1, &[], None)]);
-        for result in [
-            parse_abr(&d).map(|_| ()),
-            parse_abr_deferred_without_patterns(&d).map(|_| ()),
-        ] {
-            assert!(
-                matches!(&result, Err(AbrError::Decompression(msg)) if msg == "truncated RLE row byte counts"),
-                "got {result:?}"
-            );
-        }
-
-        let all = parse_abr_all_deferred_without_patterns(&d).unwrap();
-        assert!(!all.is_deferred(0));
-        let tip = all.decode_tip(0).unwrap();
+        let eager = parse_abr(&d).unwrap();
+        assert_eq!(eager.sampled_brushes, [SampledBrush::Readable(0)]);
+        let tip = &eager.brushes[0].tip;
         assert_eq!((tip.width, tip.height, tip.depth), (0, 3, 8));
         assert!(tip.data.is_empty());
+        for deferred in [
+            parse_abr_deferred_without_patterns(&d).unwrap(),
+            parse_abr_all_deferred_without_patterns(&d).unwrap(),
+        ] {
+            assert!(!deferred.is_deferred(0));
+            assert_eq!(deferred.pack.sampled_brushes, eager.sampled_brushes);
+            assert_tips_match_eager(&deferred, &eager);
+        }
     }
 
     #[test]
@@ -3406,6 +3407,57 @@ mod tests {
                     "v{version}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_legacy_rle_entry_that_does_not_decode_is_an_unavailable_brush_in_its_place() {
+        for version in [1, 2] {
+            let rle = |pixel: u8| legacy_entry(version, 1, 1, 8, 1, &[0, 2, 0, pixel], None);
+            let row_counts_only = legacy_entry(version, 1, 1, 8, 1, &[0, 2], None);
+            let d = legacy_stream(version, &[rle(7), row_counts_only, rle(9)]);
+
+            let pack = parse_abr(&d).unwrap();
+            let pixels: Vec<&[u8]> = pack.brushes.iter().map(|b| b.tip.data.as_slice()).collect();
+            assert_eq!(pixels, [[9], [7]], "v{version}");
+            let paired = parse_abr_deferred(&d).unwrap();
+            assert_eq!(
+                paired.pack.sampled_brushes, pack.sampled_brushes,
+                "v{version}"
+            );
+            assert_tips_match_eager(&paired, &pack);
+
+            let all = parse_abr_all_deferred_without_patterns(&d).unwrap();
+            assert_eq!(
+                all.pack.sampled_brushes,
+                (0..3).map(SampledBrush::Readable).collect::<Vec<_>>(),
+                "v{version}"
+            );
+            assert_eq!(all.decode_tip(0).unwrap().data, [9], "v{version}");
+            assert!(
+                matches!(all.decode_tip(1), Err(AbrError::Decompression(_))),
+                "v{version}"
+            );
+            assert_eq!(all.decode_tip(2).unwrap().data, [7], "v{version}");
+
+            assert_eq!(
+                pack.sampled_brushes,
+                [
+                    SampledBrush::Readable(0),
+                    SampledBrush::Unavailable(UnavailableBrush {
+                        id: "brush_1".to_string(),
+                        name: String::new(),
+                        preset_index: None,
+                        cause: UnavailableTip::Unreadable(
+                            "bitmap decode failed: decompression failed: \
+                             truncated RLE row 0: declares 2 bytes, 0 remain"
+                                .to_string()
+                        ),
+                    }),
+                    SampledBrush::Readable(1),
+                ],
+                "v{version}"
+            );
         }
     }
 

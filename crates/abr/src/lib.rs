@@ -204,8 +204,9 @@ pub enum UnavailableTip {
     /// parse, or, from `parse_abr`, its pixels did not decode. A deferred
     /// parse does not decode pixels, so it reports that last failure from
     /// `DeferredPack::decode_tip` and lists the brush as `Readable`. A v1/v2
-    /// entry is `Unreadable` when its compression byte is unknown. Carries
-    /// the parser's message.
+    /// entry is `Unreadable` when its compression byte is unknown or, from
+    /// any parse but `parse_abr_all_deferred_without_patterns`, its RLE
+    /// pixels do not decode. Carries the parser's message.
     Unreadable(String),
 }
 
