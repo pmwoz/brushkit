@@ -2,7 +2,7 @@ mod common;
 #[path = "../../../fuzz/fuzz_targets/tip_shapes.rs"]
 mod tip_shapes;
 
-use brushkit_preview::procreate::MAX_PLIST_DEPTH;
+use brushkit_preview::procreate::{MAX_PLIST_DEPTH, MAX_PLIST_PAYLOAD_BYTES};
 use brushkit_preview::{
     preview_abr, preview_abr_first_available, preview_brush, preview_brush_first_available,
     preview_brushset, preview_brushset_first_available, PreviewOptions, TipPreview,
@@ -10,7 +10,7 @@ use brushkit_preview::{
 };
 use common::{
     brush_archive, brushset_plist, depth_bomb_plist_xml, dimension_bomb_png, gray_png, legacy_abr,
-    samp_abr, zip_with, SampTip,
+    samp_abr, shared_arrays_plist, shared_data_plist, zip_with, SampTip,
 };
 use std::collections::BTreeSet;
 use std::io::{Cursor, Read};
@@ -21,6 +21,13 @@ const OPTIONS: PreviewOptions = PreviewOptions { max_cell: 8 };
 /// The first depth the guard rejects. Deleting one `<array>` takes a mutant
 /// below the guard, so the fuzzer explores both sides of the limit.
 const SEED_DEPTH: usize = MAX_PLIST_DEPTH + 1;
+/// One reference over the payload guard, so deleting a reference takes a
+/// mutant below it.
+const SEED_DATA_CHUNK: usize = 128 * 1024;
+const SEED_DATA_REFS: usize = MAX_PLIST_PAYLOAD_BYTES / SEED_DATA_CHUNK + 1;
+/// Four levels of 32 references expand to just over the event guard.
+const SEED_ARRAY_LEVELS: usize = 4;
+const SEED_ARRAY_FANOUT: usize = 32;
 /// A 64x32 8-bit grayscale PNG written once with Python's zlib at level 9, one
 /// IDAT holding one dynamic Huffman block. Row `y` uses filter `y % 5`. The
 /// pixels vary, but every 8x8 block averages 200, so its 8x4 preview matches
@@ -125,6 +132,26 @@ fn generated_seeds() -> Vec<(&'static str, &'static str, Vec<u8>)> {
                 ("Shape.png", FILTERED_SHAPE.to_vec()),
             ],
         ),
+        (
+            "shared_data_archive",
+            vec![
+                (
+                    "Brush.archive",
+                    shared_data_plist(SEED_DATA_REFS, SEED_DATA_CHUNK),
+                ),
+                ("Shape.png", shape.clone()),
+            ],
+        ),
+        (
+            "shared_arrays_archive",
+            vec![
+                (
+                    "Brush.archive",
+                    shared_arrays_plist(SEED_ARRAY_LEVELS, SEED_ARRAY_FANOUT),
+                ),
+                ("Shape.png", shape.clone()),
+            ],
+        ),
     ] {
         let entries: Vec<_> = entries
             .iter()
@@ -157,6 +184,22 @@ fn generated_seeds() -> Vec<(&'static str, &'static str, Vec<u8>)> {
             "preview_brushset",
             "deep_metadata",
             zip_with(&[("brushset.plist", &depth_bomb_plist_xml(SEED_DEPTH))]),
+        ),
+        (
+            "preview_brushset",
+            "shared_data_metadata",
+            zip_with(&[(
+                "brushset.plist",
+                &shared_data_plist(SEED_DATA_REFS, SEED_DATA_CHUNK),
+            )]),
+        ),
+        (
+            "preview_brushset",
+            "shared_arrays_metadata",
+            zip_with(&[(
+                "brushset.plist",
+                &shared_arrays_plist(SEED_ARRAY_LEVELS, SEED_ARRAY_FANOUT),
+            )]),
         ),
     ]);
     seeds
@@ -270,6 +313,32 @@ fn depth_seeds_reach_the_depth_guard() {
     let bytes = std::fs::read(corpus("preview_brushset").join("deep_metadata")).unwrap();
     let err = preview_brushset(&bytes, OPTIONS).expect_err("depth bomb must be rejected");
     assert!(err.0.contains("depth"), "deep_metadata: {err}");
+}
+
+#[test]
+fn expansion_seeds_reach_the_expansion_guards() {
+    for (name, guard) in [
+        ("shared_data_archive", "bytes of strings and data"),
+        ("shared_arrays_archive", "values"),
+    ] {
+        let bytes = std::fs::read(corpus("preview_brush").join(name)).unwrap();
+        let set = preview_brush(&bytes, OPTIONS).expect("brush reads");
+        let [entry] = set.entries.as_slice() else {
+            panic!("expected one entry, got {}", set.entries.len());
+        };
+        let TipPreview::Unavailable(UnavailableReason::Corrupt(msg)) = &entry.tip else {
+            panic!("expected Corrupt, got {:?}", entry.tip);
+        };
+        assert!(msg.contains(guard), "{name}: {msg}");
+    }
+    for (name, guard) in [
+        ("shared_data_metadata", "bytes of strings and data"),
+        ("shared_arrays_metadata", "values"),
+    ] {
+        let bytes = std::fs::read(corpus("preview_brushset").join(name)).unwrap();
+        let err = preview_brushset(&bytes, OPTIONS).expect_err("expansion bomb must be rejected");
+        assert!(err.0.contains(guard), "{name}: {err}");
+    }
 }
 
 /// `root_brush_deflated` is a committed file, not generated, so a deflate

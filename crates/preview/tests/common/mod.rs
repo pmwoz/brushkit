@@ -217,6 +217,97 @@ pub fn depth_bomb_plist_xml(depth: usize) -> Vec<u8> {
     s.into_bytes()
 }
 
+/// A binary plist in `brushset.plist` shape whose `payload` is `count`
+/// references to one `bytes_each` byte data object. The writer shares equal
+/// scalars, so the file holds the bytes once and the tree holds them `count`
+/// times.
+pub fn shared_data_plist(count: usize, bytes_each: usize) -> Vec<u8> {
+    use plist::{Dictionary, Value};
+    let mut dict = Dictionary::new();
+    dict.insert("name".into(), Value::String("Shared data".into()));
+    dict.insert(
+        "brushes".into(),
+        Value::Array(vec![Value::String("a".into())]),
+    );
+    dict.insert(
+        "payload".into(),
+        Value::Array(vec![Value::Data(vec![b'x'; bytes_each]); count]),
+    );
+    let mut out = Vec::new();
+    Value::Dictionary(dict)
+        .to_writer_binary(&mut out)
+        .expect("binary plist");
+    out
+}
+
+/// A binary plist in `brushset.plist` shape whose `payload` is `levels`
+/// nested arrays, each holding `fanout` references to the one array below it,
+/// down to one string. Written by hand because the plist writer does not
+/// share collections: the file holds `levels + 8` objects and expands to
+/// `fanout ^ levels` strings.
+pub fn shared_arrays_plist(levels: usize, fanout: usize) -> Vec<u8> {
+    fn marker(kind: u8, count: usize) -> Vec<u8> {
+        if count < 15 {
+            vec![kind | count as u8]
+        } else {
+            let mut out = vec![kind | 0xF, 0x12];
+            out.extend_from_slice(&u32::try_from(count).expect("count fits").to_be_bytes());
+            out
+        }
+    }
+    let string = |s: &str| {
+        let mut out = marker(0x50, s.len());
+        out.extend_from_slice(s.as_bytes());
+        out
+    };
+    let array = |refs: &[usize]| {
+        let mut out = marker(0xA0, refs.len());
+        for r in refs {
+            out.extend_from_slice(&(*r as u16).to_be_bytes());
+        }
+        out
+    };
+    let dict = |pairs: &[(usize, usize)]| {
+        let mut out = marker(0xD0, pairs.len());
+        for (k, _) in pairs {
+            out.extend_from_slice(&(*k as u16).to_be_bytes());
+        }
+        for (_, v) in pairs {
+            out.extend_from_slice(&(*v as u16).to_be_bytes());
+        }
+        out
+    };
+    let top = 7 + levels;
+    let mut objects = vec![
+        dict(&[(1, 2), (3, 4), (6, top)]),
+        string("name"),
+        string("Shared arrays"),
+        string("brushes"),
+        array(&[5]),
+        string("a"),
+        string("payload"),
+        string("x"),
+    ];
+    for below in 7..top {
+        objects.push(array(&vec![below; fanout]));
+    }
+
+    let mut out = b"bplist00".to_vec();
+    let mut offsets = Vec::new();
+    for object in &objects {
+        offsets.extend_from_slice(&(out.len() as u32).to_be_bytes());
+        out.extend_from_slice(object);
+    }
+    let table = out.len() as u64;
+    out.extend_from_slice(&offsets);
+    out.extend_from_slice(&[0; 6]);
+    out.extend_from_slice(&[4, 2]); // Offset and reference sizes in bytes.
+    out.extend_from_slice(&(objects.len() as u64).to_be_bytes());
+    out.extend_from_slice(&0u64.to_be_bytes()); // Root object.
+    out.extend_from_slice(&table.to_be_bytes());
+    out
+}
+
 /// A zip of `entries` in order, written by hand with stored entries and fixed
 /// header fields. The fuzz seeds embed these bytes, so they must not change
 /// when the zip crate or its deflate backend does.
