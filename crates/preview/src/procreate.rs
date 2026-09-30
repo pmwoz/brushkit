@@ -99,12 +99,14 @@ pub fn parse_plist_guarded(bytes: &[u8], label: &str) -> Result<plist::Value, St
         .map_err(|e| format!("failed to parse {label}: {e}"))
 }
 
-/// plist 1.8's binary reader allocates the offset table and each collection's
-/// references before the event the stream guard counts. When every object is
-/// reachable, the object count and the declared references are each at most
-/// the expanded value count that guard caps, so a plist it accepts passes
-/// here. A bad magic or offset width, or an offset table that does not fit,
-/// is left to plist.
+/// plist 1.8's binary reader allocates the offset table, each collection's
+/// references and each decoded string before the event the stream guard
+/// counts, and a UTF-16 string holds its code units and the growing UTF-8
+/// string at once. When every object is reachable, the object count and the
+/// declared references are each at most the expanded value count that guard
+/// caps, and the declared string and data bytes are at most the expanded
+/// payload, so a plist it accepts passes here. A bad magic or offset width,
+/// or an offset table that does not fit, is left to plist.
 fn check_binary_tables(bytes: &[u8], label: &str) -> Result<(), String> {
     let Some(tail) = bytes
         .strip_prefix(b"bplist00")
@@ -133,43 +135,79 @@ fn check_binary_tables(bytes: &[u8], label: &str) -> Result<(), String> {
         ));
     }
     let mut references: u64 = 0;
+    let mut payload: u64 = 0;
     for entry in entries.chunks_exact(width) {
         let offset = big_endian(entry);
         if offset >= trailer as u64 {
             continue;
         }
-        references = references.saturating_add(declared_references(bytes, offset as usize));
+        let (object_references, object_payload) = declared(bytes, trailer, offset as usize);
+        references = references.saturating_add(object_references);
+        payload = payload.saturating_add(object_payload);
         if references > MAX_PLIST_VALUES as u64 {
             return Err(format!(
                 "{label}: plist collections declare over {MAX_PLIST_VALUES} references"
+            ));
+        }
+        if payload > MAX_PLIST_PAYLOAD_BYTES as u64 {
+            return Err(format!(
+                "{label}: plist declares over {MAX_PLIST_PAYLOAD_BYTES} bytes of strings and data"
             ));
         }
     }
     Ok(())
 }
 
-/// The references the object at `at` makes the reader allocate: its length
-/// for an array, twice it for a dictionary, read as plist reads it.
-fn declared_references(bytes: &[u8], at: usize) -> u64 {
+/// The references and the string or data bytes plist's reader allocates
+/// for the object at `at` before it yields the object's event.
+fn declared(bytes: &[u8], trailer: usize, at: usize) -> (u64, u64) {
     let Some(&token) = bytes.get(at) else {
-        return 0;
+        return (0, 0);
     };
-    let per_entry: u64 = match token >> 4 {
-        0xA => 1,
-        0xD => 2,
-        _ => return 0,
-    };
-    let len = if token & 0xF == 0xF {
-        bytes.get(at.saturating_add(1)).and_then(|marker| {
-            let start = at.saturating_add(2);
-            bytes
-                .get(start..start.saturating_add(1 << (marker & 3)))
-                .map(big_endian)
-        })
+    let (len, start) = if token & 0xF == 0xF {
+        let Some(&marker) = bytes.get(at.saturating_add(1)) else {
+            return (0, 0);
+        };
+        let start = at.saturating_add(2);
+        let end = start.saturating_add(1 << (marker & 3));
+        let Some(field) = bytes.get(start..end) else {
+            return (0, 0);
+        };
+        (big_endian(field), end)
     } else {
-        Some(u64::from(token & 0xF))
+        (u64::from(token & 0xF), at + 1)
     };
-    len.unwrap_or(0).saturating_mul(per_entry)
+    // plist rejects content that does not fit before the trailer without
+    // allocating it, and measures the fit from the object's offset because
+    // `PosReader::read` never advances `pos`.
+    let content = |unit: u64| {
+        let size = usize::try_from(len.checked_mul(unit)?).ok()?;
+        at.checked_add(size).filter(|&end| end <= trailer)?;
+        bytes.get(start..start.checked_add(size)?)
+    };
+    match token >> 4 {
+        0x4 | 0x5 => (0, content(1).map_or(0, |data| data.len() as u64)),
+        0x6 => (0, content(2).map_or(0, utf8_len)),
+        0xA => (len, 0),
+        0xD => (len.saturating_mul(2), 0),
+        _ => (0, 0),
+    }
+}
+
+/// The UTF-8 length of big-endian UTF-16 `units`, exact for a valid string.
+/// plist allocates for every unit before it finds an unpaired surrogate, so a
+/// lone surrogate counts as half a pair.
+fn utf8_len(units: &[u8]) -> u64 {
+    units
+        .as_chunks()
+        .0
+        .iter()
+        .map(|&unit| match u16::from_be_bytes(unit) {
+            0..=0x7F => 1,
+            0x80..=0x7FF | 0xD800..=0xDFFF => 2,
+            _ => 3,
+        })
+        .sum()
 }
 
 /// `field`, at most eight bytes, as a big-endian unsigned integer.
@@ -355,6 +393,51 @@ mod tests {
                 expected,
                 "{marker:#x}"
             );
+        }
+    }
+
+    #[test]
+    fn utf16_strings_are_counted_as_utf8() {
+        let plist = |ascii: usize| {
+            let string = "\u{5b57}".repeat(MAX_PLIST_PAYLOAD_BYTES / 3) + &"a".repeat(ascii);
+            let mut out = Vec::new();
+            plist::Value::String(string)
+                .to_writer_binary(&mut out)
+                .expect("binary plist");
+            out
+        };
+        let fits = MAX_PLIST_PAYLOAD_BYTES % 3;
+        assert!(parse_plist_guarded(&plist(fits), "t").is_ok());
+        assert_eq!(
+            parse_plist_guarded(&plist(fits + 1), "t"),
+            declared_payload()
+        );
+    }
+
+    fn declared_payload() -> Result<plist::Value, String> {
+        Err(format!(
+            "t: plist declares over {MAX_PLIST_PAYLOAD_BYTES} bytes of strings and data"
+        ))
+    }
+
+    /// One UTF-16 string whose content runs `into_trailer` bytes into the
+    /// trailer, with the offset table's one entry as its last byte before it.
+    fn utf16_string(units: &[u16], into_trailer: usize) -> Vec<u8> {
+        let mut body = vec![0x6F, 0x12];
+        body.extend_from_slice(&(units.len() as u32).to_be_bytes());
+        body.extend(units.iter().flat_map(|unit| unit.to_be_bytes()));
+        body.truncate(body.len() - into_trailer);
+        *body.last_mut().expect("content") = 8;
+        let table = 8 + body.len() as u64 - 1;
+        bplist(&body, 1, 1, table)
+    }
+
+    #[test]
+    fn utf16_strings_that_plist_fails_or_reads_into_the_trailer_are_counted() {
+        let cjk = vec![0x5B57; MAX_PLIST_PAYLOAD_BYTES / 3 + 3];
+        let lone_surrogate = [&[0xDC00][..], &cjk[3..]].concat();
+        for plist in [utf16_string(&lone_surrogate, 0), utf16_string(&cjk, 6)] {
+            assert_eq!(parse_plist_guarded(&plist, "t"), declared_payload());
         }
     }
 }

@@ -1,9 +1,9 @@
 //! A binary plist may reference one object any number of times, and each
-//! reference expands into its own value. It may also declare objects and
-//! collection lengths that plist's binary reader allocates before it yields an
-//! event. The guards must stop both before they are allocated, on both
-//! surfaces: `brushset.plist` before the first member and `Brush.archive`
-//! inside a member.
+//! reference expands into its own value. It may also declare objects,
+//! collection lengths and UTF-16 strings that plist's binary reader allocates
+//! before it yields an event. The guards must stop all of them before they
+//! are allocated, on both surfaces: `brushset.plist` before the first member
+//! and `Brush.archive` inside a member.
 //!
 //! One test, because the counting allocator measures the whole binary.
 mod common;
@@ -13,7 +13,9 @@ use brushkit_preview::procreate::{MAX_PLIST_PAYLOAD_BYTES, MAX_PLIST_VALUES};
 use brushkit_preview::{
     preview_brush, preview_brushset, PreviewOptions, PreviewSet, TipPreview, UnavailableReason,
 };
-use common::{gray_png, shared_array_values, shared_arrays_plist, shared_data_plist, zip_with};
+use common::{
+    brushset_plist, gray_png, shared_array_values, shared_arrays_plist, shared_data_plist, zip_with,
+};
 use counting_alloc::{live, peak, reset_peak};
 use std::time::{Duration, Instant};
 
@@ -42,6 +44,7 @@ const _: () = {
     assert!(shared_array_values(1, ACCEPTED_PAYLOAD_FANOUT) == MAX_PLIST_VALUES);
     assert!(shared_array_values(1, ACCEPTED_PAYLOAD_FANOUT + 1) > MAX_PLIST_VALUES);
 };
+const CJK_UNITS: usize = 8_000_000;
 /// Generous for the guarded walk, which takes under a second, and far under
 /// the unbounded walk.
 const BOUNDED: Duration = Duration::from_secs(10);
@@ -118,12 +121,15 @@ fn oversized_plists_are_rejected_before_they_are_allocated() {
     let values_guard = format!("plist expands to over {MAX_PLIST_VALUES} values");
     let references_guard = format!("plist collections declare over {MAX_PLIST_VALUES} references");
     let objects_guard = format!("plist declares over {MAX_PLIST_VALUES} objects");
+    let declared_payload_guard =
+        format!("plist declares over {MAX_PLIST_PAYLOAD_BYTES} bytes of strings and data");
 
     let wide_array = overlapping_collections(ARRAY, 150_000, 1);
     let wide_dictionary = overlapping_collections(DICTIONARY, 75_000, 1);
     let nested_arrays = overlapping_collections(ARRAY, 125_000, 32);
     let nested_dictionaries = overlapping_collections(DICTIONARY, 62_500, 32);
     let offset_table = repeated_offsets(400_000);
+    let utf16 = brushset_plist(&"\u{5b57}".repeat(CJK_UNITS), &["a"]);
 
     for (name, plist, guard) in [
         ("shared data", &data, &payload_guard),
@@ -137,7 +143,9 @@ fn oversized_plists_are_rejected_before_they_are_allocated() {
             &references_guard,
         ),
         ("offset table", &offset_table, &objects_guard),
+        ("utf-16 string", &utf16, &declared_payload_guard),
     ] {
+        let budget = plist.len() + MIB;
         let metadata = zip_with(&[("brushset.plist", plist)]);
         let archive = zip_with(&[("Brush.archive", plist), ("Shape.png", &shape)]);
 
@@ -149,7 +157,7 @@ fn oversized_plists_are_rejected_before_they_are_allocated() {
         let growth = peak() - before;
         assert_eq!(err.0, format!("brushset.plist: {guard}"), "{name} metadata");
         assert!(
-            growth < MIB,
+            growth < budget,
             "{name} metadata grew the heap by {growth} bytes"
         );
         assert!(elapsed < BOUNDED, "{name} metadata took {elapsed:?}");
@@ -166,7 +174,7 @@ fn oversized_plists_are_rejected_before_they_are_allocated() {
             "{name} archive"
         );
         assert!(
-            growth < MIB,
+            growth < budget,
             "{name} archive grew the heap by {growth} bytes"
         );
         assert!(elapsed < BOUNDED, "{name} archive took {elapsed:?}");
