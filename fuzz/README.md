@@ -21,7 +21,8 @@ They also assert that every available tip has pixels, no side over `max_cell`,
 and one byte per pixel.
 Each target reads seeds from `fuzz/corpus/<target>`. The ABR seeds are synthetic
 fixtures. The Procreate seeds cover valid ZIP archives, binary plists, PNG
-shapes, missing and corrupt shapes, oversized PNG dimensions, and plist depth.
+shapes, missing and corrupt shapes, oversized PNG dimensions, plist depth, and
+shared-object plist expansion.
 The `filtered_shape` seed embeds `crates/preview/tests/fixtures/filtered_shape.png`,
 whose IDAT is compressed and whose rows are filtered. The PNG is committed rather
 than generated, so a compressor change does not move its bytes.

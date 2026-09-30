@@ -15,6 +15,16 @@ pub const MAX_ENTRY_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_PNG_DIMENSION: u32 = 16384;
 pub const MAX_PLIST_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_PLIST_DEPTH: usize = 64;
+/// A binary plist object may be referenced any number of times, and each
+/// reference is expanded into its own value, so the tree can be far larger
+/// than the file. Every value costs a `plist::Value` slot of about 80 bytes,
+/// so this keeps the largest accepted tree near 8 MiB. A census of 5803 real
+/// `Brush.archive` and `brushset.plist` files found at most 949 values.
+pub const MAX_PLIST_VALUES: usize = 100_000;
+/// The expanded string and data bytes of one plist. Equal to
+/// [`MAX_PLIST_BYTES`], so a plist that shares nothing can never reach it.
+/// The same census found at most 7 KiB.
+pub const MAX_PLIST_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 
 /// The declared uncompressed size is an attacker-controlled zip-header field,
 /// so it is only a clamped pre-allocation hint and the read is capped
@@ -40,24 +50,46 @@ pub fn read_zip_entry(
     Ok(buf)
 }
 
-/// The streaming depth pre-check builds no tree, so it bails early: without it
-/// a deeply nested plist produces a `Value` whose recursive `Drop` overflows
-/// the call stack. The bytes are parsed twice, stream then tree.
+/// The streaming pre-check builds no tree, so it bails early: without it a
+/// deeply nested plist produces a `Value` whose recursive `Drop` overflows the
+/// call stack, and a small binary plist whose objects reference one another
+/// many times expands into a tree far larger than the file. The stream yields
+/// one event per expanded value, so counting values and payload bytes bounds
+/// the tree before it is built. The bytes are parsed twice, stream then tree.
 pub fn parse_plist_guarded(bytes: &[u8], label: &str) -> Result<plist::Value, String> {
+    use plist::stream::Event;
     if bytes.len() > MAX_PLIST_BYTES {
         return Err(format!("{label}: plist size {} exceeds limit", bytes.len()));
     }
     let mut depth: usize = 0;
+    let mut values: usize = 0;
+    let mut payload: usize = 0;
     for event in plist::stream::Reader::new(Cursor::new(bytes)) {
         match event.map_err(|e| format!("failed to parse {label}: {e}"))? {
-            plist::stream::Event::StartArray(_) | plist::stream::Event::StartDictionary(_) => {
+            Event::StartArray(_) | Event::StartDictionary(_) => {
                 depth += 1;
                 if depth > MAX_PLIST_DEPTH {
                     return Err(format!("{label}: plist nesting depth exceeds limit"));
                 }
             }
-            plist::stream::Event::EndCollection => depth = depth.saturating_sub(1),
+            Event::EndCollection => {
+                depth = depth.saturating_sub(1);
+                continue;
+            }
+            Event::Data(data) => payload = payload.saturating_add(data.len()),
+            Event::String(string) => payload = payload.saturating_add(string.len()),
             _ => {}
+        }
+        values += 1;
+        if values > MAX_PLIST_VALUES {
+            return Err(format!(
+                "{label}: plist expands to over {MAX_PLIST_VALUES} values"
+            ));
+        }
+        if payload > MAX_PLIST_PAYLOAD_BYTES {
+            return Err(format!(
+                "{label}: plist expands to over {MAX_PLIST_PAYLOAD_BYTES} bytes of strings and data"
+            ));
         }
     }
     plist::Value::from_reader(Cursor::new(bytes))
