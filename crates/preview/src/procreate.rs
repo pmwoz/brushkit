@@ -22,10 +22,11 @@ pub const MAX_PLIST_DEPTH: usize = 64;
 /// `Brush.archive` and `brushset.plist` files found at most 949 values. It
 /// also caps the objects and collection references a binary plist declares.
 pub const MAX_PLIST_VALUES: usize = 100_000;
-/// The expanded string and data bytes of one plist. Equal to
-/// [`MAX_PLIST_BYTES`], so a plist that shares nothing can never reach it.
-/// The same census found at most 7 KiB.
-pub const MAX_PLIST_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+/// The expanded string and data bytes of one plist. The same census found at
+/// most 7 KiB. Each accepted string is decoded twice, once per parse, and a
+/// UTF-16 string holds its code units and its UTF-8 copy at once, so this
+/// ceiling, not [`MAX_PLIST_BYTES`], sets what an accepted plist costs.
+pub const MAX_PLIST_PAYLOAD_BYTES: usize = 1024 * 1024;
 
 /// Reads a zip entry of at most [`MAX_ENTRY_BYTES`]. Plist entries go through
 /// [`read_zip_plist`].
