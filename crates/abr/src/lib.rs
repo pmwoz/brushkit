@@ -108,8 +108,7 @@ pub struct AbrPack {
     /// presets-first path, reversed samp record order on the fallback path
     /// and reversed entry order for v1/v2 files. A samp record no preset
     /// references and whose tip is unreadable is not a brush and is listed in
-    /// `unreadable_tip_details` instead. A v1/v2 entry with an unknown
-    /// compression byte is skipped and appears nowhere.
+    /// `unreadable_tip_details` instead.
     pub sampled_brushes: Vec<SampledBrush>,
     /// Samp records whose tip is unreadable and that no entry of
     /// `sampled_brushes` uses, such as a dual-brush component tip: the
@@ -204,7 +203,8 @@ pub enum UnavailableTip {
     /// The samp record is there but its bitmap header or geometry did not
     /// parse, or, from `parse_abr`, its pixels did not decode. A deferred
     /// parse does not decode pixels, so it reports that last failure from
-    /// `DeferredPack::decode_tip` and lists the brush as `Readable`. Carries
+    /// `DeferredPack::decode_tip` and lists the brush as `Readable`. A v1/v2
+    /// entry is `Unreadable` when its compression byte is unknown. Carries
     /// the parser's message.
     Unreadable(String),
 }
