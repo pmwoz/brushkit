@@ -11,7 +11,7 @@ fn main() {
     println!(
         "{:?}: {} sampled brushes, {} computed presets",
         pack.version,
-        pack.brushes.len(),
+        pack.sampled_brushes.len(),
         pack.computed_presets.len()
     );
 

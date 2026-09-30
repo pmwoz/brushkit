@@ -442,6 +442,110 @@ pub fn legacy_abr(tips: &[SampTip]) -> Vec<u8> {
     file
 }
 
+/// One preset of [`desc_abr`].
+pub enum DescPreset<'a> {
+    /// A sampled preset `(name, samp uuid)`.
+    Sampled(&'a str, &'a str),
+    /// A computed preset with a 30 px round tip.
+    Computed(&'a str),
+}
+
+/// A v10 `.abr` with a `samp` block of `records`, `(uuid, readable)` each, and
+/// a `desc` block of `presets` in order. The layout follows
+/// `build_dual_desc_block` in the abr parser tests. An unreadable record has a
+/// bitmap depth no header accepts. With no records there is no `samp` block.
+pub fn desc_abr(records: &[(&str, bool)], presets: &[DescPreset]) -> Vec<u8> {
+    fn u32_be(buf: &mut Vec<u8>, value: u32) {
+        buf.extend_from_slice(&value.to_be_bytes());
+    }
+    fn ostype(buf: &mut Vec<u8>, key: &[u8; 4]) {
+        u32_be(buf, 0);
+        buf.extend_from_slice(key);
+    }
+    fn named(buf: &mut Vec<u8>, key: &[u8]) {
+        u32_be(buf, key.len() as u32);
+        buf.extend_from_slice(key);
+    }
+    fn text(buf: &mut Vec<u8>, value: &str) {
+        buf.extend_from_slice(b"TEXT");
+        let units: Vec<u16> = value.encode_utf16().collect();
+        u32_be(buf, units.len() as u32 + 1);
+        for unit in units.iter().chain([&0]) {
+            buf.extend_from_slice(&unit.to_be_bytes());
+        }
+    }
+    fn object(buf: &mut Vec<u8>, class_id: &[u8], item_count: u32) {
+        buf.extend_from_slice(b"Objc");
+        u32_be(buf, 1);
+        buf.extend_from_slice(&0u16.to_be_bytes());
+        named(buf, class_id);
+        u32_be(buf, item_count);
+    }
+    fn block(file: &mut Vec<u8>, kind: &[u8; 4], payload: &[u8]) {
+        file.extend_from_slice(b"8BIM");
+        file.extend_from_slice(kind);
+        u32_be(file, payload.len() as u32);
+        file.extend_from_slice(payload);
+        file.resize(file.len().next_multiple_of(4), 0);
+    }
+
+    let mut samp = Vec::new();
+    for &(uuid, readable) in records {
+        let (side, depth): (u32, u16) = (4, if readable { 8 } else { 0x20 });
+        let mut body = vec![b'$'];
+        body.extend_from_slice(uuid.as_bytes());
+        body.push(0);
+        body.extend_from_slice(&[0; 200]);
+        for bound in [0, 0, side, side] {
+            u32_be(&mut body, bound);
+        }
+        body.extend_from_slice(&depth.to_be_bytes());
+        body.push(0);
+        body.extend(std::iter::repeat_n(0x80, (side * side) as usize));
+        u32_be(&mut samp, body.len() as u32);
+        samp.extend_from_slice(&body);
+        samp.resize(samp.len().next_multiple_of(4), 0);
+    }
+
+    let mut desc = Vec::new();
+    u32_be(&mut desc, 16);
+    u32_be(&mut desc, 1);
+    desc.extend_from_slice(&0u16.to_be_bytes());
+    ostype(&mut desc, b"null");
+    u32_be(&mut desc, 1);
+    ostype(&mut desc, b"Brsh");
+    desc.extend_from_slice(b"VlLs");
+    u32_be(&mut desc, presets.len() as u32);
+    for preset in presets {
+        object(&mut desc, b"brushPreset", 2);
+        ostype(&mut desc, b"Nm  ");
+        match preset {
+            DescPreset::Sampled(name, uuid) => {
+                text(&mut desc, name);
+                named(&mut desc, b"sampledData");
+                text(&mut desc, uuid);
+            }
+            DescPreset::Computed(name) => {
+                text(&mut desc, name);
+                ostype(&mut desc, b"Brsh");
+                object(&mut desc, b"computedBrush", 1);
+                ostype(&mut desc, b"Dmtr");
+                desc.extend_from_slice(b"UntF#Pxl");
+                desc.extend_from_slice(&30f64.to_be_bytes());
+            }
+        }
+    }
+
+    let mut file = Vec::new();
+    file.extend_from_slice(&10u16.to_be_bytes());
+    file.extend_from_slice(&2u16.to_be_bytes());
+    if !records.is_empty() {
+        block(&mut file, b"samp", &samp);
+    }
+    block(&mut file, b"desc", &desc);
+    file
+}
+
 /// Every `.abr`, `.brush` and `.brushset` file under `directory`, recursively.
 pub fn corpus_files(directory: &Path, files: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(directory).expect("read corpus directory") {

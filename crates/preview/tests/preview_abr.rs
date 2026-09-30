@@ -1,5 +1,10 @@
-use brushkit_preview::{preview_abr, PreviewEntry, PreviewOptions, TipPreview, UnavailableReason};
+use brushkit_preview::{
+    preview_abr, PreviewEntry, PreviewOptions, PreviewSet, TipPreview, UnavailableReason,
+};
 use std::path::Path;
+
+mod common;
+use common::{desc_abr, DescPreset};
 
 const SEEDS: [&str; 2] = ["wellformed_v6_min", "wellformed_v6_patt"];
 
@@ -113,4 +118,58 @@ fn a_pack_of_one_unreadable_samp_record_is_not_an_empty_success() {
     assert_eq!(set.entries.len(), 1);
     assert_eq!(set.entries[0].name, "brush_0");
     assert!(corrupt(&set.entries[0]), "{:?}", set.entries[0].tip);
+}
+
+const TIP_A: &str = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+const TIP_B: &str = "a1b2c3d4-e5f6-7890-abcd-ef1234567891";
+const TIP_C: &str = "a1b2c3d4-e5f6-7890-abcd-ef1234567892";
+
+fn names_and_tips(set: &PreviewSet) -> Vec<(&str, String)> {
+    set.entries
+        .iter()
+        .map(|entry| {
+            let tip = match &entry.tip {
+                TipPreview::Available(_) => "available".to_string(),
+                TipPreview::Unavailable(reason) => format!("{reason:?}"),
+            };
+            (entry.name.as_str(), tip)
+        })
+        .collect()
+}
+
+#[test]
+fn named_presets_with_an_unreadable_or_missing_tip_stay_in_preset_order() {
+    let bytes = desc_abr(
+        &[(TIP_A, true), (TIP_B, false)],
+        &[
+            DescPreset::Sampled("A", TIP_A),
+            DescPreset::Sampled("B", TIP_B),
+            DescPreset::Computed("Round"),
+            DescPreset::Sampled("C", TIP_C),
+        ],
+    );
+
+    let set = preview_abr(&bytes, PreviewOptions { max_cell: 16 }).unwrap();
+
+    assert_eq!(
+        names_and_tips(&set),
+        [
+            ("A", "available".to_string()),
+            ("B", r#"Corrupt("no bitmap header found")"#.to_string()),
+            ("Round", "available".to_string()),
+            ("C", format!(r#"Corrupt("sampled tip {TIP_C} is missing")"#)),
+        ]
+    );
+}
+
+#[test]
+fn a_sampled_preset_with_no_samp_block_is_a_corrupt_entry() {
+    let bytes = desc_abr(&[], &[DescPreset::Sampled("A", TIP_A)]);
+
+    let set = preview_abr(&bytes, PreviewOptions { max_cell: 16 }).unwrap();
+
+    assert_eq!(
+        names_and_tips(&set),
+        [("A", format!(r#"Corrupt("sampled tip {TIP_A} is missing")"#))]
+    );
 }

@@ -399,7 +399,7 @@ fn abr_entry(
             }
             SampledBrush::Unavailable(brush) => {
                 let text = match &brush.cause {
-                    UnavailableTip::Missing => format!("sampled tip {} is missing", brush.id),
+                    UnavailableTip::Missing { uuid } => format!("sampled tip {uuid} is missing"),
                     UnavailableTip::Unreadable(message) => message.clone(),
                 };
                 (
