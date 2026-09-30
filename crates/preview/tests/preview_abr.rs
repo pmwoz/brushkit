@@ -1,5 +1,10 @@
-use brushkit_preview::{preview_abr, PreviewOptions, TipPreview};
+use brushkit_preview::{
+    preview_abr, PreviewEntry, PreviewOptions, PreviewSet, TipPreview, UnavailableReason,
+};
 use std::path::Path;
+
+mod common;
+use common::{desc_abr, DescPreset};
 
 const SEEDS: [&str; 2] = ["wellformed_v6_min", "wellformed_v6_patt"];
 
@@ -16,8 +21,9 @@ fn every_preset_becomes_one_entry_that_fits_the_cell() {
     for name in SEEDS {
         let bytes = seed(name);
         let pack = brushkit_abr::parse_abr(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
-        let expected =
-            pack.brushes.len() + pack.computed_presets.len() + pack.unsupported_tip_presets.len();
+        let expected = pack.sampled_brushes.len()
+            + pack.computed_presets.len()
+            + pack.unsupported_tip_presets.len();
 
         let set = preview_abr(&bytes, PreviewOptions { max_cell: 4 })
             .unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -55,5 +61,115 @@ fn a_zero_cell_is_rejected() {
     assert!(
         preview_abr(&bytes, PreviewOptions { max_cell: 0 }).is_err(),
         "max_cell 0 has no valid output size"
+    );
+}
+
+const SAMPLED_TIP: &[u8] = include_bytes!("../../../fuzz/corpus/preview_abr/sampled_tip");
+
+fn samp_records(unreadable: &[bool]) -> Vec<u8> {
+    const HEADER_AND_BLOCK_TAG: usize = 12;
+    const RECORD_START: usize = HEADER_AND_BLOCK_TAG + 4;
+    const DEPTH_IN_RECORD: usize = 24;
+    const DEPTH_NO_HEADER_ACCEPTS: u16 = 0x20;
+    let record = &SAMPLED_TIP[RECORD_START..];
+    let mut payload = Vec::new();
+    for &bad in unreadable {
+        let at = payload.len() + DEPTH_IN_RECORD;
+        payload.extend_from_slice(record);
+        if bad {
+            payload[at..at + 2].copy_from_slice(&DEPTH_NO_HEADER_ACCEPTS.to_be_bytes());
+        }
+    }
+    let mut file = SAMPLED_TIP[..HEADER_AND_BLOCK_TAG].to_vec();
+    file.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    file.extend_from_slice(&payload);
+    file
+}
+
+fn corrupt(entry: &PreviewEntry) -> bool {
+    matches!(
+        entry.tip,
+        TipPreview::Unavailable(UnavailableReason::Corrupt(_))
+    )
+}
+
+#[test]
+fn an_unreadable_samp_record_stays_a_corrupt_entry_in_its_place() {
+    let set = preview_abr(
+        &samp_records(&[false, true]),
+        PreviewOptions { max_cell: 16 },
+    )
+    .unwrap();
+
+    assert_eq!(set.entries.len(), 2, "both records are brushes");
+    assert_eq!(set.not_reached, 0);
+    let (unreadable, readable) = (&set.entries[0], &set.entries[1]);
+    assert_eq!((unreadable.index, unreadable.name.as_str()), (0, "brush_1"));
+    assert!(corrupt(unreadable), "{:?}", unreadable.tip);
+    assert_eq!(unreadable.source_dimensions, None);
+    assert_eq!((readable.index, readable.name.as_str()), (1, "brush_0"));
+    assert!(matches!(readable.tip, TipPreview::Available(_)));
+}
+
+#[test]
+fn a_pack_of_one_unreadable_samp_record_is_not_an_empty_success() {
+    let set = preview_abr(&samp_records(&[true]), PreviewOptions { max_cell: 16 }).unwrap();
+
+    assert_eq!(set.entries.len(), 1);
+    assert_eq!(set.entries[0].name, "brush_0");
+    assert!(corrupt(&set.entries[0]), "{:?}", set.entries[0].tip);
+}
+
+const TIP_A: &str = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+const TIP_B: &str = "a1b2c3d4-e5f6-7890-abcd-ef1234567891";
+const TIP_C: &str = "a1b2c3d4-e5f6-7890-abcd-ef1234567892";
+
+fn names_and_tips(set: &PreviewSet) -> Vec<(&str, String)> {
+    set.entries
+        .iter()
+        .map(|entry| {
+            let tip = match &entry.tip {
+                TipPreview::Available(_) => "available".to_string(),
+                TipPreview::Unavailable(reason) => format!("{reason:?}"),
+            };
+            (entry.name.as_str(), tip)
+        })
+        .collect()
+}
+
+#[test]
+fn named_presets_with_an_unreadable_or_missing_tip_stay_in_preset_order() {
+    let bytes = desc_abr(
+        &[(TIP_A, true), (TIP_B, false)],
+        &[
+            DescPreset::Sampled("A", TIP_A),
+            DescPreset::Sampled("B", TIP_B),
+            DescPreset::Computed("Round"),
+            DescPreset::Sampled("C", TIP_C),
+        ],
+    );
+
+    let set = preview_abr(&bytes, PreviewOptions { max_cell: 16 }).unwrap();
+
+    assert_eq!(
+        names_and_tips(&set),
+        [
+            ("A", "available".to_string()),
+            ("B", r#"Corrupt("no bitmap header found")"#.to_string()),
+            ("Round", "available".to_string()),
+            ("C", format!(r#"Corrupt("sampled tip {TIP_C} is missing")"#)),
+        ]
+    );
+}
+
+#[test]
+fn a_sampled_preset_with_no_samp_block_is_a_corrupt_entry() {
+    let bytes = desc_abr(&[], &[DescPreset::Sampled("A", TIP_A)]);
+
+    let set = preview_abr(&bytes, PreviewOptions { max_cell: 16 }).unwrap();
+
+    assert_eq!(
+        names_and_tips(&set),
+        [("A", format!(r#"Corrupt("sampled tip {TIP_A} is missing")"#))]
     );
 }

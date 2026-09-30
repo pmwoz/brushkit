@@ -22,6 +22,8 @@ pub use pattern::AbrPattern;
 #[derive(Debug, Clone)]
 pub struct AbrPack {
     pub version: AbrVersion,
+    /// Sampled brushes whose tip was read. `sampled_brushes` lists them
+    /// together with the ones whose tip is missing or unreadable.
     pub brushes: Vec<AbrBrush>,
     /// Total number of brush presets the file declares — including
     /// computed/procedural presets that carry no sampled bitmap and therefore
@@ -33,9 +35,10 @@ pub struct AbrPack {
     /// one entry per *resolvable* preset, so `preset_count >= brushes.len()`
     /// (unresolvable/computed presets are counted but not surfaced here, and
     /// dual-brush component tips in the samp block are intentionally dropped). On
-    /// the fallback path (desc missing/unparseable, or no resolvable uuids)
-    /// `brushes` holds one entry per samp bitmap, so `preset_count` may be LESS
-    /// than `brushes.len()` (bitmaps decode without descriptors). Consumers must
+    /// the fallback path (desc missing/unparseable, or no preset uuid resolves
+    /// while some samp record carries no uuid)
+    /// `brushes` holds one entry per readable samp record, so `preset_count`
+    /// may be LESS than `brushes.len()` (bitmaps decode without descriptors). Consumers must
     /// tolerate `preset_count` differing from `brushes.len()` in either direction.
     ///
     /// v1/v2: the entry count from the file header; type-1 (computed) entries are
@@ -70,11 +73,12 @@ pub struct AbrPack {
     /// brushes). Only the presets-first path produces a nonzero value; the
     /// index-fallback path and v2 files always report 0.
     pub dropped_samp_count: usize,
-    /// Presets whose `sampledData` uuid resolved to no samp bitmap (dangling
-    /// references), so they surface as neither a paired brush nor a computed
-    /// preset. Presets carrying NO uuid are excluded here (they are computed
-    /// candidates counted via `computed_presets`). Presets-first path only; 0
-    /// on the fallback path and for v2 files.
+    /// Presets whose `sampledData` uuid resolved to no samp record (dangling
+    /// references), so they surface in `sampled_brushes` as
+    /// [`UnavailableTip::Missing`] and not in `brushes`. Presets carrying NO
+    /// uuid are excluded here (they are computed candidates counted via
+    /// `computed_presets`). Presets-first path only; 0 on the fallback path
+    /// and for v2 files.
     pub skipped_preset_count: usize,
     /// Per-item detail for the dropped samp tips. Invariant:
     /// `dropped_samp_count == dropped_tip_details.len()`. Empty on the fallback
@@ -98,6 +102,21 @@ pub struct AbrPack {
     /// contain zero presets. Informative only: a failing desc block still takes
     /// the index-fallback pairing path exactly as before. v2 files always `None`.
     pub desc_parse_error: Option<String>,
+    /// Every sampled brush the pack declares: each brush in `brushes`, plus
+    /// each one whose tip is missing or unreadable, at the place it would have
+    /// had. The order is the order of `brushes`: desc order on the
+    /// presets-first path, reversed samp record order on the fallback path
+    /// and reversed entry order for v1/v2 files. A samp record no preset
+    /// references and whose tip is unreadable is not a brush and is listed in
+    /// `unreadable_tip_details` instead. A v1/v2 entry with an unknown
+    /// compression byte is skipped and appears nowhere.
+    pub sampled_brushes: Vec<SampledBrush>,
+    /// Samp records whose tip is unreadable and that no entry of
+    /// `sampled_brushes` uses, such as a dual-brush component tip: the
+    /// unreadable counterpart of `dropped_tip_details`. Presets-first path
+    /// only. On the fallback path every record is in `sampled_brushes`.
+    /// Empty for v1/v2 files.
+    pub unreadable_tip_details: Vec<UnreadableTipDetail>,
 }
 
 /// An empty pack: no brushes, no presets, no diagnostics, version `V10`.
@@ -121,6 +140,8 @@ impl Default for AbrPack {
             unsupported_tip_count: 0,
             unsupported_tip_presets: Vec::new(),
             desc_parse_error: None,
+            sampled_brushes: Vec::new(),
+            unreadable_tip_details: Vec::new(),
         }
     }
 }
@@ -143,6 +164,49 @@ pub struct DroppedTipDetail {
 pub struct SkippedPresetDetail {
     pub name: String,
     pub uuid: String,
+}
+
+/// A samp record whose tip is unreadable and that no sampled brush uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadableTipDetail {
+    pub uuid: Option<String>,
+    pub message: String,
+}
+
+/// One entry of [`AbrPack::sampled_brushes`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SampledBrush {
+    /// `brushes[i]`.
+    Readable(usize),
+    Unavailable(UnavailableBrush),
+}
+
+/// A sampled brush the pack declares whose tip cannot be read, so it is absent
+/// from `brushes`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnavailableBrush {
+    /// As [`AbrBrush::id`]: the samp uuid, with a `-N` suffix for a repeat, or
+    /// `brush_{i}`. For a [`UnavailableTip::Missing`] brush, the dangling uuid
+    /// with the same suffix.
+    pub id: String,
+    /// Preset name from the descriptor, or empty if absent.
+    pub name: String,
+    /// As [`AbrBrush::preset_index`].
+    pub preset_index: Option<usize>,
+    pub cause: UnavailableTip,
+}
+
+/// Why an [`UnavailableBrush`] has no tip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnavailableTip {
+    /// The preset names a `sampledData` uuid that no samp record carries.
+    Missing { uuid: String },
+    /// The samp record is there but its bitmap header or geometry did not
+    /// parse, or, from `parse_abr`, its pixels did not decode. A deferred
+    /// parse does not decode pixels, so it reports that last failure from
+    /// `DeferredPack::decode_tip` and lists the brush as `Readable`. Carries
+    /// the parser's message.
+    Unreadable(String),
 }
 
 /// Which Photoshop dynamic-tip family a `Shp `-carrying preset belongs to,
