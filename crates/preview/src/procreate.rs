@@ -59,7 +59,15 @@ pub fn parse_plist_guarded(bytes: &[u8], label: &str) -> Result<plist::Value, St
         return Err(format!("{label}: plist size {} exceeds limit", bytes.len()));
     }
     let mut depth: usize = 0;
+    let mut events: usize = 0;
+    let mut payload: usize = 0;
     for event in plist::stream::Reader::new(Cursor::new(bytes)) {
+        events += 1;
+        if events > MAX_PLIST_EVENTS {
+            return Err(format!(
+                "{label}: plist expands to over {MAX_PLIST_EVENTS} values"
+            ));
+        }
         match event.map_err(|e| format!("failed to parse {label}: {e}"))? {
             Event::StartArray(_) | Event::StartDictionary(_) => {
                 depth += 1;
@@ -68,7 +76,14 @@ pub fn parse_plist_guarded(bytes: &[u8], label: &str) -> Result<plist::Value, St
                 }
             }
             Event::EndCollection => depth = depth.saturating_sub(1),
+            Event::Data(data) => payload = payload.saturating_add(data.len()),
+            Event::String(string) => payload = payload.saturating_add(string.len()),
             _ => {}
+        }
+        if payload > MAX_PLIST_PAYLOAD_BYTES {
+            return Err(format!(
+                "{label}: plist expands to over {MAX_PLIST_PAYLOAD_BYTES} bytes of strings and data"
+            ));
         }
     }
     plist::Value::from_reader(Cursor::new(bytes))
