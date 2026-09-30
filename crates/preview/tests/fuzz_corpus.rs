@@ -9,8 +9,9 @@ use brushkit_preview::{
     UnavailableReason,
 };
 use common::{
-    brush_archive, brushset_plist, depth_bomb_plist_xml, dimension_bomb_png, gray_png, legacy_abr,
-    samp_abr, shared_array_values, shared_arrays_plist, shared_data_plist, zip_with, SampTip,
+    brush_archive, brushset_plist, depth_bomb_plist_xml, desc_abr, dimension_bomb_png, gray_png,
+    legacy_abr, samp_abr, shared_array_values, shared_arrays_plist, shared_data_plist, zip_with,
+    DescPreset, SampTip,
 };
 use std::collections::BTreeSet;
 use std::io::{Cursor, Read};
@@ -38,6 +39,9 @@ const _: () = {
 /// pixels vary, but every 8x8 block averages 200, so its 8x4 preview matches
 /// the other valid seeds.
 const FILTERED_SHAPE: &[u8] = include_bytes!("fixtures/filtered_shape.png");
+const TIP_A: &str = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+const TIP_B: &str = "a1b2c3d4-e5f6-7890-abcd-ef1234567891";
+const TIP_C: &str = "a1b2c3d4-e5f6-7890-abcd-ef1234567892";
 const ABR_SEEDS: [&str; 9] = [
     "patt_long_gray",
     "patt_oversized_channel",
@@ -91,6 +95,18 @@ fn generated_seeds() -> Vec<(&'static str, &'static str, Vec<u8>)> {
             "preview_abr",
             "zero_area_tip",
             legacy_abr(&[tip(1, 1), tip(0, 4)]),
+        ),
+        (
+            "preview_abr",
+            "unavailable_tips",
+            desc_abr(
+                &[(TIP_A, true), (TIP_B, false)],
+                &[
+                    DescPreset::Sampled("A", TIP_A),
+                    DescPreset::Sampled("B", TIP_B),
+                    DescPreset::Sampled("C", TIP_C),
+                ],
+            ),
         ),
     ];
     for name in ABR_SEEDS {

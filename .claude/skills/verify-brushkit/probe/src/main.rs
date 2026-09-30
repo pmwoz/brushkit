@@ -9,7 +9,7 @@
 //! Exit code: 0 when the library returned Ok, 1 when it returned Err (the
 //! error is in `summary.json`), 2 on a usage or I/O error.
 
-use brushkit::abr::{self, AbrPack};
+use brushkit::abr::{self, AbrPack, SampledBrush, UnavailableTip};
 use brushkit::preview::{
     self, ContactSheetConfig, PreviewOptions, PreviewSet, SheetBrush, TipPreview,
 };
@@ -144,6 +144,18 @@ fn pack_json(pack: &AbrPack, tip: impl Fn(usize) -> Value) -> Value {
             "preset_index": b.preset_index,
             "tip": tip(i),
         })).collect::<Vec<_>>(),
+        "sampled_brushes": pack.sampled_brushes.iter().map(|s| match s {
+            SampledBrush::Readable(i) => json!({ "readable": i }),
+            SampledBrush::Unavailable(u) => json!({ "unavailable": {
+                "id": u.id,
+                "name": u.name,
+                "preset_index": u.preset_index,
+                "cause": match &u.cause {
+                    UnavailableTip::Missing { uuid } => json!({ "missing": { "uuid": uuid } }),
+                    UnavailableTip::Unreadable(message) => json!({ "unreadable": message }),
+                },
+            }}),
+        }).collect::<Vec<_>>(),
         "computed_presets": pack.computed_presets.iter().map(|p| {
             let g = p.descriptor.computed.clone().unwrap_or_default();
             json!({

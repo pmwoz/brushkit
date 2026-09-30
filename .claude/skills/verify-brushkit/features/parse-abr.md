@@ -1,8 +1,9 @@
 # Parse an .abr pack
 
 A consumer parses a Photoshop `.abr` pack into its version, sampled brushes
-with names and tip bitmaps, computed presets, embedded patterns and a report of
-what was dropped and why. Malformed input returns an error, never a panic.
+with names and tip bitmaps, the unavailable brushes in their place among them,
+computed presets, embedded patterns and a report of what was dropped and why.
+Malformed input returns an error, never a panic.
 
 ## Sub-features
 
@@ -10,6 +11,7 @@ what was dropped and why. Malformed input returns an error, never a panic.
 - `parse-deferred` keeps tips as byte ranges and decodes them through `decode_tip`.
 - `parse-no-patterns` skips pattern payloads.
 - `parse-all-deferred` decodes no tip up front.
+- `parse-unavailable` lists every sampled brush in `sampled_brushes`, a missing or unreadable tip as an unavailable brush in its place.
 - `parse-patterns` returns embedded patterns and counts dropped ones.
 - `parse-diagnostics` reports dropped samp tips, skipped and unsupported presets and desc parse errors.
 - `parse-malformed` returns `Err` with a message for broken input.
@@ -29,6 +31,7 @@ Preconditions:
 
 - **Eager.** Run `$H run parse-eager parse "$BRUSHKIT_CORPUS_DIR/<pack>.abr"`. Exit `0`. `.result.pack.version` is `v6`, `v7` or `v10`, and every `.result.pack.brushes[].tip` has `width`, `height`, `depth` 8 or 16 and `data_len` equal to `width*height*depth/8`.
 - **Mode parity.** Run the same file with `--mode deferred`, `--mode deferred-no-patterns` and `--mode all-deferred` under three labels. `.result.pack.brushes` is identical across all four runs.
+- **Unavailable brushes.** Run `$H run seed-unavail parse fuzz/corpus/preview_abr/unavailable_tips`. Exit `0`. `.result.pack.brushes` holds only `A`. `.result.pack.sampled_brushes` is `{"readable":0}`, then `B` at `preset_index` `1` with cause `{"unreadable":"no bitmap header found"}`, then `C` at `preset_index` `2` with cause `{"missing":{"uuid":...}}` and the same uuid as its `id`. The other three modes give the same `sampled_brushes`.
 - **Patterns.** Run `$H run seed-patt parse fuzz/corpus/preview_abr/wellformed_v6_patt`. `.result.pack.patterns` is one 2x2 pattern named `tex`, mode `2`. The same seed with `--mode deferred-no-patterns` returns an empty `patterns`.
 - **Dropped pattern.** Run `$H run seed-dropped parse fuzz/corpus/preview_abr/patt_oversized_channel`. Exit `0` with `.result.pack.diagnostics.dropped_pattern_count` `1`.
 - **Dual-brush drops.** Find a corpus pack with a nonzero `dropped_samp_count` by running `--mode all-deferred` over the corpus. At least one v7 pack has `5`. `.result.pack.brushes` still lists every user-facing brush.
