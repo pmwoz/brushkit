@@ -442,6 +442,10 @@ pub fn legacy_abr(tips: &[SampTip]) -> Vec<u8> {
     file
 }
 
+pub const TIP_A: &str = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+pub const TIP_B: &str = "a1b2c3d4-e5f6-7890-abcd-ef1234567891";
+pub const TIP_C: &str = "a1b2c3d4-e5f6-7890-abcd-ef1234567892";
+
 /// One preset of [`desc_abr`].
 pub enum DescPreset<'a> {
     /// A sampled preset `(name, samp uuid)`.

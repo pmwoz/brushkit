@@ -56,6 +56,6 @@ consumer-visible behavior, then exactly four H2 sections in this order:
 - [Contact sheets and tip PNGs](./contact-sheet.md) covers
   `generate_contact_sheet_png` and `generate_preview_png`.
 - [Parse an .abr pack](./parse-abr.md) covers the four `parse_abr*` entry
-  points, patterns, diagnostics and malformed input.
+  points, unavailable brushes, patterns, diagnostics and malformed input.
 - [Descriptor dump](./descriptor-dump.md) covers `dump::dump_descriptors` with
   the `serde` feature.

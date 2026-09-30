@@ -2,6 +2,10 @@ mod common;
 #[path = "../../../fuzz/fuzz_targets/tip_shapes.rs"]
 mod tip_shapes;
 
+use brushkit_abr::{
+    parse_abr, parse_abr_all_deferred_without_patterns, SampledBrush, UnavailableBrush,
+    UnavailableTip,
+};
 use brushkit_preview::procreate::{MAX_PLIST_DEPTH, MAX_PLIST_PAYLOAD_BYTES, MAX_PLIST_VALUES};
 use brushkit_preview::{
     preview_abr, preview_abr_first_available, preview_brush, preview_brush_first_available,
@@ -9,8 +13,9 @@ use brushkit_preview::{
     UnavailableReason,
 };
 use common::{
-    brush_archive, brushset_plist, depth_bomb_plist_xml, dimension_bomb_png, gray_png, legacy_abr,
-    samp_abr, shared_array_values, shared_arrays_plist, shared_data_plist, zip_with, SampTip,
+    brush_archive, brushset_plist, depth_bomb_plist_xml, desc_abr, dimension_bomb_png, gray_png,
+    legacy_abr, samp_abr, shared_array_values, shared_arrays_plist, shared_data_plist, zip_with,
+    DescPreset, SampTip, TIP_A, TIP_B, TIP_C,
 };
 use std::collections::BTreeSet;
 use std::io::{Cursor, Read};
@@ -84,6 +89,17 @@ fn generated_seeds() -> Vec<(&'static str, &'static str, Vec<u8>)> {
     };
     // The v6 parser rejects a zero-area tip, so that seed is legacy. Its other
     // side fits max_cell: past that, downsample would widen the zero side to 1.
+    // Positions in `sampled_brushes`, preset indices and `brushes` indices
+    // differ, so a proof that mixes them up fails.
+    let unavailable_tips = desc_abr(
+        &[(TIP_A, true), (TIP_B, false)],
+        &[
+            DescPreset::Sampled("B", TIP_B),
+            DescPreset::Sampled("A", TIP_A),
+            DescPreset::Computed("Round"),
+            DescPreset::Sampled("C", TIP_C),
+        ],
+    );
     let mut seeds = vec![
         ("preview_abr", "sampled_tip", samp_abr(&[tip(16, 8)])),
         ("preview_abr", "small_tip", samp_abr(&[tip(4, 4)])),
@@ -92,6 +108,8 @@ fn generated_seeds() -> Vec<(&'static str, &'static str, Vec<u8>)> {
             "zero_area_tip",
             legacy_abr(&[tip(1, 1), tip(0, 4)]),
         ),
+        ("abr_parse", "unavailable_tips", unavailable_tips.clone()),
+        ("preview_abr", "unavailable_tips", unavailable_tips),
     ];
     for name in ABR_SEEDS {
         seeds.push((
@@ -300,6 +318,49 @@ fn valid_seeds_decode_names_order_and_downsampled_tips() {
         ),
         "zero_area_tip: {:?}",
         set.entries
+    );
+}
+
+#[test]
+fn unavailable_tips_lists_every_sampled_brush_in_place() {
+    let bytes = std::fs::read(corpus("preview_abr").join("unavailable_tips")).unwrap();
+    let unavailable = |id: &str, name: &str, preset_index, cause| {
+        SampledBrush::Unavailable(UnavailableBrush {
+            id: id.to_string(),
+            name: name.to_string(),
+            preset_index: Some(preset_index),
+            cause,
+        })
+    };
+    let expected = [
+        unavailable(
+            TIP_B,
+            "B",
+            0,
+            UnavailableTip::Unreadable("no bitmap header found".to_string()),
+        ),
+        SampledBrush::Readable(0),
+        unavailable(
+            TIP_C,
+            "C",
+            3,
+            UnavailableTip::Missing {
+                uuid: TIP_C.to_string(),
+            },
+        ),
+    ];
+
+    let eager = parse_abr(&bytes).unwrap();
+    let deferred = parse_abr_all_deferred_without_patterns(&bytes).unwrap();
+
+    assert_eq!(eager.sampled_brushes, expected);
+    assert_eq!(deferred.pack.sampled_brushes, expected);
+    assert_eq!(
+        (
+            eager.brushes[0].name.as_str(),
+            eager.brushes[0].preset_index
+        ),
+        ("A", Some(1))
     );
 }
 
