@@ -27,7 +27,8 @@ pub const MAX_PLIST_VALUES: usize = 100_000;
 /// The same census found at most 7 KiB.
 pub const MAX_PLIST_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 
-/// Reads a zip entry of at most [`MAX_ENTRY_BYTES`].
+/// Reads a zip entry of at most [`MAX_ENTRY_BYTES`]. Plist entries go through
+/// [`read_zip_plist`].
 pub fn read_zip_entry(
     zip: &mut zip::ZipArchive<Cursor<&[u8]>>,
     path: &str,
