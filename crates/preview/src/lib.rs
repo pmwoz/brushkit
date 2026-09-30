@@ -507,7 +507,7 @@ fn brushset(
     let mut zip = open_zip(bytes)?;
 
     let (set_name, prefixes) = if zip.by_name("brushset.plist").is_ok() {
-        let buf = procreate::read_zip_entry(&mut zip, "brushset.plist").map_err(PreviewError)?;
+        let buf = procreate::read_zip_plist(&mut zip, "brushset.plist").map_err(PreviewError)?;
         let (name, uuids) = procreate::parse_brushset_plist(&buf).map_err(PreviewError)?;
         (name, uuids.into_iter().map(|u| format!("{u}/")).collect())
     } else {
@@ -689,7 +689,7 @@ fn read_member(
         prefix.trim_end_matches('/').to_string()
     };
 
-    let archive = procreate::read_zip_entry(zip, &format!("{prefix}Brush.archive"))
+    let archive = procreate::read_zip_plist(zip, &format!("{prefix}Brush.archive"))
         .and_then(|buf| procreate::brush_name(&buf));
 
     let shape_path = format!("{prefix}Shape.png");
