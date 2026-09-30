@@ -1,7 +1,9 @@
 //! A binary plist may reference one object any number of times, and each
-//! reference expands into its own value. The guards must stop that before
-//! the tree is built, on both surfaces: `brushset.plist` before the first
-//! member and `Brush.archive` inside a member.
+//! reference expands into its own value. It may also declare objects and
+//! collection lengths that plist's binary reader allocates before it yields an
+//! event. The guards must stop both before they are allocated, on both
+//! surfaces: `brushset.plist` before the first member and `Brush.archive`
+//! inside a member.
 //!
 //! One test, because the counting allocator measures the whole binary.
 mod common;
@@ -32,10 +34,62 @@ const _: () = {
     let next = shared_array_values(ACCEPTED_LEVELS, ACCEPTED_FANOUT + 1);
     assert!(accepted <= MAX_PLIST_VALUES && next > MAX_PLIST_VALUES);
 };
+/// `shared_arrays_plist(1, fanout)` declares `fanout + 7` references: three
+/// dictionary pairs, the one member and the payload array. The largest fanout
+/// the value guard accepts declares one reference under the budget.
+const ACCEPTED_PAYLOAD_FANOUT: usize = MAX_PLIST_VALUES - 8;
+const _: () = {
+    assert!(shared_array_values(1, ACCEPTED_PAYLOAD_FANOUT) == MAX_PLIST_VALUES);
+    assert!(shared_array_values(1, ACCEPTED_PAYLOAD_FANOUT + 1) > MAX_PLIST_VALUES);
+};
 /// Generous for the guarded walk, which takes under a second, and far under
 /// the unbounded walk.
 const BOUNDED: Duration = Duration::from_secs(10);
 const OPTIONS: PreviewOptions = PreviewOptions { max_cell: 8 };
+
+const ARRAY: u8 = 0xA0;
+const DICTIONARY: u8 = 0xD0;
+
+/// `depth` collection headers of one kind, each declaring `count` one-byte
+/// references and each starting inside the references of the one before, then
+/// one string. Every header's references fit before the trailer, so the
+/// reader allocates them all before it yields an event.
+fn overlapping_collections(kind: u8, count: u32, depth: usize) -> Vec<u8> {
+    let mut out = b"bplist00".to_vec();
+    let mut offsets = Vec::new();
+    for i in 0..depth {
+        offsets.push(out.len() as u32);
+        out.extend_from_slice(&[kind | 0xF, 0x12]);
+        out.extend_from_slice(&count.to_be_bytes());
+        out.push((i + 1) as u8);
+    }
+    offsets.push(out.len() as u32);
+    out.extend_from_slice(&[0x51, b'x']);
+    let per_entry = if kind == DICTIONARY { 2 } else { 1 };
+    out.resize(out.len() + count as usize * per_entry, 0);
+    let table = out.len() as u64;
+    for offset in &offsets {
+        out.extend_from_slice(&offset.to_be_bytes());
+    }
+    out.extend_from_slice(&[0, 0, 0, 0, 0, 0, 4, 1]);
+    out.extend_from_slice(&(offsets.len() as u64).to_be_bytes());
+    out.extend_from_slice(&0u64.to_be_bytes());
+    out.extend_from_slice(&table.to_be_bytes());
+    out
+}
+
+/// An offset table of `count` one-byte entries, all pointing at one integer.
+fn repeated_offsets(count: usize) -> Vec<u8> {
+    let mut out = b"bplist00".to_vec();
+    out.extend_from_slice(&[0x10, 0]);
+    let table = out.len() as u64;
+    out.resize(out.len() + count, 8);
+    out.extend_from_slice(&[0, 0, 0, 0, 0, 0, 1, 1]);
+    out.extend_from_slice(&(count as u64).to_be_bytes());
+    out.extend_from_slice(&0u64.to_be_bytes());
+    out.extend_from_slice(&table.to_be_bytes());
+    out
+}
 
 fn corrupt_message(set: &PreviewSet) -> &str {
     let [entry] = set.entries.as_slice() else {
@@ -48,7 +102,7 @@ fn corrupt_message(set: &PreviewSet) -> &str {
 }
 
 #[test]
-fn shared_object_plists_are_rejected_before_expansion() {
+fn oversized_plists_are_rejected_before_they_are_allocated() {
     let data = shared_data_plist(DATA_REFS, DATA_CHUNK);
     assert!(
         data.len() < 2 * DATA_CHUNK,
@@ -62,10 +116,27 @@ fn shared_object_plists_are_rejected_before_expansion() {
     let payload_guard =
         format!("plist expands to over {MAX_PLIST_PAYLOAD_BYTES} bytes of strings and data");
     let values_guard = format!("plist expands to over {MAX_PLIST_VALUES} values");
+    let references_guard = format!("plist collections declare over {MAX_PLIST_VALUES} references");
+    let objects_guard = format!("plist declares over {MAX_PLIST_VALUES} objects");
+
+    let wide_array = overlapping_collections(ARRAY, 150_000, 1);
+    let wide_dictionary = overlapping_collections(DICTIONARY, 75_000, 1);
+    let nested_arrays = overlapping_collections(ARRAY, 125_000, 32);
+    let nested_dictionaries = overlapping_collections(DICTIONARY, 62_500, 32);
+    let offset_table = repeated_offsets(400_000);
 
     for (name, plist, guard) in [
         ("shared data", &data, &payload_guard),
         ("shared arrays", &arrays, &values_guard),
+        ("wide array", &wide_array, &references_guard),
+        ("wide dictionary", &wide_dictionary, &references_guard),
+        ("nested arrays", &nested_arrays, &references_guard),
+        (
+            "nested dictionaries",
+            &nested_dictionaries,
+            &references_guard,
+        ),
+        ("offset table", &offset_table, &objects_guard),
     ] {
         let metadata = zip_with(&[("brushset.plist", plist)]);
         let archive = zip_with(&[("Brush.archive", plist), ("Shape.png", &shape)]);
@@ -123,5 +194,26 @@ fn shared_object_plists_are_rejected_before_expansion() {
     assert!(
         growth < MAX_PLIST_PAYLOAD_BYTES,
         "largest accepted tree grew the heap by {growth} bytes"
+    );
+
+    // A plist the value guard accepts declares fewer references than it
+    // expands to values, so the reference budget never rejects it first.
+    let read = |fanout: usize| {
+        let plist = shared_arrays_plist(1, fanout);
+        preview_brushset(&zip_with(&[("brushset.plist", &plist)]), OPTIONS)
+    };
+    let set = read(ACCEPTED_PAYLOAD_FANOUT).expect("largest accepted payload reads");
+    assert_eq!(set.set_name.as_deref(), Some("Shared arrays"));
+    assert_eq!(
+        read(ACCEPTED_PAYLOAD_FANOUT + 1)
+            .expect_err("one value over")
+            .0,
+        format!("brushset.plist: {values_guard}")
+    );
+    assert_eq!(
+        read(ACCEPTED_PAYLOAD_FANOUT + 2)
+            .expect_err("one reference over")
+            .0,
+        format!("brushset.plist: {references_guard}")
     );
 }
