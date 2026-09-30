@@ -4,7 +4,7 @@ use brushkit_preview::{
 use std::path::Path;
 
 mod common;
-use common::{desc_abr, DescPreset};
+use common::{desc_abr, legacy_abr, DescPreset, SampTip};
 
 const SEEDS: [&str; 2] = ["wellformed_v6_min", "wellformed_v6_patt"];
 
@@ -118,6 +118,29 @@ fn a_pack_of_one_unreadable_samp_record_is_not_an_empty_success() {
     assert_eq!(set.entries.len(), 1);
     assert_eq!(set.entries[0].name, "brush_0");
     assert!(corrupt(&set.entries[0]), "{:?}", set.entries[0].tip);
+}
+
+#[test]
+fn a_legacy_entry_with_an_unknown_compression_stays_a_corrupt_entry_in_its_place() {
+    const COMPRESSION_IN_ENTRY: usize = 2 + 4 + 37;
+    let tip = || SampTip {
+        width: 4,
+        height: 4,
+        fill: 200,
+        corrupt: false,
+    };
+    let second_entry = legacy_abr(&[tip()]).len();
+    let mut bytes = legacy_abr(&[tip(), tip()]);
+    bytes[second_entry + COMPRESSION_IN_ENTRY] = 2;
+
+    let set = preview_abr(&bytes, PreviewOptions { max_cell: 16 }).unwrap();
+
+    assert_eq!(set.entries.len(), 2, "both entries are brushes");
+    let (unknown, readable) = (&set.entries[0], &set.entries[1]);
+    assert_eq!((unknown.index, unknown.name.as_str()), (0, "brush_1"));
+    assert!(corrupt(unknown), "{:?}", unknown.tip);
+    assert_eq!((readable.index, readable.name.as_str()), (1, "brush_0"));
+    assert!(matches!(readable.tip, TipPreview::Available(_)));
 }
 
 const TIP_A: &str = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
