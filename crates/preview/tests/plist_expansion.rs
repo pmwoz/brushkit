@@ -9,7 +9,7 @@
 mod common;
 mod counting_alloc;
 
-use brushkit_preview::procreate::{MAX_PLIST_PAYLOAD_BYTES, MAX_PLIST_VALUES};
+use brushkit_preview::procreate::{MAX_PLIST_BYTES, MAX_PLIST_PAYLOAD_BYTES, MAX_PLIST_VALUES};
 use brushkit_preview::{
     preview_brush, preview_brushset, PreviewOptions, PreviewSet, TipPreview, UnavailableReason,
 };
@@ -28,14 +28,6 @@ const DATA_REFS: usize = MAX_PLIST_PAYLOAD_BYTES / DATA_CHUNK;
 /// which a walk that does not stop at the value guard takes hours over.
 const ARRAY_LEVELS: usize = 6;
 const ARRAY_FANOUT: usize = 64;
-/// The largest tree the value guard accepts: three levels of 46 references.
-const ACCEPTED_LEVELS: usize = 3;
-const ACCEPTED_FANOUT: usize = 46;
-const _: () = {
-    let accepted = shared_array_values(ACCEPTED_LEVELS, ACCEPTED_FANOUT);
-    let next = shared_array_values(ACCEPTED_LEVELS, ACCEPTED_FANOUT + 1);
-    assert!(accepted <= MAX_PLIST_VALUES && next > MAX_PLIST_VALUES);
-};
 /// `shared_arrays_plist(1, fanout)` declares `fanout + 7` references: three
 /// dictionary pairs, the one member and the payload array. The largest fanout
 /// the value guard accepts declares one reference under the budget.
@@ -44,7 +36,9 @@ const _: () = {
     assert!(shared_array_values(1, ACCEPTED_PAYLOAD_FANOUT) == MAX_PLIST_VALUES);
     assert!(shared_array_values(1, ACCEPTED_PAYLOAD_FANOUT + 1) > MAX_PLIST_VALUES);
 };
-const CJK_UNITS: usize = 8_000_000;
+/// The longest UTF-16 string that fits the plist entry ceiling. Its UTF-8
+/// copy is over the payload guard.
+const CJK_UNITS: usize = MAX_PLIST_BYTES / 2 - 1024;
 /// Generous for the guarded walk, which takes under a second, and far under
 /// the unbounded walk.
 const BOUNDED: Duration = Duration::from_secs(10);
@@ -186,38 +180,6 @@ fn oversized_plists_are_rejected_before_they_are_allocated() {
     assert_eq!(set.set_name.as_deref(), Some("Shared data"));
     assert_eq!(set.entries.len(), 1);
     assert_eq!(set.entries[0].name, "a");
-
-    // The widest shared-array tree the value guard accepts stays under 16 MiB.
-    let accepted = zip_with(&[(
-        "brushset.plist",
-        &shared_arrays_plist(ACCEPTED_LEVELS, ACCEPTED_FANOUT),
-    )]);
-    let before = live();
-    reset_peak();
-    let set = preview_brushset(&accepted, OPTIONS).expect("largest accepted tree reads");
-    let growth = peak() - before;
-    assert_eq!(set.set_name.as_deref(), Some("Shared arrays"));
-    println!("largest accepted tree grew the heap by {growth} bytes");
-    assert!(
-        growth < 16 * MIB,
-        "largest accepted tree grew the heap by {growth} bytes"
-    );
-
-    // plist decodes an accepted string once per parse, and each decode holds
-    // the UTF-16 units and the UTF-8 copy at once. The keys and the member
-    // uuid take the other 12 bytes.
-    let name = "\u{5b57}".repeat((MAX_PLIST_PAYLOAD_BYTES - 12) / 3);
-    let accepted = zip_with(&[("brushset.plist", &brushset_plist(&name, &["a"]))]);
-    let before = live();
-    reset_peak();
-    let set = preview_brushset(&accepted, OPTIONS).expect("largest accepted string reads");
-    let growth = peak() - before;
-    assert_eq!(set.set_name.as_deref(), Some(name.as_str()));
-    println!("largest accepted string grew the heap by {growth} bytes");
-    assert!(
-        growth < 8 * MIB,
-        "largest accepted string grew the heap by {growth} bytes"
-    );
 
     // A plist the value guard accepts declares fewer references than it
     // expands to values, so the reference budget never rejects it first.

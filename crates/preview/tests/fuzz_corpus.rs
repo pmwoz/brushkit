@@ -31,9 +31,9 @@ const SEED_DEPTH: usize = MAX_PLIST_DEPTH + 1;
 /// 10 KiB.
 const SEED_DATA_CHUNK: usize = 8 * 1024;
 const SEED_DATA_REFS: usize = MAX_PLIST_PAYLOAD_BYTES / SEED_DATA_CHUNK;
-/// Three levels of 47 references expand to 6% over the value guard.
-const SEED_ARRAY_LEVELS: usize = 3;
-const SEED_ARRAY_FANOUT: usize = 47;
+/// Two levels of 100 references expand to 1% over the value guard.
+const SEED_ARRAY_LEVELS: usize = 2;
+const SEED_ARRAY_FANOUT: usize = 100;
 const _: () = {
     let values = shared_array_values(SEED_ARRAY_LEVELS, SEED_ARRAY_FANOUT);
     assert!(values > MAX_PLIST_VALUES && values < MAX_PLIST_VALUES + MAX_PLIST_VALUES / 10);
