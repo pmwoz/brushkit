@@ -13,15 +13,20 @@ use std::io::{Cursor, Read};
 /// as malformed rather than allocated from.
 pub const MAX_ENTRY_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_PNG_DIMENSION: u32 = 16384;
-pub const MAX_PLIST_BYTES: usize = 16 * 1024 * 1024;
+/// The plist entry read cap. The largest of 5803 real `Brush.archive` and
+/// `brushset.plist` files is 10164 bytes. The whole entry is held before any
+/// guard runs, and an XML plist's strings are allocated before the stream
+/// guard sees them, so this ceiling alone bounds both.
+pub const MAX_PLIST_BYTES: usize = 1024 * 1024;
 pub const MAX_PLIST_DEPTH: usize = 64;
 /// A binary plist object may be referenced any number of times, and each
 /// reference is expanded into its own value, so the tree can be far larger
 /// than the file. Every value costs a `plist::Value` slot of about 80 bytes,
-/// so this keeps the largest accepted tree near 8 MiB. A census of 5803 real
+/// and a dictionary also carries an `IndexMap` table, so a tree of one-entry
+/// dictionaries costs about 160 bytes per value. A census of 5803 real
 /// `Brush.archive` and `brushset.plist` files found at most 949 values. It
 /// also caps the objects and collection references a binary plist declares.
-pub const MAX_PLIST_VALUES: usize = 100_000;
+pub const MAX_PLIST_VALUES: usize = 10_000;
 /// The expanded string and data bytes of one plist. The same census found at
 /// most 7 KiB. Each accepted string is decoded twice, once per parse, and a
 /// UTF-16 string holds its code units and its UTF-8 copy at once, so in a
