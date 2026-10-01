@@ -176,19 +176,19 @@ fn named_presets_with_an_unreadable_or_missing_tip_stay_in_preset_order() {
             ("A", "available".to_string()),
             ("B", r#"Corrupt("no bitmap header found")"#.to_string()),
             ("Round", "available".to_string()),
-            ("C", format!(r#"Corrupt("sampled tip {TIP_C} is missing")"#)),
+            ("C", format!(r#"MissingTip {{ uuid: "{TIP_C}" }}"#)),
         ]
     );
 }
 
 #[test]
-fn a_sampled_preset_with_no_samp_block_is_a_corrupt_entry() {
+fn a_sampled_preset_with_no_samp_block_is_a_missing_tip_entry() {
     let bytes = desc_abr(&[], &[DescPreset::Sampled("A", TIP_A)]);
 
     let set = preview_abr(&bytes, PreviewOptions { max_cell: 16 }).unwrap();
 
     assert_eq!(
         names_and_tips(&set),
-        [("A", format!(r#"Corrupt("sampled tip {TIP_A} is missing")"#))]
+        [("A", format!(r#"MissingTip {{ uuid: "{TIP_A}" }}"#))]
     );
 }

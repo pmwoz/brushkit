@@ -109,6 +109,11 @@ pub enum UnavailableReason {
     NoShapePng,
     UnsupportedTipKind(String),
     Corrupt(String),
+    /// The preset names a `sampledData` uuid that no sampled tip in the file
+    /// carries. `uuid` is that uuid.
+    MissingTip {
+        uuid: String,
+    },
     /// A side over [`procreate::MAX_PNG_DIMENSION`], or a decode over
     /// [`procreate::MAX_ENTRY_BYTES`], counted as [`TipImageError::TooLarge`]
     /// describes.
@@ -281,10 +286,11 @@ struct Row {
 /// Sampled tips are decoded one at a time and downsampled immediately, so the
 /// peak footprint holds one full-size tip rather than the whole pack. Computed
 /// presets are synthesized from their geometry; a preset that declares neither
-/// is reported as an unsupported tip kind. A sampled tip that is missing, or
-/// whose samp record or pixels fail to decode, is a `Corrupt` entry, not an
-/// error for the whole preview. The exception is a raw v1 or v2 tip whose
-/// pixels run past the end of the input, which fails the whole preview.
+/// is reported as an unsupported tip kind. A sampled tip that is missing is a
+/// `MissingTip` entry, and one whose samp record or pixels fail to decode is a
+/// `Corrupt` entry. Neither is an error for the whole preview. The exception
+/// is a raw v1 or v2 tip whose pixels run past the end of the input, which
+/// fails the whole preview.
 ///
 /// Embedded pattern payloads are neither copied nor decoded.
 pub fn preview_abr(bytes: &[u8], opts: PreviewOptions) -> Result<PreviewSet, PreviewError> {
@@ -398,13 +404,17 @@ fn abr_entry(
                 )
             }
             SampledBrush::Unavailable(brush) => {
-                let text = match &brush.cause {
-                    UnavailableTip::Missing { uuid } => format!("sampled tip {uuid} is missing"),
-                    UnavailableTip::Unreadable(message) => message.clone(),
+                let reason = match &brush.cause {
+                    UnavailableTip::Missing { uuid } => {
+                        UnavailableReason::MissingTip { uuid: uuid.clone() }
+                    }
+                    UnavailableTip::Unreadable(message) => {
+                        UnavailableReason::Corrupt(message.clone())
+                    }
                 };
                 (
                     name_or_id(&brush.name, &brush.id),
-                    TipPreview::Unavailable(UnavailableReason::Corrupt(text)),
+                    TipPreview::Unavailable(reason),
                     None,
                 )
             }

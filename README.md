@@ -75,7 +75,7 @@ and run `cargo run -p brushkit --example readme`.
 brush, in file order. Every brush is in the list, including one whose tip
 cannot be drawn. That entry carries the reason instead of a bitmap, so a grid
 of thumbnails has no gaps. The reasons are `NoShapePng`, `UnsupportedTipKind`,
-`Corrupt`, `TooLarge` and `OverBudget`.
+`Corrupt`, `MissingTip`, `TooLarge` and `OverBudget`.
 
 `max_cell` sets the largest side of a preview in pixels, and it must be at
 least 1. A larger tip is scaled down, and a smaller tip keeps its size. Each
