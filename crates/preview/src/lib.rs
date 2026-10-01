@@ -104,6 +104,27 @@ pub enum TipPreview {
     Unavailable(UnavailableReason),
 }
 
+/// Why an entry has no tip.
+///
+/// This enum is not `#[non_exhaustive]`, so a consumer can match every
+/// reason. A new reason is a breaking change and is released as one under
+/// semver. An exhaustive `match` then stops compiling until it handles the
+/// new reason.
+///
+/// ```
+/// use brushkit_preview::UnavailableReason;
+///
+/// fn label(reason: &UnavailableReason) -> &'static str {
+///     match reason {
+///         UnavailableReason::NoShapePng => "no tip image",
+///         UnavailableReason::UnsupportedTipKind(_) => "unsupported tip",
+///         UnavailableReason::Corrupt(_) => "damaged tip",
+///         UnavailableReason::MissingTip { .. } => "tip missing from the file",
+///         UnavailableReason::TooLarge { .. } => "tip too large",
+///         UnavailableReason::OverBudget => "not loaded",
+///     }
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnavailableReason {
     NoShapePng,
