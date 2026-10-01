@@ -27,6 +27,9 @@ require one, it is the wrong change.
   such a test reads `BRUSHKIT_CORPUS_DIR` and is skipped when it is unset.
   Keep the synthetic fixture for the mechanics.
 - Public API changes follow semver. Consumers pin a tag.
+- Public enums are not `#[non_exhaustive]`, so a consumer's exhaustive
+  `match` reports a new variant. While the workspace is 0.x, a new variant
+  ships in a new minor version.
 - A pull request does not change the version. A release is its own commit,
   `chore: release X.Y.Z`, which bumps the version, and is followed by the tag
   `vX.Y.Z` and `cargo publish`. Release when a consumer needs the changes, not
