@@ -6,8 +6,9 @@ use brushkit_preview::{preview_brush, preview_brushset, PreviewOptions, TipPrevi
 use brushkit_preview::{preview_brush_first_available, preview_brushset_first_available};
 use brushkit_preview::{PreviewSet, UnavailableReason};
 use common::{
-    baseline_jpeg, brush_archive, corpus_files, depth_bomb_plist_xml, dimension_bomb_png, gray_png,
-    hand_written_jpeg, progressive_jpeg, real_4x4_png, rgba_dimension_bomb_png, zip_with,
+    baseline_jpeg, brush_archive, brushset_plist, corpus_files, depth_bomb_plist_xml,
+    dimension_bomb_png, gray_png, hand_written_jpeg, progressive_jpeg, real_4x4_png,
+    rgba_dimension_bomb_png, zip_with,
 };
 use std::io::{self, Cursor, Read, Write};
 use std::path::Path;
@@ -99,27 +100,91 @@ fn entry_whose_data_runs_into_the_next_entry_is_rejected() {
     );
 }
 
+const CANNOT_OPEN: &str = "cannot open: unsupported Zip archive: Compression method not supported";
+
+fn unopenable(mut zip_bytes: Vec<u8>, path: &str) -> Vec<u8> {
+    let name_len = u16::try_from(path.len()).unwrap().to_le_bytes();
+    let record = (0..zip_bytes.len())
+        .find(|&at| {
+            zip_bytes[at..].starts_with(b"PK\x01\x02")
+                && zip_bytes.get(at + 28..at + 30) == Some(&name_len[..])
+                && zip_bytes.get(at + 46..at + 46 + path.len()) == Some(path.as_bytes())
+        })
+        .expect("central-directory record");
+    zip_bytes[record + 10..record + 12].copy_from_slice(&77u16.to_le_bytes());
+    zip_bytes
+}
+
 #[test]
 fn listed_entry_that_cannot_open_reports_the_zip_error() {
-    let mut zip_bytes = zip_with(&[("a/Shape.png", &real_4x4_png())]);
-    let directory = zip_bytes
-        .windows(4)
-        .position(|window| window == b"PK\x01\x02")
-        .expect("central directory");
-    zip_bytes[directory + 10..directory + 12].copy_from_slice(&77u16.to_le_bytes());
+    let zip_bytes = unopenable(zip_with(&[("a/Shape.png", &real_4x4_png())]), "a/Shape.png");
     let mut zip = zip::ZipArchive::new(Cursor::new(&zip_bytes[..])).expect("open zip");
 
     assert_eq!(
         read_zip_entry(&mut zip, "a/Shape.png"),
-        Err(
-            "a/Shape.png: cannot open: unsupported Zip archive: Compression method not supported"
-                .to_string()
-        )
+        Err(format!("a/Shape.png: {CANNOT_OPEN}"))
     );
     assert_eq!(
         read_zip_entry(&mut zip, "b/Shape.png"),
         Err("b/Shape.png not found".to_string())
     );
+}
+
+#[test]
+fn listed_shape_png_that_cannot_open_is_corrupt() {
+    let zip_bytes = unopenable(
+        zip_with(&[
+            ("brushset.plist", &brushset_plist("Set", &["a"])),
+            ("a/Brush.archive", &brush_archive("A")),
+            ("a/Shape.png", &real_4x4_png()),
+        ]),
+        "a/Shape.png",
+    );
+
+    let set = preview_brushset(&zip_bytes, PreviewOptions { max_cell: 8 }).expect("set reads");
+    let TipPreview::Unavailable(reason) = only_tip(&set) else {
+        panic!("expected Unavailable, got {:?}", only_tip(&set));
+    };
+    assert_eq!(
+        reason,
+        &UnavailableReason::Corrupt(format!("a/Shape.png: {CANNOT_OPEN}"))
+    );
+}
+
+#[test]
+fn listed_brush_archive_that_cannot_open_is_corrupt() {
+    let zip_bytes = unopenable(
+        zip_with(&[
+            ("Brush.archive", &brush_archive("A")),
+            ("Shape.png", &real_4x4_png()),
+        ]),
+        "Brush.archive",
+    );
+
+    let set = preview_brush(&zip_bytes, PreviewOptions { max_cell: 8 }).expect("brush reads");
+    let TipPreview::Unavailable(reason) = only_tip(&set) else {
+        panic!("expected Unavailable, got {:?}", only_tip(&set));
+    };
+    assert_eq!(
+        reason,
+        &UnavailableReason::Corrupt(format!("Brush.archive: {CANNOT_OPEN}"))
+    );
+}
+
+#[test]
+fn listed_brushset_plist_that_cannot_open_fails_the_set() {
+    let zip_bytes = unopenable(
+        zip_with(&[
+            ("brushset.plist", &brushset_plist("Set", &["a"])),
+            ("a/Brush.archive", &brush_archive("A")),
+            ("a/Shape.png", &real_4x4_png()),
+        ]),
+        "brushset.plist",
+    );
+
+    let err = preview_brushset(&zip_bytes, PreviewOptions { max_cell: 8 })
+        .expect_err("an unopenable brushset.plist must fail the set");
+    assert_eq!(err.0, format!("brushset.plist: {CANNOT_OPEN}"));
 }
 
 #[test]
