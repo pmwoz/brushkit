@@ -1,6 +1,6 @@
 mod common;
 
-use brushkit_preview::procreate::{parse_plist_guarded, MAX_PNG_DIMENSION};
+use brushkit_preview::procreate::{parse_plist_guarded, read_zip_entry, MAX_PNG_DIMENSION};
 use brushkit_preview::{decode_tip_image, TipImageError, MAX_IMPORT_DIMENSION};
 use brushkit_preview::{preview_brush, preview_brushset, PreviewOptions, TipPreview};
 use brushkit_preview::{preview_brush_first_available, preview_brushset_first_available};
@@ -96,6 +96,29 @@ fn entry_whose_data_runs_into_the_next_entry_is_rejected() {
     assert!(
         err.0.contains("overlap"),
         "error must mention the overlap: {err}"
+    );
+}
+
+#[test]
+fn listed_entry_that_cannot_open_reports_the_zip_error() {
+    let mut zip_bytes = zip_with(&[("a/Shape.png", &real_4x4_png())]);
+    let directory = zip_bytes
+        .windows(4)
+        .position(|window| window == b"PK\x01\x02")
+        .expect("central directory");
+    zip_bytes[directory + 10..directory + 12].copy_from_slice(&77u16.to_le_bytes());
+    let mut zip = zip::ZipArchive::new(Cursor::new(&zip_bytes[..])).expect("open zip");
+
+    assert_eq!(
+        read_zip_entry(&mut zip, "a/Shape.png"),
+        Err(
+            "a/Shape.png: cannot open: unsupported Zip archive: Compression method not supported"
+                .to_string()
+        )
+    );
+    assert_eq!(
+        read_zip_entry(&mut zip, "b/Shape.png"),
+        Err("b/Shape.png not found".to_string())
     );
 }
 
