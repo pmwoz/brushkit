@@ -537,7 +537,7 @@ fn brushset(
     let max_cell = check_max_cell(opts)?;
     let mut zip = open_zip(bytes)?;
 
-    let (set_name, prefixes) = if zip.by_name("brushset.plist").is_ok() {
+    let (set_name, prefixes) = if zip.index_for_name("brushset.plist").is_some() {
         let buf = procreate::read_zip_plist(&mut zip, "brushset.plist").map_err(PreviewError)?;
         let (name, uuids) = procreate::parse_brushset_plist(&buf).map_err(PreviewError)?;
         (name, uuids.into_iter().map(|u| format!("{u}/")).collect())
@@ -614,7 +614,7 @@ fn brush(
     let max_cell = check_max_cell(opts)?;
     let mut zip = open_zip(bytes)?;
 
-    if zip.by_name("Brush.archive").is_err() {
+    if zip.index_for_name("Brush.archive").is_none() {
         return Err(PreviewError("Brush.archive not found".to_string()));
     }
 
@@ -724,7 +724,7 @@ fn read_member(
         .and_then(|buf| procreate::brush_name(&buf));
 
     let shape_path = format!("{prefix}Shape.png");
-    let shape = if zip.by_name(&shape_path).is_ok() {
+    let shape = if zip.index_for_name(&shape_path).is_some() {
         Some(procreate::read_zip_entry(zip, &shape_path))
     } else {
         None
