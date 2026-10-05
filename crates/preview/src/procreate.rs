@@ -63,7 +63,10 @@ fn read_capped(
     path: &str,
     limit: usize,
 ) -> Result<Vec<u8>, String> {
-    let mut file = zip.by_name(path).map_err(|_| format!("{path} not found"))?;
+    let mut file = zip.by_name(path).map_err(|e| match e {
+        zip::result::ZipError::FileNotFound => format!("{path} not found"),
+        e => format!("{path}: cannot open: {e}"),
+    })?;
     let size = file.size();
     if size > limit as u64 {
         return Err(format!("{path}: declared size {size} exceeds limit"));
