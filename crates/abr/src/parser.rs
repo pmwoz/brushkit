@@ -160,7 +160,7 @@ fn parse_abr_with(bytes: &[u8], tips: Tips, patterns: PatternMode) -> Result<Par
     let computed_presets = desc_infos
         .iter()
         .enumerate()
-        .filter(|(_, info)| info.sampled_data_uuid.is_none() && info.descriptor.computed.is_some())
+        .filter(|(_, info)| info.is_computed())
         .map(|(pi, info)| ComputedPreset {
             name: info.name.clone(),
             descriptor: info.descriptor.clone(),
@@ -524,15 +524,21 @@ fn pair_brushes(entries: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> Paired
         };
     }
 
+    let record_owners: Vec<(usize, &BrushDescInfo)> = desc_infos
+        .iter()
+        .enumerate()
+        .filter(|(_, info)| !info.is_computed())
+        .collect();
     let mut brushes = Vec::new();
     let mut tips: Vec<Option<DeferredTip>> = Vec::new();
     let mut sampled_brushes = Vec::new();
     for (i, samp) in entries.into_iter().enumerate().rev() {
         let id = samp.uuid.unwrap_or_else(|| format!("brush_{i}"));
 
-        let matched = desc_infos.get(i);
+        let owner = record_owners.get(i).copied();
+        let preset_index = owner.map(|(pi, _)| pi);
+        let matched = owner.map(|(_, info)| info);
         let name = matched.map(|info| info.name.clone()).unwrap_or_default();
-        let preset_index = matched.map(|_| i);
 
         match samp.tip {
             Ok(tip) => {
@@ -2146,8 +2152,7 @@ mod tests {
         buf.write_u32::<BigEndian>(item_count).unwrap();
     }
 
-    fn build_mixed_desc_block() -> Vec<u8> {
-        let mut buf = Vec::new();
+    fn desc_block_header(buf: &mut Vec<u8>, preset_count: u32) {
         buf.write_u32::<BigEndian>(16).unwrap();
         buf.write_u32::<BigEndian>(1).unwrap();
         buf.write_u16::<BigEndian>(0).unwrap();
@@ -2157,22 +2162,26 @@ mod tests {
         buf.write_u32::<BigEndian>(0).unwrap();
         buf.extend_from_slice(b"Brsh");
         buf.extend_from_slice(b"VlLs");
-        buf.write_u32::<BigEndian>(2).unwrap();
+        buf.write_u32::<BigEndian>(preset_count).unwrap();
+    }
 
-        desc_preset_header(&mut buf, 2);
-        desc_name(&mut buf, "Sampled");
+    fn desc_sampled_preset(buf: &mut Vec<u8>, name: &str, uuid: &str) {
+        desc_preset_header(buf, 2);
+        desc_name(buf, name);
         buf.write_u32::<BigEndian>(11).unwrap();
         buf.extend_from_slice(b"sampledData");
         buf.extend_from_slice(b"TEXT");
-        let u: Vec<u16> = MIXED_UUID.encode_utf16().collect();
+        let u: Vec<u16> = uuid.encode_utf16().collect();
         buf.write_u32::<BigEndian>(u.len() as u32 + 1).unwrap();
         for c in &u {
             buf.write_u16::<BigEndian>(*c).unwrap();
         }
         buf.write_u16::<BigEndian>(0).unwrap();
+    }
 
-        desc_preset_header(&mut buf, 2);
-        desc_name(&mut buf, "Computed");
+    fn desc_computed_preset(buf: &mut Vec<u8>, name: &str) {
+        desc_preset_header(buf, 2);
+        desc_name(buf, name);
         buf.write_u32::<BigEndian>(0).unwrap();
         buf.extend_from_slice(b"Brsh");
         buf.extend_from_slice(b"Objc");
@@ -2181,13 +2190,66 @@ mod tests {
         buf.write_u32::<BigEndian>(13).unwrap();
         buf.extend_from_slice(b"computedBrush");
         buf.write_u32::<BigEndian>(5).unwrap();
-        desc_unit(&mut buf, b"Dmtr", b"#Pxl", 30.0);
-        desc_unit(&mut buf, b"Hrdn", b"#Prc", 80.0);
-        desc_unit(&mut buf, b"Angl", b"#Ang", 45.0);
-        desc_unit(&mut buf, b"Rndn", b"#Prc", 60.0);
-        desc_unit(&mut buf, b"Spcn", b"#Prc", 25.0);
+        desc_unit(buf, b"Dmtr", b"#Pxl", 30.0);
+        desc_unit(buf, b"Hrdn", b"#Prc", 80.0);
+        desc_unit(buf, b"Angl", b"#Ang", 45.0);
+        desc_unit(buf, b"Rndn", b"#Prc", 60.0);
+        desc_unit(buf, b"Spcn", b"#Prc", 25.0);
+    }
 
+    fn build_mixed_desc_block() -> Vec<u8> {
+        let mut buf = Vec::new();
+        desc_block_header(&mut buf, 2);
+        desc_sampled_preset(&mut buf, "Sampled", MIXED_UUID);
+        desc_computed_preset(&mut buf, "Computed");
         buf
+    }
+
+    #[test]
+    fn fallback_pairs_no_record_with_a_computed_preset() {
+        let mut desc = Vec::new();
+        desc_block_header(&mut desc, 2);
+        desc_computed_preset(&mut desc, "Computed");
+        desc_sampled_preset(&mut desc, "Sampled", MIXED_UUID);
+        let entry = build_simple_entry(4, 4, 8, 0xAB);
+        let mut d = Vec::new();
+        d.write_u16::<BigEndian>(6).unwrap();
+        d.write_u16::<BigEndian>(1).unwrap();
+        d.extend_from_slice(b"8BIM");
+        d.extend_from_slice(b"samp");
+        d.write_u32::<BigEndian>(entry.len() as u32 + 4).unwrap();
+        d.write_u32::<BigEndian>(entry.len() as u32).unwrap();
+        d.extend_from_slice(&entry);
+        d.resize(d.len().next_multiple_of(4), 0);
+        d.extend_from_slice(b"8BIM");
+        d.extend_from_slice(b"desc");
+        d.write_u32::<BigEndian>(desc.len() as u32).unwrap();
+        d.extend_from_slice(&desc);
+        let pack = parse_abr(&d).unwrap();
+
+        assert_eq!(pack.computed_presets.len(), 1);
+        assert_eq!(pack.computed_presets[0].name, "Computed");
+        let computed: Vec<usize> = pack
+            .computed_presets
+            .iter()
+            .filter_map(|c| c.preset_index)
+            .collect();
+        let sampled: Vec<usize> = pack
+            .sampled_brushes
+            .iter()
+            .filter_map(|b| match b {
+                SampledBrush::Readable(i) => pack.brushes[*i].preset_index,
+                SampledBrush::Unavailable(u) => u.preset_index,
+            })
+            .collect();
+        assert!(
+            sampled.iter().all(|pi| !computed.contains(pi)),
+            "sampled {sampled:?} and computed {computed:?} share a preset index"
+        );
+        assert_eq!(pack.brushes.len(), 1);
+        assert_eq!(pack.brushes[0].name, "Sampled");
+        assert_eq!(pack.brushes[0].preset_index, Some(1));
+        assert!(pack.brushes[0].descriptor.computed.is_none());
     }
 
     #[test]
@@ -2687,6 +2749,88 @@ mod tests {
         let root = std::path::PathBuf::from(std::env::var_os("BRUSHKIT_CORPUS_DIR")?);
         let path = root.join(relative);
         path.is_file().then_some(path)
+    }
+
+    fn corpus_abr_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                corpus_abr_files(&path, out);
+            } else if path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("abr"))
+            {
+                out.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn corpus_computed_presets_own_no_samp_record() {
+        let Some(root) = std::env::var_os("BRUSHKIT_CORPUS_DIR").map(std::path::PathBuf::from)
+        else {
+            println!("skip: BRUSHKIT_CORPUS_DIR unset");
+            return;
+        };
+        let mut files = Vec::new();
+        corpus_abr_files(&root, &mut files);
+        files.sort();
+        let (mut packs, mut records_checked, mut computed) = (0, 0, 0);
+        for path in &files {
+            let name = path.strip_prefix(&root).unwrap_or(path).display();
+            let bytes = std::fs::read(path).unwrap();
+            let mut cursor = Cursor::new(bytes.as_slice());
+            let Ok((version, subversion)) = read_header(&mut cursor) else {
+                continue;
+            };
+            if matches!(version, AbrVersion::V1 | AbrVersion::V2) {
+                continue;
+            }
+            let blocks = read_blocks(&mut cursor, PatternMode::Skip).unwrap();
+            let mut records = Vec::new();
+            let mut infos = Vec::new();
+            for block in &blocks {
+                match block.block_type.as_str() {
+                    "samp" => records.extend(parse_samp_block(
+                        block.data,
+                        version,
+                        subversion,
+                        TipMode::Deferred { block_start: 0 },
+                    )),
+                    "desc" => infos.extend(extract_all_brush_info_inner(block.data).unwrap()),
+                    _ => {}
+                }
+            }
+            let pack_computed = infos.iter().filter(|info| info.is_computed()).count();
+            if pack_computed == 0 {
+                continue;
+            }
+            let named: HashSet<&str> = infos
+                .iter()
+                .flat_map(|info| [&info.sampled_data_uuid, &info.dual_brush_uuid])
+                .filter_map(|uuid| uuid.as_deref())
+                .collect();
+            for (i, record) in records.iter().enumerate() {
+                let uuid = record.uuid.as_deref();
+                assert!(
+                    uuid.is_some_and(|uuid| named.contains(uuid)),
+                    "{name}: samp record {i} ({uuid:?}) is named by no preset"
+                );
+            }
+            packs += 1;
+            records_checked += records.len();
+            computed += pack_computed;
+        }
+        assert!(
+            packs > 0 || files.is_empty(),
+            "no corpus pack has a computed preset, so this witnesses nothing"
+        );
+        println!(
+            "checked {records_checked} samp record(s) in {packs} pack(s) with {computed} computed preset(s)"
+        );
     }
 
     #[test]

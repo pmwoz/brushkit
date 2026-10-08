@@ -47,6 +47,12 @@ pub struct BrushDescInfo {
     pub descriptor: crate::BrushDescriptor,
 }
 
+impl BrushDescInfo {
+    pub fn is_computed(&self) -> bool {
+        self.sampled_data_uuid.is_none() && self.descriptor.computed.is_some()
+    }
+}
+
 #[cfg(test)]
 pub fn extract_all_brush_info(data: &[u8]) -> Vec<BrushDescInfo> {
     extract_all_brush_info_inner(data).unwrap_or_default()

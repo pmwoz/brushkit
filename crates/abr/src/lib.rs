@@ -48,6 +48,8 @@ pub struct AbrPack {
     /// Computed/procedural presets: they carry tip geometry but no sampled
     /// bitmap, so they are counted by `preset_count` yet absent from `brushes`.
     /// Empty for v2 files. A consumer synthesizes tips from this geometry.
+    /// A computed preset owns no samp record, so its `preset_index` is never
+    /// the `preset_index` of an entry in `sampled_brushes`.
     pub computed_presets: Vec<ComputedPreset>,
     /// Texture patterns embedded in the `patt` block (`AbrPattern`), keyed by
     /// UUID. Empty when the block is absent or empty. A consumer matches these
