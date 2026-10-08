@@ -524,11 +524,16 @@ fn pair_brushes(entries: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> Paired
         };
     }
 
-    let record_owners: Vec<(usize, &BrushDescInfo)> = desc_infos
+    let mut record_owners: Vec<(usize, &BrushDescInfo)> = desc_infos
         .iter()
         .enumerate()
         .filter(|(_, info)| !info.is_computed())
         .collect();
+    // A surplus record is a dual-brush or unreferenced tip at an unknown
+    // position, so pairing by position would misname every record after it.
+    if entries.len() > record_owners.len() {
+        record_owners.clear();
+    }
     let mut brushes = Vec::new();
     let mut tips: Vec<Option<DeferredTip>> = Vec::new();
     let mut sampled_brushes = Vec::new();
@@ -1894,6 +1899,36 @@ mod tests {
             [
                 SampledBrush::Readable(0),
                 unavailable("brush_1", "B", Some(1), unreadable()),
+                SampledBrush::Readable(1),
+            ]
+        );
+    }
+
+    #[test]
+    fn fallback_pairs_no_record_when_records_outnumber_owners() {
+        let bitmaps = vec![samp(None), unreadable_samp(None), samp(None)];
+        let infos = vec![
+            info("A", Some("uuid-a-dangling"), Some(40.0)),
+            info("B", Some("uuid-b-dangling"), Some(60.0)),
+        ];
+        let PairedBrushes {
+            brushes,
+            sampled_brushes,
+            ..
+        } = pair_brushes(bitmaps, &infos);
+        let paired: Vec<_> = brushes
+            .iter()
+            .map(|b| (b.id.as_str(), b.name.as_str(), b.preset_index))
+            .collect();
+        assert_eq!(paired, [("brush_2", "", None), ("brush_0", "", None)]);
+        assert!(brushes
+            .iter()
+            .all(|b| b.descriptor == BrushDescriptor::default()));
+        assert_eq!(
+            sampled_brushes,
+            [
+                SampledBrush::Readable(0),
+                unavailable("brush_1", "", None, unreadable()),
                 SampledBrush::Readable(1),
             ]
         );

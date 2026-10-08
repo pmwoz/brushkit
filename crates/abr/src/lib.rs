@@ -24,6 +24,13 @@ pub struct AbrPack {
     pub version: AbrVersion,
     /// Sampled brushes whose tip was read. `sampled_brushes` lists them
     /// together with the ones whose tip is missing or unreadable.
+    ///
+    /// On the fallback path (see `preset_count`), samp record `i` pairs with
+    /// the `i`-th preset that is not computed, but only when the pack holds no
+    /// more records, readable or not, than such presets. A surplus record can
+    /// be a dual-brush tip at any position. Otherwise no record is paired:
+    /// every entry of `brushes` and `sampled_brushes` has an empty name and no
+    /// `preset_index`, and every brush has a default descriptor.
     pub brushes: Vec<AbrBrush>,
     /// Total number of brush presets the file declares — including
     /// computed/procedural presets that carry no sampled bitmap and therefore
