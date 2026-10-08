@@ -2146,8 +2146,7 @@ mod tests {
         buf.write_u32::<BigEndian>(item_count).unwrap();
     }
 
-    fn build_mixed_desc_block() -> Vec<u8> {
-        let mut buf = Vec::new();
+    fn desc_block_header(buf: &mut Vec<u8>, preset_count: u32) {
         buf.write_u32::<BigEndian>(16).unwrap();
         buf.write_u32::<BigEndian>(1).unwrap();
         buf.write_u16::<BigEndian>(0).unwrap();
@@ -2157,22 +2156,26 @@ mod tests {
         buf.write_u32::<BigEndian>(0).unwrap();
         buf.extend_from_slice(b"Brsh");
         buf.extend_from_slice(b"VlLs");
-        buf.write_u32::<BigEndian>(2).unwrap();
+        buf.write_u32::<BigEndian>(preset_count).unwrap();
+    }
 
-        desc_preset_header(&mut buf, 2);
-        desc_name(&mut buf, "Sampled");
+    fn desc_sampled_preset(buf: &mut Vec<u8>, name: &str, uuid: &str) {
+        desc_preset_header(buf, 2);
+        desc_name(buf, name);
         buf.write_u32::<BigEndian>(11).unwrap();
         buf.extend_from_slice(b"sampledData");
         buf.extend_from_slice(b"TEXT");
-        let u: Vec<u16> = MIXED_UUID.encode_utf16().collect();
+        let u: Vec<u16> = uuid.encode_utf16().collect();
         buf.write_u32::<BigEndian>(u.len() as u32 + 1).unwrap();
         for c in &u {
             buf.write_u16::<BigEndian>(*c).unwrap();
         }
         buf.write_u16::<BigEndian>(0).unwrap();
+    }
 
-        desc_preset_header(&mut buf, 2);
-        desc_name(&mut buf, "Computed");
+    fn desc_computed_preset(buf: &mut Vec<u8>, name: &str) {
+        desc_preset_header(buf, 2);
+        desc_name(buf, name);
         buf.write_u32::<BigEndian>(0).unwrap();
         buf.extend_from_slice(b"Brsh");
         buf.extend_from_slice(b"Objc");
@@ -2181,13 +2184,66 @@ mod tests {
         buf.write_u32::<BigEndian>(13).unwrap();
         buf.extend_from_slice(b"computedBrush");
         buf.write_u32::<BigEndian>(5).unwrap();
-        desc_unit(&mut buf, b"Dmtr", b"#Pxl", 30.0);
-        desc_unit(&mut buf, b"Hrdn", b"#Prc", 80.0);
-        desc_unit(&mut buf, b"Angl", b"#Ang", 45.0);
-        desc_unit(&mut buf, b"Rndn", b"#Prc", 60.0);
-        desc_unit(&mut buf, b"Spcn", b"#Prc", 25.0);
+        desc_unit(buf, b"Dmtr", b"#Pxl", 30.0);
+        desc_unit(buf, b"Hrdn", b"#Prc", 80.0);
+        desc_unit(buf, b"Angl", b"#Ang", 45.0);
+        desc_unit(buf, b"Rndn", b"#Prc", 60.0);
+        desc_unit(buf, b"Spcn", b"#Prc", 25.0);
+    }
 
+    fn build_mixed_desc_block() -> Vec<u8> {
+        let mut buf = Vec::new();
+        desc_block_header(&mut buf, 2);
+        desc_sampled_preset(&mut buf, "Sampled", MIXED_UUID);
+        desc_computed_preset(&mut buf, "Computed");
         buf
+    }
+
+    #[test]
+    fn fallback_pairs_no_record_with_a_computed_preset() {
+        let mut desc = Vec::new();
+        desc_block_header(&mut desc, 2);
+        desc_computed_preset(&mut desc, "Computed");
+        desc_sampled_preset(&mut desc, "Sampled", MIXED_UUID);
+        let entry = build_simple_entry(4, 4, 8, 0xAB);
+        let mut d = Vec::new();
+        d.write_u16::<BigEndian>(6).unwrap();
+        d.write_u16::<BigEndian>(1).unwrap();
+        d.extend_from_slice(b"8BIM");
+        d.extend_from_slice(b"samp");
+        d.write_u32::<BigEndian>(entry.len() as u32 + 4).unwrap();
+        d.write_u32::<BigEndian>(entry.len() as u32).unwrap();
+        d.extend_from_slice(&entry);
+        d.resize(d.len().next_multiple_of(4), 0);
+        d.extend_from_slice(b"8BIM");
+        d.extend_from_slice(b"desc");
+        d.write_u32::<BigEndian>(desc.len() as u32).unwrap();
+        d.extend_from_slice(&desc);
+        let pack = parse_abr(&d).unwrap();
+
+        assert_eq!(pack.computed_presets.len(), 1);
+        assert_eq!(pack.computed_presets[0].name, "Computed");
+        let computed: Vec<usize> = pack
+            .computed_presets
+            .iter()
+            .filter_map(|c| c.preset_index)
+            .collect();
+        let sampled: Vec<usize> = pack
+            .sampled_brushes
+            .iter()
+            .filter_map(|b| match b {
+                SampledBrush::Readable(i) => pack.brushes[*i].preset_index,
+                SampledBrush::Unavailable(u) => u.preset_index,
+            })
+            .collect();
+        assert!(
+            sampled.iter().all(|pi| !computed.contains(pi)),
+            "sampled {sampled:?} and computed {computed:?} share a preset index"
+        );
+        assert_eq!(pack.brushes.len(), 1);
+        assert_eq!(pack.brushes[0].name, "Sampled");
+        assert_eq!(pack.brushes[0].preset_index, Some(1));
+        assert!(pack.brushes[0].descriptor.computed.is_none());
     }
 
     #[test]
