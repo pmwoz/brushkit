@@ -1900,6 +1900,36 @@ mod tests {
     }
 
     #[test]
+    fn fallback_pairs_no_record_when_records_outnumber_owners() {
+        let bitmaps = vec![samp(None), unreadable_samp(None), samp(None)];
+        let infos = vec![
+            info("A", Some("uuid-a-dangling"), Some(40.0)),
+            info("B", Some("uuid-b-dangling"), Some(60.0)),
+        ];
+        let PairedBrushes {
+            brushes,
+            sampled_brushes,
+            ..
+        } = pair_brushes(bitmaps, &infos);
+        let paired: Vec<_> = brushes
+            .iter()
+            .map(|b| (b.id.as_str(), b.name.as_str(), b.preset_index))
+            .collect();
+        assert_eq!(paired, [("brush_2", "", None), ("brush_0", "", None)]);
+        assert!(brushes
+            .iter()
+            .all(|b| b.descriptor == BrushDescriptor::default()));
+        assert_eq!(
+            sampled_brushes,
+            [
+                SampledBrush::Readable(0),
+                unavailable("brush_1", "", None, unreadable()),
+                SampledBrush::Readable(1),
+            ]
+        );
+    }
+
+    #[test]
     fn preset_naming_an_unreadable_record_is_an_unavailable_brush() {
         let bitmaps = vec![samp(Some("uuid-a")), unreadable_samp(Some("uuid-b"))];
         let infos = vec![
