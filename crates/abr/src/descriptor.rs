@@ -47,9 +47,20 @@ pub struct BrushDescInfo {
     pub descriptor: crate::BrushDescriptor,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresetTip<'a> {
+    Sampled(&'a str),
+    Computed,
+    Unsupported,
+}
+
 impl BrushDescInfo {
-    pub fn is_computed(&self) -> bool {
-        self.sampled_data_uuid.is_none() && self.descriptor.computed.is_some()
+    pub fn tip(&self) -> PresetTip<'_> {
+        match (&self.sampled_data_uuid, &self.descriptor.computed) {
+            (Some(uuid), _) => PresetTip::Sampled(uuid),
+            (None, Some(_)) => PresetTip::Computed,
+            (None, None) => PresetTip::Unsupported,
+        }
     }
 }
 
