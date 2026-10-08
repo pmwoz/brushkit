@@ -160,7 +160,7 @@ fn parse_abr_with(bytes: &[u8], tips: Tips, patterns: PatternMode) -> Result<Par
     let computed_presets = desc_infos
         .iter()
         .enumerate()
-        .filter(|(_, info)| info.sampled_data_uuid.is_none() && info.descriptor.computed.is_some())
+        .filter(|(_, info)| info.is_computed())
         .map(|(pi, info)| ComputedPreset {
             name: info.name.clone(),
             descriptor: info.descriptor.clone(),
@@ -524,15 +524,21 @@ fn pair_brushes(entries: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> Paired
         };
     }
 
+    let record_owners: Vec<usize> = desc_infos
+        .iter()
+        .enumerate()
+        .filter(|(_, info)| !info.is_computed())
+        .map(|(pi, _)| pi)
+        .collect();
     let mut brushes = Vec::new();
     let mut tips: Vec<Option<DeferredTip>> = Vec::new();
     let mut sampled_brushes = Vec::new();
     for (i, samp) in entries.into_iter().enumerate().rev() {
         let id = samp.uuid.unwrap_or_else(|| format!("brush_{i}"));
 
-        let matched = desc_infos.get(i);
+        let preset_index = record_owners.get(i).copied();
+        let matched = preset_index.map(|pi| &desc_infos[pi]);
         let name = matched.map(|info| info.name.clone()).unwrap_or_default();
-        let preset_index = matched.map(|_| i);
 
         match samp.tip {
             Ok(tip) => {
