@@ -524,11 +524,10 @@ fn pair_brushes(entries: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> Paired
         };
     }
 
-    let record_owners: Vec<usize> = desc_infos
+    let record_owners: Vec<(usize, &BrushDescInfo)> = desc_infos
         .iter()
         .enumerate()
         .filter(|(_, info)| !info.is_computed())
-        .map(|(pi, _)| pi)
         .collect();
     let mut brushes = Vec::new();
     let mut tips: Vec<Option<DeferredTip>> = Vec::new();
@@ -536,8 +535,9 @@ fn pair_brushes(entries: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> Paired
     for (i, samp) in entries.into_iter().enumerate().rev() {
         let id = samp.uuid.unwrap_or_else(|| format!("brush_{i}"));
 
-        let preset_index = record_owners.get(i).copied();
-        let matched = preset_index.map(|pi| &desc_infos[pi]);
+        let owner = record_owners.get(i).copied();
+        let preset_index = owner.map(|(pi, _)| pi);
+        let matched = owner.map(|(_, info)| info);
         let name = matched.map(|info| info.name.clone()).unwrap_or_default();
 
         match samp.tip {
@@ -2749,6 +2749,88 @@ mod tests {
         let root = std::path::PathBuf::from(std::env::var_os("BRUSHKIT_CORPUS_DIR")?);
         let path = root.join(relative);
         path.is_file().then_some(path)
+    }
+
+    fn corpus_abr_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                corpus_abr_files(&path, out);
+            } else if path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("abr"))
+            {
+                out.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn corpus_computed_presets_own_no_samp_record() {
+        let Some(root) = std::env::var_os("BRUSHKIT_CORPUS_DIR").map(std::path::PathBuf::from)
+        else {
+            println!("skip: BRUSHKIT_CORPUS_DIR unset");
+            return;
+        };
+        let mut files = Vec::new();
+        corpus_abr_files(&root, &mut files);
+        files.sort();
+        let (mut packs, mut records_checked, mut computed) = (0, 0, 0);
+        for path in &files {
+            let name = path.strip_prefix(&root).unwrap_or(path).display();
+            let bytes = std::fs::read(path).unwrap();
+            let mut cursor = Cursor::new(bytes.as_slice());
+            let Ok((version, subversion)) = read_header(&mut cursor) else {
+                continue;
+            };
+            if matches!(version, AbrVersion::V1 | AbrVersion::V2) {
+                continue;
+            }
+            let blocks = read_blocks(&mut cursor, PatternMode::Skip).unwrap();
+            let mut records = Vec::new();
+            let mut infos = Vec::new();
+            for block in &blocks {
+                match block.block_type.as_str() {
+                    "samp" => records.extend(parse_samp_block(
+                        block.data,
+                        version,
+                        subversion,
+                        TipMode::Deferred { block_start: 0 },
+                    )),
+                    "desc" => infos.extend(extract_all_brush_info_inner(block.data).unwrap()),
+                    _ => {}
+                }
+            }
+            let pack_computed = infos.iter().filter(|info| info.is_computed()).count();
+            if pack_computed == 0 {
+                continue;
+            }
+            let named: HashSet<&str> = infos
+                .iter()
+                .flat_map(|info| [&info.sampled_data_uuid, &info.dual_brush_uuid])
+                .filter_map(|uuid| uuid.as_deref())
+                .collect();
+            for (i, record) in records.iter().enumerate() {
+                let uuid = record.uuid.as_deref();
+                assert!(
+                    uuid.is_some_and(|uuid| named.contains(uuid)),
+                    "{name}: samp record {i} ({uuid:?}) is named by no preset"
+                );
+            }
+            packs += 1;
+            records_checked += records.len();
+            computed += pack_computed;
+        }
+        assert!(
+            packs > 0 || files.is_empty(),
+            "no corpus pack has a computed preset, so this witnesses nothing"
+        );
+        println!(
+            "checked {records_checked} samp record(s) in {packs} pack(s) with {computed} computed preset(s)"
+        );
     }
 
     #[test]

@@ -48,8 +48,6 @@ pub struct BrushDescInfo {
 }
 
 impl BrushDescInfo {
-    /// A preset that draws its tip from computed geometry. It names no samp
-    /// record and owns none.
     pub fn is_computed(&self) -> bool {
         self.sampled_data_uuid.is_none() && self.descriptor.computed.is_some()
     }
