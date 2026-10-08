@@ -524,11 +524,16 @@ fn pair_brushes(entries: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> Paired
         };
     }
 
-    let record_owners: Vec<(usize, &BrushDescInfo)> = desc_infos
+    let mut record_owners: Vec<(usize, &BrushDescInfo)> = desc_infos
         .iter()
         .enumerate()
         .filter(|(_, info)| !info.is_computed())
         .collect();
+    // A surplus record is a dual-brush or unreferenced tip at an unknown
+    // position, so pairing by position would misname every record after it.
+    if entries.len() > record_owners.len() {
+        record_owners.clear();
+    }
     let mut brushes = Vec::new();
     let mut tips: Vec<Option<DeferredTip>> = Vec::new();
     let mut sampled_brushes = Vec::new();
