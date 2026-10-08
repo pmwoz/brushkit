@@ -2158,6 +2158,21 @@ mod tests {
 
     const MIXED_UUID: &str = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
 
+    #[test]
+    fn fallback_pairs_no_record_when_an_unsupported_tip_preset_leaves_too_few_owners() {
+        let bitmaps = vec![samp(None), samp(None)];
+        let infos = vec![
+            info("A", Some("uuid-a-dangling"), None),
+            info("B", None, None),
+        ];
+        let PairedBrushes { brushes, .. } = pair_brushes(bitmaps, &infos);
+        let paired: Vec<_> = brushes
+            .iter()
+            .map(|b| (b.id.as_str(), b.name.as_str(), b.preset_index))
+            .collect();
+        assert_eq!(paired, [("brush_1", "", None), ("brush_0", "", None)]);
+    }
+
     fn desc_unit(buf: &mut Vec<u8>, key: &[u8; 4], unit: &[u8; 4], val: f64) {
         buf.write_u32::<BigEndian>(0).unwrap();
         buf.extend_from_slice(key);
@@ -2285,6 +2300,51 @@ mod tests {
         assert_eq!(pack.brushes[0].name, "Sampled");
         assert_eq!(pack.brushes[0].preset_index, Some(1));
         assert!(pack.brushes[0].descriptor.computed.is_none());
+    }
+
+    #[test]
+    fn fallback_pairs_no_record_with_an_unsupported_tip_preset() {
+        let mut desc = Vec::new();
+        desc_block_header(&mut desc, 3);
+        desc_sampled_preset(&mut desc, "A", "11111111-1111-1111-1111-111111111111");
+        desc_preset_header(&mut desc, 1);
+        desc_name(&mut desc, "B");
+        desc_sampled_preset(&mut desc, "C", "33333333-3333-3333-3333-333333333333");
+        let mut samp = Vec::new();
+        push_framed(&mut samp, &build_simple_entry(4, 4, 8, 0xAB));
+        push_framed(&mut samp, &build_simple_entry(8, 8, 8, 0xCD));
+        let mut d = Vec::new();
+        d.write_u16::<BigEndian>(6).unwrap();
+        d.write_u16::<BigEndian>(1).unwrap();
+        push_block(&mut d, b"samp", &samp);
+        push_block(&mut d, b"desc", &desc);
+        let pack = parse_abr(&d).unwrap();
+
+        let unsupported: Vec<(&str, usize)> = pack
+            .unsupported_tip_presets
+            .iter()
+            .map(|p| (p.name.as_str(), p.preset_index))
+            .collect();
+        assert_eq!(unsupported, [("B", 1)]);
+        let unsupported: Vec<usize> = unsupported.iter().map(|&(_, pi)| pi).collect();
+        let sampled: Vec<usize> = pack
+            .sampled_brushes
+            .iter()
+            .filter_map(|b| match b {
+                SampledBrush::Readable(i) => pack.brushes[*i].preset_index,
+                SampledBrush::Unavailable(u) => u.preset_index,
+            })
+            .collect();
+        assert!(
+            sampled.iter().all(|pi| !unsupported.contains(pi)),
+            "sampled {sampled:?} and unsupported {unsupported:?} share a preset index"
+        );
+        let paired: Vec<_> = pack
+            .brushes
+            .iter()
+            .map(|b| (b.tip.width, b.name.as_str(), b.preset_index))
+            .collect();
+        assert_eq!(paired, [(8, "C", Some(2)), (4, "A", Some(0))]);
     }
 
     #[test]
