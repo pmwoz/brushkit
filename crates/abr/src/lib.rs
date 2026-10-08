@@ -26,8 +26,9 @@ pub struct AbrPack {
     /// together with the ones whose tip is missing or unreadable.
     ///
     /// On the fallback path (see `preset_count`), samp record `i` pairs with
-    /// the `i`-th preset that is not computed, but only when the pack holds no
-    /// more records, readable or not, than such presets. A surplus record can
+    /// the `i`-th preset that has a `sampledData` uuid, but only when the pack
+    /// holds no more records, readable or not, than such presets. A computed
+    /// preset and an unsupported-tip preset own no record. A surplus record can
     /// be a dual-brush tip at any position. Otherwise no record is paired:
     /// every entry of `brushes` and `sampled_brushes` has an empty name and no
     /// `preset_index`, and every brush has a default descriptor.
@@ -85,8 +86,8 @@ pub struct AbrPack {
     /// Presets whose `sampledData` uuid resolved to no samp record (dangling
     /// references), so they surface in `sampled_brushes` as
     /// [`UnavailableTip::Missing`] and not in `brushes`. Presets carrying NO
-    /// uuid are excluded here (they are computed candidates counted via
-    /// `computed_presets`). Presets-first path only; 0 on the fallback path
+    /// uuid are excluded here (they are counted via `computed_presets` or
+    /// `unsupported_tip_presets`). Presets-first path only; 0 on the fallback path
     /// and for v2 files.
     pub skipped_preset_count: usize,
     /// Per-item detail for the dropped samp tips. Invariant:
@@ -104,7 +105,9 @@ pub struct AbrPack {
     pub unsupported_tip_count: usize,
     /// Per-item detail for the unsupported-tip presets. Invariant:
     /// `unsupported_tip_count == unsupported_tip_presets.len()`. Empty for v2
-    /// files.
+    /// files. An unsupported-tip preset owns no samp record, so its
+    /// `preset_index` is never the `preset_index` of an entry in
+    /// `sampled_brushes`.
     pub unsupported_tip_presets: Vec<UnsupportedTipPresetDetail>,
     /// `Some(message)` when a `desc` block failed to parse (first failing block
     /// wins), `None` for well-formed files and for desc blocks that legitimately

@@ -26,7 +26,7 @@ use std::collections::HashSet;
 use std::io::{Cursor, Read};
 use std::ops::Range;
 
-use super::descriptor::{extract_all_brush_info_inner, BrushDescInfo};
+use super::descriptor::{extract_all_brush_info_inner, BrushDescInfo, PresetTip};
 use super::pattern::parse_patt_block;
 use super::{
     AbrBrush, AbrError, AbrPack, AbrVersion, BrushDescriptor, ComputedPreset, DroppedTipDetail,
@@ -160,7 +160,7 @@ fn parse_abr_with(bytes: &[u8], tips: Tips, patterns: PatternMode) -> Result<Par
     let computed_presets = desc_infos
         .iter()
         .enumerate()
-        .filter(|(_, info)| info.is_computed())
+        .filter(|(_, info)| info.tip() == PresetTip::Computed)
         .map(|(pi, info)| ComputedPreset {
             name: info.name.clone(),
             descriptor: info.descriptor.clone(),
@@ -359,7 +359,7 @@ fn collect_unsupported_tip_presets(
     desc_infos
         .iter()
         .enumerate()
-        .filter(|(_, info)| info.sampled_data_uuid.is_none() && info.descriptor.computed.is_none())
+        .filter(|(_, info)| info.tip() == PresetTip::Unsupported)
         .map(|(pi, info)| UnsupportedTipPresetDetail {
             name: info.name.clone(),
             preset_index: pi,
@@ -397,16 +397,14 @@ fn pair_brushes(entries: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> Paired
         }
     }
 
-    let any_preset_resolves = desc_infos.iter().any(|info| {
-        info.sampled_data_uuid
-            .as_deref()
-            .is_some_and(|u| uuid_to_samp.contains_key(u))
-    });
+    let any_preset_resolves = desc_infos.iter().any(
+        |info| matches!(info.tip(), PresetTip::Sampled(uuid) if uuid_to_samp.contains_key(uuid)),
+    );
     // When every record carries a uuid, position pairs nothing, so presets
     // whose uuids all dangle are missing brushes rather than index matches.
     let only_uuids_pair = desc_infos
         .iter()
-        .any(|info| info.sampled_data_uuid.is_some())
+        .any(|info| matches!(info.tip(), PresetTip::Sampled(_)))
         && entries.iter().all(|samp| samp.uuid.is_some());
     let presets_first = any_preset_resolves || only_uuids_pair;
 
@@ -418,7 +416,7 @@ fn pair_brushes(entries: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> Paired
         let mut used: std::collections::HashSet<usize> = std::collections::HashSet::new();
         let mut skipped_preset_details: Vec<SkippedPresetDetail> = Vec::new();
         for (pi, info) in desc_infos.iter().enumerate() {
-            let Some(uuid) = info.sampled_data_uuid.as_deref() else {
+            let PresetTip::Sampled(uuid) = info.tip() else {
                 continue;
             };
             let count = seen.entry(uuid).or_insert(0);
@@ -527,7 +525,7 @@ fn pair_brushes(entries: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> Paired
     let mut record_owners: Vec<(usize, &BrushDescInfo)> = desc_infos
         .iter()
         .enumerate()
-        .filter(|(_, info)| !info.is_computed())
+        .filter(|(_, info)| matches!(info.tip(), PresetTip::Sampled(_)))
         .collect();
     // A surplus record is a dual-brush or unreferenced tip at an unknown
     // position, so pairing by position would misname every record after it.
@@ -1661,7 +1659,10 @@ mod tests {
     #[test]
     fn no_resolvable_uuids_falls_back_to_index_pairing() {
         let bitmaps = vec![samp(None), samp(None)];
-        let infos = vec![info("First", None, None), info("Second", None, None)];
+        let infos = vec![
+            info("First", Some("uuid-first-dangling"), None),
+            info("Second", Some("uuid-second-dangling"), None),
+        ];
         let PairedBrushes { brushes, .. } = pair_brushes(bitmaps, &infos);
         assert_eq!(brushes.len(), 2);
         assert_eq!(brushes[0].name, "Second");
@@ -1687,7 +1688,10 @@ mod tests {
     #[test]
     fn fallback_preset_index_is_positional_post_reverse() {
         let bitmaps = vec![samp(None), samp(None)];
-        let infos = vec![info("First", None, None), info("Second", None, None)];
+        let infos = vec![
+            info("First", Some("uuid-first-dangling"), None),
+            info("Second", Some("uuid-second-dangling"), None),
+        ];
         let PairedBrushes { brushes, .. } = pair_brushes(bitmaps, &infos);
         assert_eq!(brushes[0].name, "Second");
         assert_eq!(brushes[0].preset_index, Some(1));
@@ -1877,9 +1881,9 @@ mod tests {
     fn fallback_keeps_an_unreadable_record_in_place_and_names_aligned() {
         let bitmaps = vec![samp(None), unreadable_samp(None), samp(None)];
         let infos = vec![
-            info("A", None, None),
-            info("B", None, None),
-            info("C", None, None),
+            info("A", Some("uuid-a-dangling"), None),
+            info("B", Some("uuid-b-dangling"), None),
+            info("C", Some("uuid-c-dangling"), None),
         ];
         let PairedBrushes {
             brushes,
@@ -2864,7 +2868,7 @@ mod tests {
     }
 
     #[test]
-    fn corpus_computed_presets_own_no_samp_record() {
+    fn corpus_packs_with_tipless_presets_name_every_samp_record() {
         let Some(root) = std::env::var_os("BRUSHKIT_CORPUS_DIR").map(std::path::PathBuf::from)
         else {
             println!("skip: BRUSHKIT_CORPUS_DIR unset");
@@ -2873,7 +2877,7 @@ mod tests {
         let mut files = Vec::new();
         corpus_abr_files(&root, &mut files);
         files.sort();
-        let (mut packs, mut records_checked, mut computed) = (0, 0, 0);
+        let (mut packs, mut records_checked, mut tipless) = (0, 0, 0);
         for path in &files {
             let name = path.strip_prefix(&root).unwrap_or(path).display();
             let bytes = std::fs::read(path).unwrap();
@@ -2899,8 +2903,11 @@ mod tests {
                     _ => {}
                 }
             }
-            let pack_computed = infos.iter().filter(|info| info.is_computed()).count();
-            if pack_computed == 0 {
+            let pack_tipless = infos
+                .iter()
+                .filter(|info| !matches!(info.tip(), PresetTip::Sampled(_)))
+                .count();
+            if pack_tipless == 0 {
                 continue;
             }
             let named: HashSet<&str> = infos
@@ -2917,14 +2924,14 @@ mod tests {
             }
             packs += 1;
             records_checked += records.len();
-            computed += pack_computed;
+            tipless += pack_tipless;
         }
         assert!(
             packs > 0 || files.is_empty(),
-            "no corpus pack has a computed preset, so this witnesses nothing"
+            "no corpus pack has a preset without a sampled tip, so this witnesses nothing"
         );
         println!(
-            "checked {records_checked} samp record(s) in {packs} pack(s) with {computed} computed preset(s)"
+            "checked {records_checked} samp record(s) in {packs} pack(s) with {tipless} preset(s) without a sampled tip"
         );
     }
 
