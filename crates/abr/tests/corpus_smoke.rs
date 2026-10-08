@@ -110,3 +110,46 @@ fn all_deferred_parse_decodes_every_corpus_tip_like_parse_abr() {
         files.len()
     );
 }
+
+/// The index-fallback pairing skips computed presets when it counts presets
+/// against samp records. That holds only if Photoshop writes no samp record
+/// for a computed preset, so on real packs every record must be named by a
+/// preset's `sampledData` or `dualBrush` uuid.
+#[test]
+fn computed_presets_own_no_samp_record() {
+    let Some((root, files)) = corpus() else {
+        println!("skip: BRUSHKIT_CORPUS_DIR unset");
+        return;
+    };
+    let mut checked = 0;
+    let mut computed = 0;
+    for path in &files {
+        let bytes = std::fs::read(path).expect("corpus file is readable");
+        let name = path.strip_prefix(&root).unwrap_or(path).display();
+        let Ok(pack) = brushkit_abr::parse_abr(&bytes) else {
+            continue;
+        };
+        if pack.computed_presets.is_empty() || pack.desc_parse_error.is_some() {
+            continue;
+        }
+        for tip in &pack.dropped_tip_details {
+            assert!(
+                !tip.owner_preset_names.is_empty(),
+                "{name}: samp record {:?} is named by no preset",
+                tip.uuid
+            );
+        }
+        assert!(
+            pack.unreadable_tip_details.is_empty(),
+            "{name}: unreadable records {:?}",
+            pack.unreadable_tip_details
+        );
+        checked += 1;
+        computed += pack.computed_presets.len();
+    }
+    assert!(
+        checked > 0 || files.is_empty(),
+        "no corpus pack has computed presets, so this witnesses nothing"
+    );
+    println!("checked {checked} pack(s) with {computed} computed preset(s)");
+}
