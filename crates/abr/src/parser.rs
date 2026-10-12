@@ -3813,6 +3813,186 @@ mod tests {
         assert_tips_match_eager(&all, &eager);
     }
 
+    /// A v10 samp entry whose header parses but whose RLE pixels do not
+    /// decode: each row declares 2 bytes and none follow.
+    fn build_v10_entry_undecodable(uuid: &str, side: u32) -> Vec<u8> {
+        let mut buf = build_v10_entry_with_uuid(uuid, side, side, 0);
+        buf.truncate(buf.len() - (side * side) as usize);
+        *buf.last_mut().unwrap() = 1;
+        for _ in 0..side {
+            buf.write_u16::<BigEndian>(2).unwrap();
+        }
+        buf
+    }
+
+    const UNDECODABLE: &str = "bitmap decode failed: decompression failed: \
+                               truncated RLE row 0: declares 2 bytes, 0 remain";
+
+    /// A v10 pack of samp records `(uuid, decodes)`, the `i`-th one `4 + i`
+    /// pixels square, and presets `(name, tip uuid, dual-brush uuid)`.
+    fn pack_of(records: &[(&str, bool)], presets: &[(&str, &str, Option<&str>)]) -> Vec<u8> {
+        let mut samp = Vec::new();
+        for (i, &(uuid, decodes)) in records.iter().enumerate() {
+            let side = 4 + i as u32;
+            let entry = if decodes {
+                build_v10_entry_with_uuid(uuid, side, side, 0x11 * (i as u8 + 1))
+            } else {
+                build_v10_entry_undecodable(uuid, side)
+            };
+            push_framed(&mut samp, &entry);
+        }
+        let mut d = v10_header();
+        push_block(&mut d, b"samp", &samp);
+        push_block(&mut d, b"desc", &build_dual_desc_block(presets));
+        d
+    }
+
+    /// Asserts that `deferred`, with every tip decoded, is `eager`.
+    fn assert_same_pack(deferred: &DeferredPack<'_>, eager: &AbrPack) {
+        let mut pack = deferred.pack.clone();
+        for (i, brush) in pack.brushes.iter_mut().enumerate() {
+            brush.tip = deferred.decode_tip(i).unwrap();
+        }
+        assert_eq!(format!("{pack:#?}"), format!("{eager:#?}"));
+    }
+
+    #[test]
+    fn a_dual_brush_tip_that_does_not_decode_is_skipped_as_in_parse_abr() {
+        let presets = [
+            ("First", TIP_A, Some(TIP_B)),
+            ("Second", TIP_B, None),
+            ("Third", TIP_C, Some(TIP_D)),
+        ];
+
+        let d = pack_of(
+            &[(TIP_A, true), (TIP_B, false), (TIP_C, true), (TIP_D, true)],
+            &presets,
+        );
+        let eager = parse_abr(&d).unwrap();
+        assert_eq!(
+            eager.sampled_brushes,
+            [
+                SampledBrush::Readable(0),
+                SampledBrush::Unavailable(UnavailableBrush {
+                    id: TIP_B.to_string(),
+                    name: "Second".to_string(),
+                    preset_index: Some(1),
+                    cause: UnavailableTip::Unreadable(UNDECODABLE.to_string()),
+                }),
+                SampledBrush::Readable(1),
+            ]
+        );
+        assert_same_pack(&parse_abr_deferred(&d).unwrap(), &eager);
+
+        let d = pack_of(
+            &[(TIP_A, true), (TIP_B, true), (TIP_C, true), (TIP_D, false)],
+            &presets,
+        );
+        let eager = parse_abr(&d).unwrap();
+        assert_eq!(eager.brushes.len(), 3);
+        assert!(eager.dropped_tip_details.is_empty());
+        assert_eq!(
+            eager.unreadable_tip_details,
+            [UnreadableTipDetail {
+                uuid: Some(TIP_D.to_string()),
+                message: UNDECODABLE.to_string(),
+            }]
+        );
+        assert_same_pack(&parse_abr_deferred(&d).unwrap(), &eager);
+
+        // Pairs by position: a record has no uuid and the preset's tip dangles.
+        let mut anchored = Vec::new();
+        push_framed(&mut anchored, &build_v10_entry_undecodable(TIP_B, 5));
+        let mut anchorless = Vec::new();
+        push_framed(&mut anchorless, &build_simple_entry(3, 2, 8, 0x55));
+        let mut d = v10_header();
+        push_block(&mut d, b"samp", &anchored);
+        push_block(&mut d, b"samp", &anchorless);
+        push_block(
+            &mut d,
+            b"desc",
+            &build_dual_desc_block(&[("Lone", TIP_C, Some(TIP_B))]),
+        );
+        let eager = parse_abr(&d).unwrap();
+        assert_eq!(
+            eager.sampled_brushes,
+            [
+                SampledBrush::Readable(0),
+                SampledBrush::Unavailable(UnavailableBrush {
+                    id: TIP_B.to_string(),
+                    name: String::new(),
+                    preset_index: None,
+                    cause: UnavailableTip::Unreadable(UNDECODABLE.to_string()),
+                }),
+            ]
+        );
+        assert_same_pack(&parse_abr_deferred(&d).unwrap(), &eager);
+    }
+
+    #[test]
+    fn a_repeat_preset_of_a_dual_brush_tip_stays_deferred() {
+        let d = pack_of(
+            &[(TIP_A, true), (TIP_B, true)],
+            &[
+                ("First", TIP_A, Some(TIP_B)),
+                ("Second", TIP_B, None),
+                ("Again", TIP_B, None),
+            ],
+        );
+        let (paired, decodes) = decodes(|| parse_abr_deferred(&d).unwrap());
+        assert_eq!(decodes, 1);
+        let brushes: Vec<(&str, bool)> = (0..paired.pack.brushes.len())
+            .map(|i| (paired.pack.brushes[i].name.as_str(), paired.is_deferred(i)))
+            .collect();
+        assert_eq!(
+            brushes,
+            [("First", true), ("Second", false), ("Again", true)]
+        );
+        assert_same_pack(&paired, &parse_abr(&d).unwrap());
+    }
+
+    #[test]
+    fn a_record_no_preset_uses_that_does_not_decode_is_skipped_as_in_parse_abr() {
+        let d = pack_of(&[(TIP_A, true), (TIP_B, false)], &[("First", TIP_A, None)]);
+        let eager = parse_abr(&d).unwrap();
+        assert_eq!(eager.sampled_brushes, [SampledBrush::Readable(0)]);
+        assert_eq!(
+            eager.unreadable_tip_details,
+            [UnreadableTipDetail {
+                uuid: Some(TIP_B.to_string()),
+                message: UNDECODABLE.to_string(),
+            }]
+        );
+        assert_same_pack(&parse_abr_deferred(&d).unwrap(), &eager);
+    }
+
+    #[test]
+    fn a_uuid_two_records_carry_pairs_the_copy_that_decodes_as_in_parse_abr() {
+        for (decodes, paired_width, unreadable) in [
+            ([true, false], Some(4), 1),
+            ([false, true], Some(5), 1),
+            ([false, false], None, 1),
+            ([true, true], Some(5), 0),
+        ] {
+            let d = pack_of(
+                &[(TIP_A, decodes[0]), (TIP_A, decodes[1])],
+                &[("First", TIP_A, None)],
+            );
+            let eager = parse_abr(&d).unwrap();
+            assert_eq!(
+                eager.brushes.first().map(|b| b.tip.width),
+                paired_width,
+                "{decodes:?}"
+            );
+            assert_eq!(
+                eager.unreadable_tip_details.len(),
+                unreadable,
+                "{decodes:?}"
+            );
+            assert_same_pack(&parse_abr_deferred(&d).unwrap(), &eager);
+        }
+    }
+
     #[test]
     fn parse_v2_rle_entry_len_overflow_errors() {
         assert!(parse_abr(&v2_rle_entry(u32::MAX)).is_err());
