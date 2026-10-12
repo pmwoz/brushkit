@@ -1,5 +1,7 @@
 #![no_main]
-use brushkit_abr::{parse_abr, parse_abr_all_deferred_without_patterns, AbrPack, SampledBrush};
+use brushkit_abr::{
+    parse_abr, parse_abr_all_deferred_without_patterns, parse_abr_deferred, AbrPack, SampledBrush,
+};
 use libfuzzer_sys::fuzz_target;
 
 /// The `Readable` indices of `sampled_brushes`, which must be exactly
@@ -21,7 +23,13 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(pack) = parse_abr(data) {
         readable_indices(&pack);
     }
-    if let Ok(deferred) = parse_abr_all_deferred_without_patterns(data) {
+    for deferred in [
+        parse_abr_deferred(data),
+        parse_abr_all_deferred_without_patterns(data),
+    ]
+    .into_iter()
+    .flatten()
+    {
         for i in readable_indices(&deferred.pack) {
             let _ = deferred.decode_tip(i);
         }

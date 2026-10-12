@@ -25,7 +25,13 @@ fn corpus_files_parse_without_panic() {
         }
         let bytes = std::fs::read(&path).unwrap();
         let _ = brushkit_abr::parse_abr(&bytes);
-        if let Ok(deferred) = brushkit_abr::parse_abr_all_deferred_without_patterns(&bytes) {
+        for deferred in [
+            brushkit_abr::parse_abr_deferred(&bytes),
+            brushkit_abr::parse_abr_all_deferred_without_patterns(&bytes),
+        ]
+        .into_iter()
+        .flatten()
+        {
             for i in 0..deferred.pack.brushes.len() {
                 let _ = deferred.decode_tip(i);
             }
