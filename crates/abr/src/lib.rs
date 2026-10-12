@@ -213,12 +213,13 @@ pub enum UnavailableTip {
     /// The preset names a `sampledData` uuid that no samp record carries.
     Missing { uuid: String },
     /// The samp record is there but its bitmap header or geometry did not
-    /// parse, or, from `parse_abr`, its pixels did not decode. A deferred
-    /// parse does not decode pixels, so it reports that last failure from
-    /// `DeferredPack::decode_tip` and lists the brush as `Readable`. A v1/v2
-    /// entry is `Unreadable` when its compression byte is unknown or, from
-    /// any parse but `parse_abr_all_deferred_without_patterns`, its RLE
-    /// pixels do not decode. Carries the parser's message.
+    /// parse, or its pixels did not decode. A deferred parse decodes only the
+    /// tips `DeferredPack` lists as decoded up front. For a tip it defers, it
+    /// reports that last failure from `DeferredPack::decode_tip` and lists the
+    /// brush as `Readable`. A v1/v2 entry is `Unreadable` when its compression
+    /// byte is unknown or, from any parse but
+    /// `parse_abr_all_deferred_without_patterns`, its RLE pixels do not
+    /// decode. Carries the parser's message.
     Unreadable(String),
 }
 
