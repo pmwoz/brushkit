@@ -34,6 +34,13 @@ pub const MAX_PLIST_VALUES: usize = 10_000;
 /// itself. An XML plist's string is allocated before the stream guard sees
 /// it, so only [`MAX_PLIST_BYTES`] bounds it.
 pub const MAX_PLIST_PAYLOAD_BYTES: usize = 1024 * 1024;
+/// The most bytes from the earliest byte zip could read as an archive's
+/// central directory or zip64 end record to the end of the file. zip 9 reads
+/// central headers from the directory's start to as far as the file goes,
+/// whatever size the directory declares, and holds up to about 20 times their
+/// bytes when they are dense with extra fields. The largest central directory
+/// of 278 real Procreate files is 79,320 bytes.
+pub const MAX_CENTRAL_DIRECTORY_BYTES: usize = 2 * 1024 * 1024;
 
 /// Reads a zip entry of at most [`MAX_ENTRY_BYTES`]. Plist entries go through
 /// [`read_zip_plist`].
@@ -55,9 +62,9 @@ pub fn read_zip_plist(
 
 /// The declared uncompressed size is an attacker-controlled zip-header field,
 /// and a small declared size can hide a huge inflate. So the read stops at the
-/// declared size, which fits the buffer allocated for it, and one byte more
-/// rejects the entry. That extra read also reaches the end of the entry, where
-/// the zip reader checks the CRC.
+/// declared size, which fits the buffer allocated for it. One more read
+/// reaches the end of the entry, where zip checks the CRC and rejects bytes
+/// past the declared size before this function sees them.
 fn read_capped(
     zip: &mut zip::ZipArchive<Cursor<&[u8]>>,
     path: &str,
@@ -372,7 +379,8 @@ pub fn members_in_zip_order(zip: &mut zip::ZipArchive<Cursor<&[u8]>>) -> Vec<Str
     // the central directory, and the member order is part of the contract.
     (0..zip.len())
         .filter_map(|i| {
-            let dir = zip.name_for_index(i)?.strip_suffix("/Brush.archive")?;
+            let name = zip.name_for_index(i)?.ok()?;
+            let dir = name.strip_suffix("/Brush.archive")?;
             (!dir.is_empty() && !dir.contains('/')).then(|| dir.to_string())
         })
         .collect()

@@ -423,7 +423,7 @@ fn deflated_seed_stays_deflated() {
             entry.compression(),
             zip::CompressionMethod::Deflated,
             "{}",
-            entry.name()
+            entry.name().unwrap()
         );
     }
 }
