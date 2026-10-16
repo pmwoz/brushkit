@@ -7,6 +7,7 @@
 
 use crate::bitmap::{decode_guarded, tip_plane, GuardedDecodeError, TipSample};
 use crate::GrayscaleBitmap;
+use std::collections::HashMap;
 use std::io::{Cursor, Read};
 
 /// Defensive ceilings for untrusted archives: anything above them is treated
@@ -48,7 +49,8 @@ pub fn read_zip_entry(
     zip: &mut zip::ZipArchive<Cursor<&[u8]>>,
     path: &str,
 ) -> Result<Vec<u8>, String> {
-    read_capped(zip, path, MAX_ENTRY_BYTES)
+    let index = zip.index_for_name(path);
+    read_capped(zip, index, path, MAX_ENTRY_BYTES)
 }
 
 /// [`read_zip_entry`] capped at [`MAX_PLIST_BYTES`], so an oversize plist
@@ -57,7 +59,53 @@ pub fn read_zip_plist(
     zip: &mut zip::ZipArchive<Cursor<&[u8]>>,
     path: &str,
 ) -> Result<Vec<u8>, String> {
-    read_capped(zip, path, MAX_PLIST_BYTES)
+    let index = zip.index_for_name(path);
+    read_capped(zip, index, path, MAX_PLIST_BYTES)
+}
+
+/// A zip whose entries are found by their decoded names, as zip 2.4.2 found
+/// them. zip 9 finds an entry by its raw name bytes, and a name that is not
+/// UTF-8 decodes as CP437, so a member directory taken from the decoded names
+/// would not find its own entries. See <https://github.com/pmwoz/brushkit/issues/208>.
+pub(crate) struct Zip<'a> {
+    pub(crate) archive: zip::ZipArchive<Cursor<&'a [u8]>>,
+    /// The entries a raw lookup of their decoded name misses. A decoded name
+    /// takes at most three bytes per raw name byte, so
+    /// [`MAX_CENTRAL_DIRECTORY_BYTES`] bounds this map too.
+    decoded: HashMap<String, usize>,
+}
+
+impl<'a> Zip<'a> {
+    pub(crate) fn new(archive: zip::ZipArchive<Cursor<&'a [u8]>>) -> Self {
+        let decoded = (0..archive.len())
+            .filter_map(|i| {
+                let name = archive.name_for_index(i)?.ok()?;
+                archive
+                    .index_for_name(&name)
+                    .is_none()
+                    .then(|| (name.into_owned(), i))
+            })
+            .collect();
+        Zip { archive, decoded }
+    }
+
+    pub(crate) fn index_for_name(&self, name: &str) -> Option<usize> {
+        self.archive
+            .index_for_name(name)
+            .or_else(|| self.decoded.get(name).copied())
+    }
+
+    /// [`read_zip_entry`] by decoded name.
+    pub(crate) fn read_entry(&mut self, path: &str) -> Result<Vec<u8>, String> {
+        let index = self.index_for_name(path);
+        read_capped(&mut self.archive, index, path, MAX_ENTRY_BYTES)
+    }
+
+    /// [`read_zip_plist`] by decoded name.
+    pub(crate) fn read_plist(&mut self, path: &str) -> Result<Vec<u8>, String> {
+        let index = self.index_for_name(path);
+        read_capped(&mut self.archive, index, path, MAX_PLIST_BYTES)
+    }
 }
 
 /// The declared uncompressed size is an attacker-controlled zip-header field,
@@ -67,13 +115,14 @@ pub fn read_zip_plist(
 /// past the declared size before this function sees them.
 fn read_capped(
     zip: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    index: Option<usize>,
     path: &str,
     limit: usize,
 ) -> Result<Vec<u8>, String> {
-    let mut file = zip.by_name(path).map_err(|e| match e {
-        zip::result::ZipError::FileNotFound => format!("{path} not found"),
-        e => format!("{path}: cannot open: {e}"),
-    })?;
+    let index = index.ok_or_else(|| format!("{path} not found"))?;
+    let mut file = zip
+        .by_index(index)
+        .map_err(|e| format!("{path}: cannot open: {e}"))?;
     let size = file.size();
     if size > limit as u64 {
         return Err(format!("{path}: declared size {size} exceeds limit"));

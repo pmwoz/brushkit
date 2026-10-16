@@ -538,11 +538,11 @@ fn brushset(
     let mut zip = open_zip(bytes)?;
 
     let (set_name, prefixes) = if zip.index_for_name("brushset.plist").is_some() {
-        let buf = procreate::read_zip_plist(&mut zip, "brushset.plist").map_err(PreviewError)?;
+        let buf = zip.read_plist("brushset.plist").map_err(PreviewError)?;
         let (name, uuids) = procreate::parse_brushset_plist(&buf).map_err(PreviewError)?;
         (name, uuids.into_iter().map(|u| format!("{u}/")).collect())
     } else {
-        let members: Vec<String> = procreate::members_in_zip_order(&mut zip)
+        let members: Vec<String> = procreate::members_in_zip_order(&mut zip.archive)
             .into_iter()
             .map(|d| format!("{d}/"))
             .collect();
@@ -628,7 +628,7 @@ fn brush(
     })
 }
 
-fn open_zip(bytes: &[u8]) -> Result<zip::ZipArchive<Cursor<&[u8]>>, PreviewError> {
+fn open_zip(bytes: &[u8]) -> Result<procreate::Zip<'_>, PreviewError> {
     const EOCD_SEARCH_BYTES: usize = 65_572;
     let fail = |e: zip::result::ZipError| PreviewError(format!("failed to open zip: {e}"));
     // zip 9 searches the last `size_of::<Zip32CentralDirectoryEnd>() + 4 + 65_536`
@@ -683,7 +683,7 @@ fn open_zip(bytes: &[u8]) -> Result<zip::ZipArchive<Cursor<&[u8]>>, PreviewError
             "entries overlap".into(),
         )));
     }
-    Ok(zip)
+    Ok(procreate::Zip::new(zip))
 }
 
 /// The earliest byte zip could read as a central header or a zip64 end record
@@ -763,7 +763,7 @@ impl Member {
 /// after its directory and reports why, rather than shifting every index after
 /// it. A readable `Shape.png` reports its size either way.
 fn read_member(
-    zip: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    zip: &mut procreate::Zip,
     prefix: &str,
     max_cell: u32,
     budget: &mut Budget,
@@ -776,12 +776,13 @@ fn read_member(
         prefix.trim_end_matches('/').to_string()
     };
 
-    let archive = procreate::read_zip_plist(zip, &format!("{prefix}Brush.archive"))
+    let archive = zip
+        .read_plist(&format!("{prefix}Brush.archive"))
         .and_then(|buf| procreate::brush_name(&buf));
 
     let shape_path = format!("{prefix}Shape.png");
     let shape = if zip.index_for_name(&shape_path).is_some() {
-        Some(procreate::read_zip_entry(zip, &shape_path))
+        Some(zip.read_entry(&shape_path))
     } else {
         None
     };
