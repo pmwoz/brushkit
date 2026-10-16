@@ -95,13 +95,11 @@ impl<'a> Zip<'a> {
             .or_else(|| self.decoded.get(name).copied())
     }
 
-    /// [`read_zip_entry`] by decoded name.
     pub(crate) fn read_entry(&mut self, path: &str) -> Result<Vec<u8>, String> {
         let index = self.index_for_name(path);
         read_capped(&mut self.archive, index, path, MAX_ENTRY_BYTES)
     }
 
-    /// [`read_zip_plist`] by decoded name.
     pub(crate) fn read_plist(&mut self, path: &str) -> Result<Vec<u8>, String> {
         let index = self.index_for_name(path);
         read_capped(&mut self.archive, index, path, MAX_PLIST_BYTES)

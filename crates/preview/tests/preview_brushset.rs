@@ -130,7 +130,6 @@ fn no_plist_member_with_a_cp437_folder_name_reads_its_tip() {
     let archive = brush_archive("Soft");
     let png = real_4x4_png();
 
-    // 0x81 is u-umlaut in CP437 and is not UTF-8.
     let bytes = zip_with(&[
         (&b"P\x81nsel/Brush.archive"[..], &archive),
         (&b"P\x81nsel/Shape.png"[..], &png),
