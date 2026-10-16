@@ -59,6 +59,10 @@ struct ParsedAbr {
     /// The tips `Tips::Deferred(Defer::Paired)` decodes up front, keyed by
     /// `DeferredTip::entry.start`. Empty in every other mode.
     decoded: HashMap<usize, TipBitmap>,
+    /// What the tips `Tips::Deferred(Defer::Paired)` decodes up front occupy
+    /// once decoded, counted before any is decoded so that every deferred mode
+    /// reports the same value.
+    up_front_len: usize,
 }
 
 /// Whether a parse decodes tips as it reads them or defers them.
@@ -137,11 +141,20 @@ fn parse_abr_with(bytes: &[u8], tips: Tips, patterns: PatternMode) -> Result<Par
         }
     }
 
-    let decoded = match tips {
-        Tips::Deferred(Defer::Paired) => {
-            decode_paired_tips_up_front(bytes, &mut bitmaps, &desc_infos)
+    let (decoded, up_front_len) = match tips {
+        Tips::Eager => (HashMap::new(), 0),
+        Tips::Deferred(defer) => {
+            let up_front = up_front_tips(&bitmaps, &desc_infos);
+            let up_front_len = up_front
+                .iter()
+                .filter_map(|&i| bitmaps[i].deferred())
+                .fold(0usize, |len, tip| len.saturating_add(tip.decoded_len));
+            let decoded = match defer {
+                Defer::Paired => decode_paired_tips_up_front(bytes, &mut bitmaps, up_front),
+                Defer::All => HashMap::new(),
+            };
+            (decoded, up_front_len)
         }
-        Tips::Eager | Tips::Deferred(Defer::All) => HashMap::new(),
     };
 
     let PairedBrushes {
@@ -194,6 +207,7 @@ fn parse_abr_with(bytes: &[u8], tips: Tips, patterns: PatternMode) -> Result<Par
         tips,
         dropped_tips,
         decoded,
+        up_front_len,
     })
 }
 
@@ -250,6 +264,7 @@ pub struct DeferredPack<'a> {
     pub pack: AbrPack,
     tips: Vec<Option<DeferredTip>>,
     input: &'a [u8],
+    up_front_len: usize,
 }
 
 impl DeferredPack<'_> {
@@ -273,6 +288,17 @@ impl DeferredPack<'_> {
             Some(tip) => decode_deferred_tip(self.input, tip),
             None => Ok(self.pack.brushes[i].tip.clone()),
         }
+    }
+
+    /// What the tips [`parse_abr_deferred`] decodes up front occupy once
+    /// decoded: every brush it does not defer and every
+    /// `pack.dropped_tip_details[*].bitmap`. Every deferred parse of one input
+    /// reports the same value, so a caller can read it from
+    /// [`parse_abr_all_deferred_without_patterns`] before anything is decoded.
+    /// A tip that does not decode holds nothing, so on input with such a tip
+    /// this is an upper bound.
+    pub fn up_front_decoded_len(&self) -> usize {
+        self.up_front_len
     }
 }
 
@@ -331,6 +357,7 @@ fn parse_abr_deferred_with(
         mut tips,
         dropped_tips,
         mut decoded,
+        up_front_len,
     } = parse_abr_with(bytes, Tips::Deferred(defer), patterns)?;
 
     for (detail, deferred) in pack.dropped_tip_details.iter_mut().zip(&dropped_tips) {
@@ -355,18 +382,11 @@ fn parse_abr_deferred_with(
         pack,
         tips,
         input: bytes,
+        up_front_len,
     })
 }
 
-/// Decode the tips of a `Defer::Paired` parse that [`DeferredPack`] lists as
-/// decoded up front, before `pair_brushes` runs. A tip that does not decode
-/// becomes an unreadable record, so pairing skips it as in [`parse_abr`].
-/// Returns the tips that decode, keyed by `DeferredTip::entry.start`.
-fn decode_paired_tips_up_front(
-    input: &[u8],
-    entries: &mut [SampEntry],
-    desc_infos: &[BrushDescInfo],
-) -> HashMap<usize, TipBitmap> {
+fn up_front_tips(entries: &[SampEntry], desc_infos: &[BrushDescInfo]) -> Vec<usize> {
     let duals: HashSet<&str> = desc_infos
         .iter()
         .filter_map(|info| info.dual_brush_uuid.as_deref())
@@ -388,29 +408,41 @@ fn decode_paired_tips_up_front(
         }
     }
 
+    entries
+        .iter()
+        .enumerate()
+        .filter(|(_, samp)| samp.deferred().is_some())
+        .filter(|(_, samp)| {
+            let uuid = samp.uuid.as_deref();
+            if by_uuid {
+                uuid.and_then(|u| copies.get(u)) != Some(&1)
+            } else {
+                uuid.is_some_and(|u| duals.contains(u))
+            }
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Decode the `up_front` tips of a `Defer::Paired` parse before
+/// `pair_brushes` runs. A tip that does not decode becomes an unreadable
+/// record, so pairing skips it as in [`parse_abr`]. Returns the tips that
+/// decode, keyed by `DeferredTip::entry.start`.
+fn decode_paired_tips_up_front(
+    input: &[u8],
+    entries: &mut [SampEntry],
+    up_front: Vec<usize>,
+) -> HashMap<usize, TipBitmap> {
     let mut decoded = HashMap::new();
-    for samp in entries.iter_mut() {
-        let Ok(SampTip {
-            deferred: Some(tip),
-            ..
-        }) = &samp.tip
-        else {
+    for i in up_front {
+        let Some(tip) = entries[i].deferred() else {
             continue;
         };
-        let uuid = samp.uuid.as_deref();
-        let up_front = if by_uuid {
-            uuid.and_then(|u| copies.get(u)) != Some(&1)
-        } else {
-            uuid.is_some_and(|u| duals.contains(u))
-        };
-        if !up_front {
-            continue;
-        }
         match decode_deferred_tip(input, tip) {
             Ok(bitmap) => {
                 decoded.insert(tip.entry.start, bitmap);
             }
-            Err(e) => samp.tip = Err(format!("bitmap decode failed: {e}")),
+            Err(e) => entries[i].tip = Err(format!("bitmap decode failed: {e}")),
         }
     }
     decoded
@@ -669,6 +701,7 @@ fn parse_legacy(
     defer: bool,
 ) -> Result<ParsedAbr, AbrError> {
     let mut entries = Vec::new();
+    let mut up_front_len = 0usize;
 
     for _ in 0..brush_count {
         let brush_type = cursor
@@ -784,7 +817,11 @@ fn parse_legacy(
         cursor.set_position(entry_end.max(pixel_end));
         let pixels = &input[pixel_start as usize..pixel_end as usize];
 
-        let tip = if compression > 1 {
+        let decodable = compression <= 1;
+        if decodable {
+            up_front_len = up_front_len.saturating_add(expected);
+        }
+        let tip = if !decodable {
             Err(format!("unknown compression {compression}"))
         } else if expected == 0 {
             // Nothing to decode, and `bitmap_geometry` rejects an empty pixel
@@ -884,6 +921,7 @@ fn parse_legacy(
         tips,
         dropped_tips: Vec::new(),
         decoded: HashMap::new(),
+        up_front_len,
     })
 }
 
@@ -1018,6 +1056,12 @@ fn read_blocks<'a>(
 struct SampEntry {
     uuid: Option<String>,
     tip: Result<SampTip, String>,
+}
+
+impl SampEntry {
+    fn deferred(&self) -> Option<&DeferredTip> {
+        self.tip.as_ref().ok()?.deferred.as_ref()
+    }
 }
 
 struct SampTip {
@@ -3927,6 +3971,27 @@ mod tests {
         assert_eq!(format!("{pack:#?}"), format!("{eager:#?}"));
     }
 
+    fn dual_brush_pack_paired_by_position(tip_b_decodes: bool) -> Vec<u8> {
+        let tip_b = if tip_b_decodes {
+            build_v10_entry_with_uuid(TIP_B, 5, 5, 0x22)
+        } else {
+            build_v10_entry_undecodable(TIP_B, 5)
+        };
+        let mut anchored = Vec::new();
+        push_framed(&mut anchored, &tip_b);
+        let mut anchorless = Vec::new();
+        push_framed(&mut anchorless, &build_simple_entry(3, 2, 8, 0x55));
+        let mut d = v10_header();
+        push_block(&mut d, b"samp", &anchored);
+        push_block(&mut d, b"samp", &anchorless);
+        push_block(
+            &mut d,
+            b"desc",
+            &build_dual_desc_block(&[("Lone", TIP_C, Some(TIP_B))]),
+        );
+        d
+    }
+
     #[test]
     fn a_dual_brush_tip_that_does_not_decode_is_skipped_as_in_parse_abr() {
         let presets = [
@@ -3971,19 +4036,7 @@ mod tests {
         );
         assert_same_pack(&parse_abr_deferred(&d).unwrap(), &eager);
 
-        // Pairs by position: a record has no uuid and the preset's tip dangles.
-        let mut anchored = Vec::new();
-        push_framed(&mut anchored, &build_v10_entry_undecodable(TIP_B, 5));
-        let mut anchorless = Vec::new();
-        push_framed(&mut anchorless, &build_simple_entry(3, 2, 8, 0x55));
-        let mut d = v10_header();
-        push_block(&mut d, b"samp", &anchored);
-        push_block(&mut d, b"samp", &anchorless);
-        push_block(
-            &mut d,
-            b"desc",
-            &build_dual_desc_block(&[("Lone", TIP_C, Some(TIP_B))]),
-        );
+        let d = dual_brush_pack_paired_by_position(false);
         let eager = parse_abr(&d).unwrap();
         assert_eq!(
             eager.sampled_brushes,
@@ -4062,6 +4115,100 @@ mod tests {
             );
             assert_same_pack(&parse_abr_deferred(&d).unwrap(), &eager);
         }
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct UpFront {
+        reported: usize,
+        held: usize,
+    }
+
+    fn up_front_lens(d: &[u8]) -> UpFront {
+        let paired = parse_abr_deferred(d).unwrap();
+        let reported = paired.up_front_decoded_len();
+        for other in [
+            parse_abr_deferred_without_patterns(d).unwrap(),
+            parse_abr_all_deferred_without_patterns(d).unwrap(),
+        ] {
+            assert_eq!(other.up_front_decoded_len(), reported);
+        }
+        let pack = &paired.pack;
+        let brushes = (0..pack.brushes.len())
+            .filter(|&i| !paired.is_deferred(i))
+            .map(|i| pack.brushes[i].tip.data.len());
+        let dropped = pack.dropped_tip_details.iter().map(|d| d.bitmap.data.len());
+        UpFront {
+            reported,
+            held: brushes.chain(dropped).sum(),
+        }
+    }
+
+    #[test]
+    fn every_deferred_parse_reports_the_bytes_parse_abr_deferred_decodes_up_front() {
+        let one_uuid_on_two_records =
+            pack_of(&[(TIP_A, true), (TIP_A, true)], &[("First", TIP_A, None)]);
+        let presets_sharing_a_dual_brush_tip = pack_of(
+            &[(TIP_A, true), (TIP_B, true)],
+            &[
+                ("First", TIP_A, Some(TIP_B)),
+                ("Second", TIP_B, None),
+                ("Again", TIP_B, None),
+            ],
+        );
+        let nothing_up_front = pack_of(&[(TIP_A, true)], &[("First", TIP_A, None)]);
+        for (case, d, len) in [
+            (
+                "dual brush and dropped tip",
+                dual_brush_pack(),
+                5 * 5 + 7 * 7,
+            ),
+            (
+                "one uuid on two records",
+                one_uuid_on_two_records,
+                4 * 4 + 5 * 5,
+            ),
+            (
+                "presets sharing a dual-brush tip",
+                presets_sharing_a_dual_brush_tip,
+                5 * 5,
+            ),
+            (
+                "paired by position",
+                dual_brush_pack_paired_by_position(true),
+                5 * 5,
+            ),
+            ("v1", legacy_multi_tip_stream(1), 3 * 2 + 5 * 4 + 3 * 2 + 1),
+            ("v2", legacy_multi_tip_stream(2), 3 * 2 + 5 * 4 + 3 * 2 + 1),
+            ("nothing up front", nothing_up_front, 0),
+        ] {
+            assert_eq!(
+                up_front_lens(&d),
+                UpFront {
+                    reported: len,
+                    held: len
+                },
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_up_front_tip_that_does_not_decode_still_counts() {
+        let d = pack_of(
+            &[(TIP_A, true), (TIP_B, false), (TIP_C, true), (TIP_D, true)],
+            &[
+                ("First", TIP_A, Some(TIP_B)),
+                ("Second", TIP_B, None),
+                ("Third", TIP_C, Some(TIP_D)),
+            ],
+        );
+        assert_eq!(
+            up_front_lens(&d),
+            UpFront {
+                reported: 5 * 5 + 7 * 7,
+                held: 7 * 7
+            }
+        );
     }
 
     #[test]

@@ -119,6 +119,7 @@ fn deferred_parse_yields_the_pack_parse_abr_does() {
     };
     let mut checked = 0;
     let mut unreadable = 0;
+    let mut with_up_front = 0;
     for path in &files {
         let bytes = std::fs::read(path).expect("corpus file is readable");
         let name = path.strip_prefix(&root).unwrap_or(path).display();
@@ -186,6 +187,42 @@ fn deferred_parse_yields_the_pack_parse_abr_does() {
                 .collect::<Vec<_>>()
         };
         assert_eq!(skipped(pack), skipped(&eager), "{name}");
+
+        let held: usize = (0..pack.brushes.len())
+            .filter(|&i| !deferred.is_deferred(i))
+            .map(|i| pack.brushes[i].tip.data.len())
+            .chain(pack.dropped_tip_details.iter().map(|d| d.bitmap.data.len()))
+            .sum();
+        let up_front = deferred.up_front_decoded_len();
+        let all = brushkit_abr::parse_abr_all_deferred_without_patterns(&bytes)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(all.up_front_decoded_len(), up_front, "{name}");
+        let unreadable_tips = |pack: &brushkit_abr::AbrPack| {
+            pack.unreadable_tip_details.len()
+                + pack
+                    .sampled_brushes
+                    .iter()
+                    .filter(|b| {
+                        matches!(
+                            b,
+                            brushkit_abr::SampledBrush::Unavailable(
+                                brushkit_abr::UnavailableBrush {
+                                    cause: brushkit_abr::UnavailableTip::Unreadable(_),
+                                    ..
+                                }
+                            )
+                        )
+                    })
+                    .count()
+        };
+        if unreadable_tips(pack) > unreadable_tips(&all.pack) {
+            assert!(up_front >= held, "{name}: {up_front} < {held}");
+        } else {
+            assert_eq!(up_front, held, "{name}");
+        }
+        if up_front > 0 {
+            with_up_front += 1;
+        }
         checked += 1;
         unreadable += eager.unreadable_tip_details.len()
             + eager
@@ -195,7 +232,8 @@ fn deferred_parse_yields_the_pack_parse_abr_does() {
                 .count();
     }
     println!(
-        "checked {checked} of {} corpus pack(s), {unreadable} unreadable or missing tip(s)",
+        "checked {checked} of {} corpus pack(s), {unreadable} unreadable or missing tip(s), \
+         {with_up_front} with tips decoded up front",
         files.len()
     );
 }
