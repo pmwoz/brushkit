@@ -53,16 +53,17 @@ fn an_oversize_plist_entry_is_rejected_before_it_is_read() {
     let understated = declare_size(declared.clone(), 1024);
     let opts = PreviewOptions { max_cell: 8 };
 
-    for (label, bytes, reason) in [
-        ("declared", &declared, "declared size"),
-        ("understated", &understated, "exceeds its declared size"),
+    for (label, bytes, prefix) in [
+        ("declared", &declared, "brushset.plist: declared size"),
+        (
+            "understated",
+            &understated,
+            "failed to read brushset.plist: ",
+        ),
     ] {
         let peak = growth(|| {
             let err = preview_brushset(bytes, opts).expect_err("oversize brushset.plist");
-            assert!(
-                err.0.starts_with("brushset.plist") && err.0.contains(reason),
-                "{label}: {err}"
-            );
+            assert!(err.0.starts_with(prefix), "{label}: {err}");
         });
         println!("brushset.plist, {label} size: {peak} bytes");
         assert!(

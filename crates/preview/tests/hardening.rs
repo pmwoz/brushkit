@@ -100,7 +100,7 @@ fn entry_whose_data_runs_into_the_next_entry_is_rejected() {
     );
 }
 
-const CANNOT_OPEN: &str = "cannot open: unsupported Zip archive: Compression method not supported";
+const CANNOT_OPEN: &str = "cannot open: compression method not supported: 77";
 
 fn unopenable(mut zip_bytes: Vec<u8>, path: &str) -> Vec<u8> {
     let name_len = u16::try_from(path.len()).unwrap().to_le_bytes();
@@ -227,7 +227,7 @@ fn real_procreate_plists_pass_the_guards() {
             .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
         for index in 0..zip.len() {
             let mut entry = zip.by_index(index).unwrap();
-            let name = entry.name().to_string();
+            let name = entry.name().unwrap().to_string();
             if !name.ends_with("Brush.archive") && !name.ends_with("brushset.plist") {
                 continue;
             }
