@@ -542,7 +542,8 @@ fn brushset(
         let (name, uuids) = procreate::parse_brushset_plist(&buf).map_err(PreviewError)?;
         (name, uuids.into_iter().map(|u| format!("{u}/")).collect())
     } else {
-        let members: Vec<String> = procreate::members_in_zip_order(&mut zip.archive)
+        let members: Vec<String> = zip
+            .members_in_zip_order()
             .into_iter()
             .map(|d| format!("{d}/"))
             .collect();

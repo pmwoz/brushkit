@@ -63,15 +63,15 @@ pub fn read_zip_plist(
     read_capped(zip, index, path, MAX_PLIST_BYTES)
 }
 
-/// A zip whose entries are found by their decoded names, as zip 2.4.2 found
-/// them. zip 9 finds an entry by its raw name bytes, and a name that is not
-/// UTF-8 decodes as CP437, so a member directory taken from the decoded names
-/// would not find its own entries. See <https://github.com/pmwoz/brushkit/issues/208>.
+/// A zip whose entries are also found by the names `name_for_index` returns.
+/// zip 9 finds an entry by its raw name bytes but decodes a name that is not
+/// UTF-8 as CP437, so a member directory taken from the decoded names would not
+/// find its own entries. See <https://github.com/pmwoz/brushkit/issues/208>.
 pub(crate) struct Zip<'a> {
-    pub(crate) archive: zip::ZipArchive<Cursor<&'a [u8]>>,
-    /// The entries a raw lookup of their decoded name misses. A decoded name
-    /// takes at most three bytes per raw name byte, so
-    /// [`MAX_CENTRAL_DIRECTORY_BYTES`] bounds this map too.
+    archive: zip::ZipArchive<Cursor<&'a [u8]>>,
+    /// The entries a raw lookup of their decoded name misses. It holds at most
+    /// one entry per 46-byte central header, so
+    /// [`MAX_CENTRAL_DIRECTORY_BYTES`] bounds it.
     decoded: HashMap<String, usize>,
 }
 
@@ -105,6 +105,10 @@ impl<'a> Zip<'a> {
     pub(crate) fn read_plist(&mut self, path: &str) -> Result<Vec<u8>, String> {
         let index = self.index_for_name(path);
         read_capped(&mut self.archive, index, path, MAX_PLIST_BYTES)
+    }
+
+    pub(crate) fn members_in_zip_order(&mut self) -> Vec<String> {
+        members_in_zip_order(&mut self.archive)
     }
 }
 
