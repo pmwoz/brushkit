@@ -36,6 +36,7 @@ use super::{
 use crate::limits::{MAX_DIMENSION, MAX_NAME_CODE_UNITS};
 
 const MAX_TIP_DECODED_BYTES: usize = 256 * 1024 * 1024;
+const MAX_DEFLATE_RATIO: usize = 1032;
 
 pub fn parse_abr(bytes: &[u8]) -> Result<AbrPack, AbrError> {
     parse_abr_with(bytes, Tips::Eager, PatternMode::Read).map(|parsed| parsed.pack)
@@ -1416,19 +1417,16 @@ fn decode_bitmap(data: &[u8], header: &BitmapHeader) -> Result<TipBitmap, AbrErr
     let pixel_raw = &data[pixel_start..];
     let bpp = (header.depth as usize) / 8;
 
-    let mut pixel_data = match header.compression {
+    let pixel_data = match header.compression {
         0 => pixel_raw[..expected].to_vec(),
         1 => decode_rle(pixel_raw, height as usize, width as usize, bpp, expected)?,
         2 => {
-            let mut dec = ZlibDecoder::new(pixel_raw).take(MAX_TIP_DECODED_BYTES as u64 + 1);
-            let mut buf = Vec::new();
-            dec.read_to_end(&mut buf)
+            let mut buf =
+                Vec::with_capacity(expected.min(pixel_raw.len().saturating_mul(MAX_DEFLATE_RATIO)));
+            ZlibDecoder::new(pixel_raw)
+                .take(expected as u64)
+                .read_to_end(&mut buf)
                 .map_err(|e| AbrError::Decompression(format!("zlib: {e}")))?;
-            if buf.len() > MAX_TIP_DECODED_BYTES {
-                return Err(AbrError::Decompression(
-                    "zlib output exceeds size limit".into(),
-                ));
-            }
             buf
         }
         _ => {
@@ -1451,7 +1449,6 @@ fn decode_bitmap(data: &[u8], header: &BitmapHeader) -> Result<TipBitmap, AbrErr
         ));
     }
 
-    pixel_data.truncate(expected);
     Ok(TipBitmap {
         width,
         height,
@@ -1623,6 +1620,7 @@ mod tests {
     use brushkit_fixture::{write_bool, write_key};
     use byteorder::WriteBytesExt;
     use std::cell::Cell;
+    use std::io::Write;
 
     use crate::pattern::tests::{channel_slot, record_block, record_body, unreadable_chunk};
 
@@ -4237,6 +4235,27 @@ mod tests {
         let tip = decode_bitmap(&data, &header).unwrap();
         assert_eq!(tip.data.len(), 4);
         assert!(tip.data.iter().all(|&b| b == 0xAB));
+    }
+
+    #[test]
+    fn zlib_entry_holds_only_expected() {
+        let header = BitmapHeader {
+            rect_offset: 0,
+            top: 0,
+            left: 0,
+            bottom: 2,
+            right: 2,
+            depth: 8,
+            compression: 2,
+        };
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(&[1, 2, 3, 4]).unwrap();
+        enc.write_all(&vec![0xAB; 1024 * 1024]).unwrap();
+        let mut data = vec![0u8; 19];
+        data.extend(enc.finish().unwrap());
+        let tip = decode_bitmap(&data, &header).unwrap();
+        assert_eq!(tip.data, [1, 2, 3, 4]);
+        assert_eq!(tip.data.capacity(), 4);
     }
 
     #[test]
