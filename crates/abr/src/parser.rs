@@ -1623,6 +1623,7 @@ mod tests {
     use brushkit_fixture::{write_bool, write_key};
     use byteorder::WriteBytesExt;
     use std::cell::Cell;
+    use std::io::Write;
 
     use crate::pattern::tests::{channel_slot, record_block, record_body, unreadable_chunk};
 
@@ -4237,6 +4238,27 @@ mod tests {
         let tip = decode_bitmap(&data, &header).unwrap();
         assert_eq!(tip.data.len(), 4);
         assert!(tip.data.iter().all(|&b| b == 0xAB));
+    }
+
+    #[test]
+    fn zlib_entry_holds_only_expected() {
+        let header = BitmapHeader {
+            rect_offset: 0,
+            top: 0,
+            left: 0,
+            bottom: 2,
+            right: 2,
+            depth: 8,
+            compression: 2,
+        };
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(&[1, 2, 3, 4]).unwrap();
+        enc.write_all(&vec![0xAB; 1024 * 1024]).unwrap();
+        let mut data = vec![0u8; 19];
+        data.extend(enc.finish().unwrap());
+        let tip = decode_bitmap(&data, &header).unwrap();
+        assert_eq!(tip.data, [1, 2, 3, 4]);
+        assert_eq!(tip.data.capacity(), 4);
     }
 
     #[test]
