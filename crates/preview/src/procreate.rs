@@ -45,6 +45,11 @@ pub const MAX_CENTRAL_DIRECTORY_BYTES: usize = 2 * 1024 * 1024;
 
 /// Reads a zip entry of at most [`MAX_ENTRY_BYTES`]. Plist entries go through
 /// [`read_zip_plist`].
+///
+/// `path` is matched against the raw name bytes. zip decodes a name that is
+/// not UTF-8 as CP437, so the name that `name_for_index`, `file_names` or
+/// [`members_in_zip_order`] returns for such an entry is not found.
+/// [`preview_brushset`](crate::preview_brushset) finds such entries.
 pub fn read_zip_entry(
     zip: &mut zip::ZipArchive<Cursor<&[u8]>>,
     path: &str,
@@ -425,6 +430,8 @@ pub fn brush_name(archive_bytes: &[u8]) -> Result<Option<String>, String> {
 /// Members of a set that has no `brushset.plist`: every top-level directory `d`
 /// with an entry named exactly `d/Brush.archive`, in first-appearance zip order.
 /// `d/Reset/Brush.archive` does not make `d/Reset` a member.
+/// A name that is not UTF-8 comes back decoded as CP437, so [`read_zip_entry`]
+/// and [`read_zip_plist`] do not find that member's entries.
 pub fn members_in_zip_order(zip: &mut zip::ZipArchive<Cursor<&[u8]>>) -> Vec<String> {
     // By index, not `file_names()`: only the index walk is guaranteed to follow
     // the central directory, and the member order is part of the contract.
