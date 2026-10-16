@@ -124,3 +124,22 @@ fn single_brush_root_layout() {
     assert_eq!(set.entries[0].name, "Solo");
     assert!(matches!(set.entries[0].tip, TipPreview::Available(_)));
 }
+
+#[test]
+fn no_plist_member_with_a_cp437_folder_name_reads_its_tip() {
+    let archive = brush_archive("Soft");
+    let png = real_4x4_png();
+
+    let bytes = zip_with(&[
+        (&b"P\x81nsel/Brush.archive"[..], &archive),
+        (&b"P\x81nsel/Shape.png"[..], &png),
+    ]);
+
+    let set = preview_brushset(&bytes, PreviewOptions { max_cell: 8 }).expect("set reads");
+    assert_eq!(names(&set), vec!["Soft"]);
+    assert!(
+        matches!(set.entries[0].tip, TipPreview::Available(_)),
+        "{:?}",
+        set.entries[0].tip
+    );
+}
