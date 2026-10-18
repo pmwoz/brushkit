@@ -178,10 +178,14 @@ pub struct SkippedPresetDetail {
 }
 
 /// A samp record whose tip is unreadable and that no sampled brush uses.
+/// `owner_preset_names` lists the presets that reference it as their
+/// dual-brush component (deduplicated, desc order); empty when no dualBrush
+/// reference points at it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnreadableTipDetail {
     pub uuid: Option<String>,
     pub message: String,
+    pub owner_preset_names: Vec<String>,
 }
 
 /// One entry of [`AbrPack::sampled_brushes`].

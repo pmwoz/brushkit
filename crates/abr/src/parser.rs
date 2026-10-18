@@ -590,6 +590,11 @@ fn pair_brushes(entries: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> Paired
                 Err(message) => unreadable_tip_details.push(UnreadableTipDetail {
                     uuid: samp.uuid.clone(),
                     message: message.clone(),
+                    owner_preset_names: samp
+                        .uuid
+                        .as_deref()
+                        .and_then(|u| owners.get(u).cloned())
+                        .unwrap_or_default(),
                 }),
             }
         }
@@ -4027,6 +4032,7 @@ mod tests {
             [UnreadableTipDetail {
                 uuid: Some(TIP_D.to_string()),
                 message: UNDECODABLE.to_string(),
+                owner_preset_names: vec!["Third".to_string()],
             }]
         );
         assert_same_pack(&parse_abr_deferred(&d).unwrap(), &eager);
@@ -4080,6 +4086,7 @@ mod tests {
             [UnreadableTipDetail {
                 uuid: Some(TIP_B.to_string()),
                 message: UNDECODABLE.to_string(),
+                owner_preset_names: Vec::new(),
             }]
         );
         assert_same_pack(&parse_abr_deferred(&d).unwrap(), &eager);
