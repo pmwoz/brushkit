@@ -2124,6 +2124,7 @@ mod tests {
             [UnreadableTipDetail {
                 uuid: Some("uuid-b".to_string()),
                 message: "no bitmap header".to_string(),
+                owner_preset_names: vec!["P1".to_string()],
             }]
         );
     }
