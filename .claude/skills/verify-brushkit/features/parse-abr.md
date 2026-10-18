@@ -13,7 +13,7 @@ Malformed input returns an error, never a panic.
 - `parse-all-deferred` decodes no tip up front.
 - `parse-unavailable` lists every sampled brush in `sampled_brushes`, a brush whose tip is missing or does not parse as an unavailable brush in its place.
 - `parse-patterns` returns embedded patterns and counts dropped ones.
-- `parse-diagnostics` reports dropped samp tips, skipped and unsupported presets and desc parse errors.
+- `parse-diagnostics` reports dropped samp tips, unreadable unused samp records, skipped and unsupported presets and desc parse errors.
 - `parse-malformed` returns `Err` with a message for broken input.
 
 ## How to get to it (user POV)
@@ -34,13 +34,14 @@ Preconditions:
 - **Unavailable brushes.** Run `$H run seed-unavail parse fuzz/corpus/preview_abr/unavailable_tips`. Exit `0`. `.result.pack.brushes` holds only `A` at `preset_index` `1`, and `.result.pack.computed_presets` holds `Round` at `2`. `.result.pack.sampled_brushes` is `B` at `preset_index` `0` with cause `{"unreadable":"no bitmap header found"}`, then `{"readable":0}`, then `C` at `preset_index` `3` with cause `{"missing":{"uuid":...}}` and the same uuid as its `id`. The other three modes give the same `sampled_brushes`, because `B` fails in its header.
 - **Patterns.** Run `$H run seed-patt parse fuzz/corpus/preview_abr/wellformed_v6_patt`. `.result.pack.patterns` is one 2x2 pattern named `tex`, mode `2`. The same seed with `--mode deferred-no-patterns` returns an empty `patterns`.
 - **Dropped pattern.** Run `$H run seed-dropped parse fuzz/corpus/preview_abr/patt_oversized_channel`. Exit `0` with `.result.pack.diagnostics.dropped_pattern_count` `1`.
-- **Dual-brush drops.** Find a corpus pack with a nonzero `dropped_samp_count` by running `--mode all-deferred` over the corpus. At least one v7 pack has `5`. `.result.pack.brushes` still lists every user-facing brush.
+- **Dual-brush drops.** Find a corpus pack with a nonzero `dropped_samp_count` by running `--mode all-deferred` over the corpus. At least one v7 pack has `5`. `.result.pack.brushes` still lists every user-facing brush. `.result.pack.diagnostics.dropped_tip_details` lists one entry per dropped tip with `uuid`, `width`, `height` and `owner_preset_names`, the presets that use it as their dual brush.
+- **Unreadable unused records.** `.result.pack.diagnostics.unreadable_tip_details` lists each samp record that no sampled brush uses and whose tip does not parse, with `uuid`, `message` and `owner_preset_names`. No corpus pack or fuzz seed has one, so it is `[]`. To get one, copy the v7 pack and zero the bytes that follow the `$` and the uuid in one dropped tip's samp entry, keeping the entry length. The copy lists that uuid with `message` `"no bitmap header found"` and the same `owner_preset_names` as its dropped tip detail, and `dropped_samp_count` is one lower. Zeroing the uuid too removes the record instead.
 - **Malformed.** Run `$H run seed-bad parse fuzz/corpus/preview_abr/tip_bitmap_dim_overflow`. Exit `1` with `.result.error` `"malformed block at offset 125: bitmap dimensions out of range"`. `v2_rle_overflow` and `v2_rle_underflow` give exit `1` with `samp entry length` errors.
 
 ## Gotchas
 
 - `eager` and `deferred` read patterns, the other two modes skip them, so `patterns` is empty there by design.
 - The corpus and the fuzz seeds other than `unavailable_tips` have no computed presets. `computed_presets` stays empty unless the user supplies a pack with computed tips.
-- A tip whose header parses but whose pixels do not decode is `unreadable` in `sampled_brushes` only in some modes. A v6/v7/v10 tip is `unreadable` only in `eager`. A v1/v2 RLE entry is `unreadable` in every mode but `all-deferred`. Where it is not `unreadable`, it is `readable` with the error in its `brushes[i].tip.error`. On such a pack `sampled_brushes` and `brushes` differ across modes by design.
+- A tip whose header parses but whose pixels do not decode is `unreadable` in `sampled_brushes` only in some modes. A v6/v7/v10 tip is `unreadable` only in `eager`. A v1/v2 RLE entry is `unreadable` in every mode but `all-deferred`. Where it is not `unreadable`, it is `readable` with the error in its `brushes[i].tip.error`. On such a pack `sampled_brushes` and `brushes` differ across modes by design. The same split applies to an unused v6/v7/v10 record. It is in `unreadable_tip_details` in `eager` and `deferred` and in `dropped_tip_details` in `all-deferred`.
 - Exit `101` means a panic inside the library, which is a bug on any input.
 - Eager parsing of a 30 MB pack holds every decoded tip in memory. Prefer `all-deferred` for corpus sweeps.
