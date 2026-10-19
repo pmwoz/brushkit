@@ -37,9 +37,9 @@ evidence.
 BRUSHKIT_CORPUS_DIR=<corpus dir> $H doctor
 ```
 
-Prints the checkout HEAD (flags uncommitted changes under `crates/`), the
-toolchain, the probe path, the `links:` line, the corpus file counts and the
-evidence root. Healthy means exit 0 and `links:` naming
+Prints the checkout HEAD (flags uncommitted changes under `crates/` and
+`probe/`), the toolchain, the probe path, the `links:` line, the corpus file
+counts and the evidence root. Healthy means exit 0 and `links:` naming
 `brushkit vX.Y.Z (<this repo>/crates/brushkit)`. Any other path means the probe
 is not testing this checkout.
 
@@ -86,7 +86,8 @@ feature, its entry points and the proof for each.
 Each run writes `/tmp/verify-brushkit/<RUN_ID>/<label>/` (root overridable with
 `VERIFY_BRUSHKIT_EVIDENCE`):
 
-- `command.txt`: probe arguments, the full HEAD sha and an uncommitted-changes flag.
+- `command.txt`: probe arguments, the full HEAD sha and a line for each of
+  `crates/` and `probe/` that has uncommitted changes.
 - `stdout.txt` and `summary.json`: the same JSON, with the library result.
 - `stderr.txt` and `exit_code.txt`.
 - `preview` only: `tips/NNN.png` per available tip, named by entry index, and
