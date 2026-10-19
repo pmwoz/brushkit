@@ -19,8 +19,8 @@ PROBE="$TARGET_DIR/release/brushkit-probe"
 EVIDENCE_ROOT="${VERIFY_BRUSHKIT_EVIDENCE:-/tmp/verify-brushkit}"
 
 uncommitted() {
-  git -C "$REPO" diff --quiet HEAD -- crates || echo "crates/ has uncommitted changes"
-  git -C "$SKILL_DIR/probe" diff --quiet HEAD -- . || echo "probe/ has uncommitted changes"
+  [[ -z "$(git -C "$REPO" status --porcelain -- crates)" ]] || echo "crates/ has uncommitted changes"
+  [[ -z "$(git -C "$SKILL_DIR/probe" status --porcelain -- .)" ]] || echo "probe/ has uncommitted changes"
 }
 
 build() {
