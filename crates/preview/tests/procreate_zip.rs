@@ -1,7 +1,7 @@
 mod common;
 
 use brushkit_preview::procreate::Zip;
-use common::{brush_archive, corpus_files, real_4x4_png, zip_with};
+use common::{brush_archive, corpus_files, gray_png_with_scanlines, real_4x4_png, zip_with};
 use std::path::Path;
 
 #[test]
@@ -26,6 +26,59 @@ fn two_end_of_central_directory_records_are_rejected() {
     assert!(Zip::open(&bytes).is_ok());
     let end = bytes[bytes.len() - 22..].to_vec();
     bytes.extend_from_slice(&end);
+
+    let error = Zip::open(&bytes).unwrap_err();
+    assert!(
+        error.contains("more than one end of central directory record"),
+        "{error}"
+    );
+}
+
+#[test]
+fn the_end_record_signature_in_entry_data_opens() {
+    let png = gray_png_with_scanlines(4, 1, b"\0PK\x05\x06");
+    let note = b"bytes PK\x05\x06 inside a member".to_vec();
+    let mut empty_zip = b"PK\x05\x06".to_vec();
+    empty_zip.resize(22, 0);
+    let mut zip64_locator_past_itself = b"PK\x06\x07\0\0\0\0".to_vec();
+    zip64_locator_past_itself.extend_from_slice(&u64::MAX.to_le_bytes());
+    zip64_locator_past_itself.extend_from_slice(&1u32.to_le_bytes());
+    zip64_locator_past_itself.extend_from_slice(b"PK\x05\x06\0\0\0\0\xff\xff\xff\xff");
+    zip64_locator_past_itself.resize(42, 0);
+    let mut zip64_locator_at_a_local_header = zip64_locator_past_itself.clone();
+    zip64_locator_at_a_local_header[8..16].copy_from_slice(&0u64.to_le_bytes());
+    for (name, data) in [
+        ("Shape.png", png),
+        ("Signature/note.bin", note),
+        ("Signature/empty.zip", empty_zip),
+        ("Signature/zip64.bin", zip64_locator_past_itself),
+        ("Signature/zip64_at_0.bin", zip64_locator_at_a_local_header),
+    ] {
+        let archive = brush_archive("Solo");
+        let bytes = zip_with(&[("Brush.archive", &archive[..]), (name, &data)]);
+
+        let mut zip = Zip::open(&bytes).unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(zip.read_entry(name), Ok(data), "{name}");
+    }
+}
+
+#[test]
+fn an_end_record_in_entry_data_that_passes_zip_checks_is_rejected() {
+    // zip reads a directory for the inner end record if the real one fails, so
+    // the file is rejected although the real one would open.
+    let archive = brush_archive("Solo");
+    let mut note = b"PK\x01\x02".to_vec();
+    note.resize(26, 0);
+    let placeholder = zip_with(&[("Brush.archive", &archive[..]), ("note.bin", &note)]);
+    let header = placeholder
+        .windows(4)
+        .position(|w| w == b"PK\x01\x02")
+        .unwrap();
+    note.truncate(4);
+    note.extend_from_slice(b"PK\x05\x06\0\0\0\0\x01\0\x01\0\x2e\0\0\0");
+    note.extend_from_slice(&u32::try_from(header).unwrap().to_le_bytes());
+    note.extend_from_slice(&[0, 0]);
+    let bytes = zip_with(&[("Brush.archive", &archive[..]), ("note.bin", &note)]);
 
     let error = Zip::open(&bytes).unwrap_err();
     assert!(
