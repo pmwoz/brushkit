@@ -73,10 +73,11 @@ pub fn read_zip_plist(
 /// [`Zip::open`] instead:
 ///
 /// 1. Before zip parses the file, [`Zip::open`] rejects more than one end of
-///    central directory record and a central directory or zip64 end record
-///    that starts more than [`MAX_CENTRAL_DIRECTORY_BYTES`] before the end of
-///    the file. Without that, zip can hold many times the file size. It also
-///    reads the archive at offset 0 and rejects overlapping entries. See
+///    central directory record that zip would read a central directory for,
+///    and a central directory or zip64 end record that starts more than
+///    [`MAX_CENTRAL_DIRECTORY_BYTES`] before the end of the file. Without
+///    that, zip can hold many times the file size. It also reads the archive
+///    at offset 0 and rejects overlapping entries. See
 ///    <https://github.com/pmwoz/brushkit/issues/207>,
 ///    <https://github.com/pmwoz/brushkit/issues/210> and
 ///    <https://github.com/pmwoz/brushkit/issues/154>.
@@ -103,17 +104,14 @@ impl<'a> Zip<'a> {
         let fail = |e: zip::result::ZipError| format!("failed to open zip: {e}");
         // zip 9 searches the last `size_of::<Zip32CentralDirectoryEnd>() + 4 + 65_536`
         // bytes, 65,572 on 64-bit targets, for end of central directory records. It
-        // reads a central directory for each one and holds on to its headers, which
-        // can take many times the file size. This window must not be smaller.
+        // reads a central directory for each one that passes its checks and holds on
+        // to its headers, which can take many times the file size. This window must
+        // not be smaller.
         // See <https://github.com/pmwoz/brushkit/issues/207>.
         let tail_start = bytes.len().saturating_sub(EOCD_SEARCH_BYTES);
-        let mut ends = bytes[tail_start..]
-            .windows(4)
-            .enumerate()
-            .filter(|(_, w)| *w == b"PK\x05\x06")
-            .map(|(i, _)| tail_start + i);
-        let end = ends.next();
-        if ends.next().is_some() {
+        let mut starts = (tail_start..bytes.len()).filter_map(|end| directory_start(bytes, end));
+        let start = starts.next();
+        if starts.next().is_some() {
             return Err(fail(zip::result::ZipError::InvalidArchive(
                 "more than one end of central directory record".into(),
             )));
@@ -121,14 +119,8 @@ impl<'a> Zip<'a> {
         // zip 9 reads a zip64 end record's extensible data into memory whole, and
         // central headers as [`MAX_CENTRAL_DIRECTORY_BYTES`] describes.
         // See <https://github.com/pmwoz/brushkit/issues/210>.
-        if let Some(end) = end {
-            let Some(len) = earliest_directory_byte(bytes, end)
-                .and_then(|start| bytes.len().checked_sub(usize::try_from(start).ok()?))
-            else {
-                return Err(fail(zip::result::ZipError::InvalidArchive(
-                    "end of central directory records are cut short or point past the file".into(),
-                )));
-            };
+        if let Some(start) = start {
+            let len = bytes.len() - start as usize;
             if len > MAX_CENTRAL_DIRECTORY_BYTES {
                 return Err(fail(zip::result::ZipError::InvalidArchive(
                     format!(
@@ -204,31 +196,45 @@ impl<'a> Zip<'a> {
     }
 }
 
-/// The earliest byte zip could read as a central header or a zip64 end record
-/// for the end of central directory record at `end`, or `None` when that record
-/// is cut short.
-fn earliest_directory_byte(bytes: &[u8], end: usize) -> Option<u64> {
+/// The earliest byte zip 9, opening at archive offset 0, could read as a
+/// central header or a zip64 end record when it tries the end of central
+/// directory record at `end`, or `None` when zip holds neither for that record.
+/// zip tries records from the end of the file backwards and stops at the first
+/// whose directory reads, so a record counts here even when one after it would
+/// open.
+fn directory_start(bytes: &[u8], end: usize) -> Option<u64> {
     fn le(bytes: &[u8], at: usize, len: usize) -> Option<u64> {
         let field = bytes.get(at..at.checked_add(len)?)?;
         Some(field.iter().rev().fold(0, |n, &b| (n << 8) | u64::from(b)))
     }
-    let record = bytes.get(end..)?.get(..22)?;
-    let mut earliest = le(record, 16, 4)?; // Directory offset.
+    if !bytes[end..].starts_with(b"PK\x05\x06") {
+        return None;
+    }
+    let files = le(bytes, end + 10, 2)?;
+    let size = le(bytes, end + 12, 4)?;
+    let offset = le(bytes, end + 16, 4)?;
+    let comment = le(bytes, end + 20, 2)?;
+    if end as u64 + 22 + comment > bytes.len() as u64 {
+        return None;
+    }
+    let zip64 = files == 0xffff || size == 0xffff_ffff || offset == 0xffff_ffff;
     let locator = end
         .checked_sub(20)
-        .and_then(|at| bytes.get(at..end))
-        .filter(|locator| locator.starts_with(b"PK\x06\x07"));
+        .filter(|&at| zip64 && bytes[at..].starts_with(b"PK\x06\x07"));
     if let Some(locator) = locator {
-        let zip64_end = le(locator, 8, 8)?;
-        earliest = earliest.min(zip64_end);
-        let zip64_directory = usize::try_from(zip64_end)
-            .ok()
-            .and_then(|at| le(bytes, at.checked_add(48)?, 8));
-        if let Some(offset) = zip64_directory {
-            earliest = earliest.min(offset);
+        let zip64_end = le(bytes, locator + 8, 8)?;
+        let disks = le(bytes, locator + 16, 4)?;
+        let room = (locator as u64).checked_sub(zip64_end)?;
+        if room < 4 || disks > 1 || !bytes[zip64_end as usize..].starts_with(b"PK\x06\x06") {
+            return None;
         }
+        let directory = le(bytes, zip64_end as usize + 48, 8).unwrap_or(u64::MAX);
+        return Some(zip64_end.min(directory));
     }
-    Some(earliest)
+    // With no files, zip starts the directory at the end record itself, so any
+    // central header it reads there fails its signature check.
+    let directory = files > 0 && offset + 4 <= end as u64;
+    (directory && bytes[offset as usize..].starts_with(b"PK\x01\x02")).then_some(offset)
 }
 
 /// The declared uncompressed size is an attacker-controlled zip-header field,
