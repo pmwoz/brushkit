@@ -567,56 +567,53 @@ fn pair_brushes(entries: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> Paired
                 }
             }
         }
-        let mut owners: std::collections::HashMap<&str, Vec<DualBrushOwner>> =
+        let mut owners_by_uuid: std::collections::HashMap<&str, Vec<DualBrushOwner>> =
             std::collections::HashMap::new();
         for (preset_index, info) in desc_infos.iter().enumerate() {
             if let Some(dual) = info.dual_brush_uuid.as_deref() {
-                owners.entry(dual).or_default().push(DualBrushOwner {
-                    preset_index,
-                    name: info.name.clone(),
-                });
+                owners_by_uuid
+                    .entry(dual)
+                    .or_default()
+                    .push(DualBrushOwner {
+                        preset_index,
+                        name: info.name.clone(),
+                    });
             }
         }
 
-        let mut unused_readable: Vec<(&Option<String>, &SampTip)> = Vec::new();
+        let mut dropped_tips: Vec<Option<DeferredTip>> = Vec::new();
+        let mut dropped_tip_details: Vec<DroppedTipDetail> = Vec::new();
         let mut unreadable_tip_details = Vec::new();
-        for (_, samp) in entries
+        for (idx, samp) in entries
             .iter()
             .enumerate()
             .filter(|(idx, _)| !used.contains(idx))
         {
+            let uuid_resolves_here = |uuid: &&str| uuid_to_samp.get(uuid) == Some(&idx);
+            let owners = samp
+                .uuid
+                .as_deref()
+                .filter(uuid_resolves_here)
+                .and_then(|u| owners_by_uuid.remove(u))
+                .unwrap_or_default();
             match &samp.tip {
-                Ok(tip) => unused_readable.push((&samp.uuid, tip)),
+                Ok(tip) => {
+                    dropped_tips.push(tip.deferred.clone());
+                    dropped_tip_details.push(DroppedTipDetail {
+                        uuid: samp.uuid.clone(),
+                        width: tip.bitmap.width,
+                        height: tip.bitmap.height,
+                        owners,
+                        bitmap: tip.bitmap.clone(),
+                    });
+                }
                 Err(message) => unreadable_tip_details.push(UnreadableTipDetail {
                     uuid: samp.uuid.clone(),
                     message: message.clone(),
-                    owners: samp
-                        .uuid
-                        .as_deref()
-                        .and_then(|u| owners.get(u).cloned())
-                        .unwrap_or_default(),
+                    owners,
                 }),
             }
         }
-
-        let dropped_tips: Vec<Option<DeferredTip>> = unused_readable
-            .iter()
-            .map(|(_, tip)| tip.deferred.clone())
-            .collect();
-
-        let dropped_tip_details: Vec<DroppedTipDetail> = unused_readable
-            .iter()
-            .map(|(uuid, tip)| DroppedTipDetail {
-                uuid: (*uuid).clone(),
-                width: tip.bitmap.width,
-                height: tip.bitmap.height,
-                owners: uuid
-                    .as_deref()
-                    .and_then(|u| owners.get(u).cloned())
-                    .unwrap_or_default(),
-                bitmap: tip.bitmap.clone(),
-            })
-            .collect();
 
         return PairedBrushes {
             dropped_samp_count: dropped_tip_details.len(),
@@ -1998,6 +1995,26 @@ mod tests {
         assert_eq!(dropped_samp_count, 0);
         assert_eq!(skipped_preset_count, 0);
         assert!(dropped_tip_details.is_empty());
+    }
+
+    #[test]
+    fn duplicates_of_an_emitted_dual_brush_tip_have_no_owners() {
+        let bitmaps = vec![
+            samp(Some("uuid-a")),
+            samp(Some("uuid-b")),
+            samp(Some("uuid-b")),
+        ];
+        let infos = vec![
+            info_dual("P1", Some("uuid-a"), "uuid-b"),
+            info("P2", Some("uuid-b"), None),
+        ];
+        let PairedBrushes {
+            dropped_tip_details,
+            ..
+        } = pair_brushes(bitmaps, &infos);
+        assert_eq!(dropped_tip_details.len(), 1);
+        assert_eq!(dropped_tip_details[0].uuid.as_deref(), Some("uuid-b"));
+        assert!(dropped_tip_details[0].owners.is_empty());
     }
 
     #[test]
@@ -4175,6 +4192,42 @@ mod tests {
             );
             assert_same_pack(&parse_abr_deferred(&d).unwrap(), &eager);
         }
+    }
+
+    #[test]
+    fn a_dual_brush_uuid_many_records_carry_lists_its_owners_once() {
+        let records: Vec<(&str, bool)> = [(TIP_A, true), (TIP_B, false)]
+            .into_iter()
+            .chain(std::iter::repeat_n((TIP_B, true), 12))
+            .collect();
+        let names: Vec<String> = (0..12).map(|i| format!("P{i}")).collect();
+        let presets: Vec<(&str, &str, Option<&str>)> = names
+            .iter()
+            .map(|name| (name.as_str(), TIP_A, Some(TIP_B)))
+            .collect();
+        let d = pack_of(&records, &presets);
+
+        let eager = parse_abr(&d).unwrap();
+
+        let expected: Vec<DualBrushOwner> = names
+            .iter()
+            .enumerate()
+            .map(|(preset_index, name)| DualBrushOwner {
+                preset_index,
+                name: name.clone(),
+            })
+            .collect();
+        let owned: Vec<(u32, &[DualBrushOwner])> = eager
+            .dropped_tip_details
+            .iter()
+            .filter(|detail| !detail.owners.is_empty())
+            .map(|detail| (detail.bitmap.width, detail.owners.as_slice()))
+            .collect();
+        assert_eq!(eager.dropped_tip_details.len(), 12);
+        assert_eq!(owned, [(4 + 13, expected.as_slice())]);
+        assert_eq!(eager.unreadable_tip_details.len(), 1);
+        assert!(eager.unreadable_tip_details[0].owners.is_empty());
+        assert_same_pack(&parse_abr_deferred(&d).unwrap(), &eager);
     }
 
     #[derive(Debug, PartialEq)]

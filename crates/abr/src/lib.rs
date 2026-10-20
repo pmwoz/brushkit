@@ -160,7 +160,9 @@ impl Default for AbrPack {
 /// A samp tip the presets-first pairing dropped (referenced by no emitted
 /// preset). `owners` lists the presets that reference it as their dual-brush
 /// component, one per preset in desc order; empty when no dualBrush reference
-/// points at it.
+/// points at it. Of several records that carry one uuid, only the record a
+/// sampledData reference to that uuid pairs with lists owners, so none does
+/// when a preset samples that record.
 #[derive(Debug, Clone)]
 pub struct DroppedTipDetail {
     pub uuid: Option<String>,
@@ -180,7 +182,9 @@ pub struct SkippedPresetDetail {
 /// A samp record whose tip is unreadable and that no sampled brush uses.
 /// `owners` lists the presets that reference it as their dual-brush
 /// component, one per preset in desc order; empty when no dualBrush reference
-/// points at it.
+/// points at it. Of several records that carry one uuid, only the record a
+/// sampledData reference to that uuid pairs with lists owners, so none does
+/// when a preset samples that record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnreadableTipDetail {
     pub uuid: Option<String>,
