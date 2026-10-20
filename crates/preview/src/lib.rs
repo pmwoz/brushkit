@@ -35,7 +35,6 @@ use brushkit_abr::{
     UnavailableTip,
 };
 use std::collections::HashMap;
-use std::io::Cursor;
 use std::num::NonZeroU32;
 
 #[derive(Debug, Clone, Copy)]
@@ -535,9 +534,9 @@ fn brushset(
     budget_bytes: usize,
 ) -> Result<PreviewSet, PreviewError> {
     let max_cell = check_max_cell(opts)?;
-    let mut zip = open_zip(bytes)?;
+    let mut zip = procreate::Zip::open(bytes).map_err(PreviewError)?;
 
-    let (set_name, prefixes) = if zip.index_for_name("brushset.plist").is_some() {
+    let (set_name, prefixes) = if zip.contains("brushset.plist") {
         let buf = zip.read_plist("brushset.plist").map_err(PreviewError)?;
         let (name, uuids) = procreate::parse_brushset_plist(&buf).map_err(PreviewError)?;
         (name, uuids.into_iter().map(|u| format!("{u}/")).collect())
@@ -613,9 +612,9 @@ fn brush(
     budget_bytes: usize,
 ) -> Result<PreviewSet, PreviewError> {
     let max_cell = check_max_cell(opts)?;
-    let mut zip = open_zip(bytes)?;
+    let mut zip = procreate::Zip::open(bytes).map_err(PreviewError)?;
 
-    if zip.index_for_name("Brush.archive").is_none() {
+    if !zip.contains("Brush.archive") {
         return Err(PreviewError("Brush.archive not found".to_string()));
     }
 
@@ -627,91 +626,6 @@ fn brush(
         entries,
         not_reached,
     })
-}
-
-fn open_zip(bytes: &[u8]) -> Result<procreate::Zip<'_>, PreviewError> {
-    const EOCD_SEARCH_BYTES: usize = 65_572;
-    let fail = |e: zip::result::ZipError| PreviewError(format!("failed to open zip: {e}"));
-    // zip 9 searches the last `size_of::<Zip32CentralDirectoryEnd>() + 4 + 65_536`
-    // bytes, 65,572 on 64-bit targets, for end of central directory records. It
-    // reads a central directory for each one and holds on to its headers, which
-    // can take many times the file size. This window must not be smaller.
-    // See <https://github.com/pmwoz/brushkit/issues/207>.
-    let tail_start = bytes.len().saturating_sub(EOCD_SEARCH_BYTES);
-    let mut ends = bytes[tail_start..]
-        .windows(4)
-        .enumerate()
-        .filter(|(_, w)| *w == b"PK\x05\x06")
-        .map(|(i, _)| tail_start + i);
-    let end = ends.next();
-    if ends.next().is_some() {
-        return Err(fail(zip::result::ZipError::InvalidArchive(
-            "more than one end of central directory record".into(),
-        )));
-    }
-    // zip 9 reads a zip64 end record's extensible data into memory whole, and
-    // central headers as [`procreate::MAX_CENTRAL_DIRECTORY_BYTES`] describes.
-    // See <https://github.com/pmwoz/brushkit/issues/210>.
-    if let Some(end) = end {
-        let Some(len) = earliest_directory_byte(bytes, end)
-            .and_then(|start| bytes.len().checked_sub(usize::try_from(start).ok()?))
-        else {
-            return Err(fail(zip::result::ZipError::InvalidArchive(
-                "end of central directory records are cut short or point past the file".into(),
-            )));
-        };
-        if len > procreate::MAX_CENTRAL_DIRECTORY_BYTES {
-            return Err(fail(zip::result::ZipError::InvalidArchive(
-                format!(
-                    "central directory or zip64 end record starts {len} bytes before the end of the file, over the limit of {}",
-                    procreate::MAX_CENTRAL_DIRECTORY_BYTES
-                )
-                .into(),
-            )));
-        }
-    }
-    // The default `ArchiveOffset::Detect` stores the offset of every central
-    // header signature in the file, which can take many times the file size.
-    let config = zip::read::Config {
-        archive_offset: zip::read::ArchiveOffset::Known(0),
-    };
-    let mut zip = zip::ZipArchive::with_config(config, Cursor::new(bytes)).map_err(fail)?;
-    // Overlapping entries let two names read the same stored bytes. Rejecting
-    // them keeps the stored bytes all entries read within the file size.
-    // See <https://github.com/pmwoz/brushkit/issues/154>.
-    if zip.has_overlapping_entries().map_err(fail)? {
-        return Err(fail(zip::result::ZipError::InvalidArchive(
-            "entries overlap".into(),
-        )));
-    }
-    Ok(procreate::Zip::new(zip))
-}
-
-/// The earliest byte zip could read as a central header or a zip64 end record
-/// for the end of central directory record at `end`, or `None` when that record
-/// is cut short.
-fn earliest_directory_byte(bytes: &[u8], end: usize) -> Option<u64> {
-    fn le(bytes: &[u8], at: usize, len: usize) -> Option<u64> {
-        let field = bytes.get(at..at.checked_add(len)?)?;
-        Some(field.iter().rev().fold(0, |n, &b| (n << 8) | u64::from(b)))
-    }
-    let record = bytes.get(end..)?.get(..22)?;
-    let mut earliest = le(record, 16, 4)?; // Directory offset.
-    let locator = end
-        .checked_sub(20)
-        .and_then(|at| bytes.get(at..end))
-        .filter(|locator| locator.starts_with(b"PK\x06\x07"));
-    if let Some(locator) = locator {
-        let zip64_end = le(locator, 8, 8)?;
-        earliest = earliest.min(zip64_end);
-        let zip64_directory = usize::try_from(zip64_end)
-            .ok()
-            .and_then(|at| le(bytes, at.checked_add(48)?, 8));
-        if let Some(offset) = zip64_directory {
-            earliest = earliest.min(offset);
-        }
-    }
-    Some(earliest)
 }
 
 /// One member of a Procreate archive, as the entry for one reference to it.
@@ -782,7 +696,7 @@ fn read_member(
         .and_then(|buf| procreate::brush_name(&buf));
 
     let shape_path = format!("{prefix}Shape.png");
-    let shape = if zip.index_for_name(&shape_path).is_some() {
+    let shape = if zip.contains(&shape_path) {
         Some(zip.read_entry(&shape_path))
     } else {
         None
