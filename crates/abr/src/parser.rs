@@ -4177,6 +4177,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_dual_brush_uuid_many_records_carry_lists_its_owners_once() {
+        let records: Vec<(&str, bool)> = [(TIP_A, true), (TIP_B, false)]
+            .into_iter()
+            .chain(std::iter::repeat_n((TIP_B, true), 12))
+            .collect();
+        let names: Vec<String> = (0..12).map(|i| format!("P{i}")).collect();
+        let presets: Vec<(&str, &str, Option<&str>)> = names
+            .iter()
+            .map(|name| (name.as_str(), TIP_A, Some(TIP_B)))
+            .collect();
+        let d = pack_of(&records, &presets);
+
+        let eager = parse_abr(&d).unwrap();
+
+        let expected: Vec<DualBrushOwner> = names
+            .iter()
+            .enumerate()
+            .map(|(preset_index, name)| DualBrushOwner {
+                preset_index,
+                name: name.clone(),
+            })
+            .collect();
+        let owned: Vec<(u32, &[DualBrushOwner])> = eager
+            .dropped_tip_details
+            .iter()
+            .filter(|detail| !detail.owners.is_empty())
+            .map(|detail| (detail.bitmap.width, detail.owners.as_slice()))
+            .collect();
+        assert_eq!(eager.dropped_tip_details.len(), 12);
+        assert_eq!(owned, [(4 + 13, expected.as_slice())]);
+        assert_eq!(eager.unreadable_tip_details.len(), 1);
+        assert!(eager.unreadable_tip_details[0].owners.is_empty());
+        assert_same_pack(&parse_abr_deferred(&d).unwrap(), &eager);
+    }
+
     #[derive(Debug, PartialEq)]
     struct UpFront {
         reported: usize,
