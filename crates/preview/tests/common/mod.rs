@@ -112,6 +112,11 @@ pub fn gray_png(width: u32, height: u32, fill: u8) -> Vec<u8> {
     png_file(width, height, 8, GRAY, &gray_scanlines(width, height, fill))
 }
 
+/// An 8-bit grayscale PNG of `width` x `height` whose IDAT holds `scanlines`.
+pub fn gray_png_with_scanlines(width: u32, height: u32, scanlines: &[u8]) -> Vec<u8> {
+    png_file(width, height, 8, GRAY, scanlines)
+}
+
 pub fn real_4x4_png() -> Vec<u8> {
     gray_png(4, 4, 128)
 }
