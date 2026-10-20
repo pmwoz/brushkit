@@ -178,12 +178,16 @@ fn pack_json(pack: &AbrPack, tip: impl Fn(usize) -> Value) -> Value {
                 "uuid": d.uuid,
                 "width": d.width,
                 "height": d.height,
-                "owner_preset_names": d.owner_preset_names,
+                "owners": d.owners.iter().map(|o| json!({
+                    "preset_index": o.preset_index, "name": o.name,
+                })).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
             "unreadable_tip_details": pack.unreadable_tip_details.iter().map(|d| json!({
                 "uuid": d.uuid,
                 "message": d.message,
-                "owner_preset_names": d.owner_preset_names,
+                "owners": d.owners.iter().map(|o| json!({
+                    "preset_index": o.preset_index, "name": o.name,
+                })).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
             "skipped_preset_count": pack.skipped_preset_count,
             "unsupported_tip_count": pack.unsupported_tip_count,

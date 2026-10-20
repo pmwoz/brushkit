@@ -167,16 +167,8 @@ fn deferred_parse_yields_the_pack_parse_abr_does() {
             .enumerate()
         {
             assert_eq!(
-                (
-                    &dropped.uuid,
-                    &dropped.owner_preset_names,
-                    &dropped.bitmap.data
-                ),
-                (
-                    &expected.uuid,
-                    &expected.owner_preset_names,
-                    &expected.bitmap.data
-                ),
+                (&dropped.uuid, &dropped.owners, &dropped.bitmap.data),
+                (&expected.uuid, &expected.owners, &expected.bitmap.data),
                 "{name}: dropped tip {j}"
             );
         }

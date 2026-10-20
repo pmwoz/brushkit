@@ -158,15 +158,15 @@ impl Default for AbrPack {
 }
 
 /// A samp tip the presets-first pairing dropped (referenced by no emitted
-/// preset). `owner_preset_names` lists the presets that reference it as
-/// their dual-brush component (deduplicated, desc order); empty when no
-/// dualBrush reference points at it.
+/// preset). `owners` lists the presets that reference it as their dual-brush
+/// component, one per preset in desc order; empty when no dualBrush reference
+/// points at it.
 #[derive(Debug, Clone)]
 pub struct DroppedTipDetail {
     pub uuid: Option<String>,
     pub width: u32,
     pub height: u32,
-    pub owner_preset_names: Vec<String>,
+    pub owners: Vec<DualBrushOwner>,
     pub bitmap: TipBitmap,
 }
 
@@ -178,14 +178,23 @@ pub struct SkippedPresetDetail {
 }
 
 /// A samp record whose tip is unreadable and that no sampled brush uses.
-/// `owner_preset_names` lists the presets that reference it as their
-/// dual-brush component (deduplicated, desc order); empty when no dualBrush
-/// reference points at it.
+/// `owners` lists the presets that reference it as their dual-brush
+/// component, one per preset in desc order; empty when no dualBrush reference
+/// points at it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnreadableTipDetail {
     pub uuid: Option<String>,
     pub message: String,
-    pub owner_preset_names: Vec<String>,
+    pub owners: Vec<DualBrushOwner>,
+}
+
+/// A preset that uses a samp record as its dual-brush component.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DualBrushOwner {
+    /// Index of the preset in desc order, as `AbrBrush::preset_index`.
+    pub preset_index: usize,
+    /// Preset name from the descriptor, or empty if absent.
+    pub name: String,
 }
 
 /// One entry of [`AbrPack::sampled_brushes`].
