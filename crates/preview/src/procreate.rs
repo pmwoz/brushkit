@@ -48,8 +48,8 @@ pub const MAX_CENTRAL_DIRECTORY_BYTES: usize = 2 * 1024 * 1024;
 ///
 /// `path` is matched against the raw name bytes. zip decodes a name that is
 /// not UTF-8 as CP437, so the name that `name_for_index`, `file_names` or
-/// [`members_in_zip_order`] returns for such an entry is not found.
-/// [`preview_brushset`](crate::preview_brushset) finds such entries.
+/// [`members_in_zip_order`] returns for such an entry is not found. [`Zip`]
+/// finds such entries.
 pub fn read_zip_entry(
     zip: &mut zip::ZipArchive<Cursor<&[u8]>>,
     path: &str,
@@ -68,11 +68,27 @@ pub fn read_zip_plist(
     read_capped(zip, index, path, MAX_PLIST_BYTES)
 }
 
-/// A zip whose entries are also found by the names `name_for_index` returns.
-/// zip 9 finds an entry by its raw name bytes but decodes a name that is not
-/// UTF-8 as CP437, so a member directory taken from the decoded names would not
-/// find its own entries. See <https://github.com/pmwoz/brushkit/issues/208>.
-pub(crate) struct Zip<'a> {
+/// A Procreate `.brush` or `.brushset` zip with two guards that
+/// `zip::ZipArchive::new` lacks, so a consumer opens one through
+/// [`Zip::open`] instead:
+///
+/// 1. Before zip parses the file, [`Zip::open`] rejects more than one end of
+///    central directory record and a central directory or zip64 end record
+///    that starts more than [`MAX_CENTRAL_DIRECTORY_BYTES`] before the end of
+///    the file. Without that, zip can hold many times the file size. It also
+///    reads the archive at offset 0 and rejects overlapping entries. See
+///    <https://github.com/pmwoz/brushkit/issues/207>,
+///    <https://github.com/pmwoz/brushkit/issues/210> and
+///    <https://github.com/pmwoz/brushkit/issues/154>.
+/// 2. A name that [`Zip::names`] or [`Zip::members_in_zip_order`] returns
+///    finds an entry with that name. zip 9 finds an entry by its raw name
+///    bytes but decodes a name that is not UTF-8 as CP437, so a raw lookup of
+///    such a name misses. See <https://github.com/pmwoz/brushkit/issues/208>.
+///    When a UTF-8 name equals another entry's CP437 decoding, both entries
+///    list the same name and the lookup finds the entry whose raw name
+///    matches.
+#[derive(Debug)]
+pub struct Zip<'a> {
     archive: zip::ZipArchive<Cursor<&'a [u8]>>,
     /// The entries a raw lookup of their decoded name misses. It holds at most
     /// one entry per 46-byte central header, so
@@ -81,7 +97,61 @@ pub(crate) struct Zip<'a> {
 }
 
 impl<'a> Zip<'a> {
-    pub(crate) fn new(archive: zip::ZipArchive<Cursor<&'a [u8]>>) -> Self {
+    /// Opens `bytes` with both guards [`Zip`] describes.
+    pub fn open(bytes: &'a [u8]) -> Result<Self, String> {
+        const EOCD_SEARCH_BYTES: usize = 65_572;
+        let fail = |e: zip::result::ZipError| format!("failed to open zip: {e}");
+        // zip 9 searches the last `size_of::<Zip32CentralDirectoryEnd>() + 4 + 65_536`
+        // bytes, 65,572 on 64-bit targets, for end of central directory records. It
+        // reads a central directory for each one and holds on to its headers, which
+        // can take many times the file size. This window must not be smaller.
+        // See <https://github.com/pmwoz/brushkit/issues/207>.
+        let tail_start = bytes.len().saturating_sub(EOCD_SEARCH_BYTES);
+        let mut ends = bytes[tail_start..]
+            .windows(4)
+            .enumerate()
+            .filter(|(_, w)| *w == b"PK\x05\x06")
+            .map(|(i, _)| tail_start + i);
+        let end = ends.next();
+        if ends.next().is_some() {
+            return Err(fail(zip::result::ZipError::InvalidArchive(
+                "more than one end of central directory record".into(),
+            )));
+        }
+        // zip 9 reads a zip64 end record's extensible data into memory whole, and
+        // central headers as [`MAX_CENTRAL_DIRECTORY_BYTES`] describes.
+        // See <https://github.com/pmwoz/brushkit/issues/210>.
+        if let Some(end) = end {
+            let Some(len) = earliest_directory_byte(bytes, end)
+                .and_then(|start| bytes.len().checked_sub(usize::try_from(start).ok()?))
+            else {
+                return Err(fail(zip::result::ZipError::InvalidArchive(
+                    "end of central directory records are cut short or point past the file".into(),
+                )));
+            };
+            if len > MAX_CENTRAL_DIRECTORY_BYTES {
+                return Err(fail(zip::result::ZipError::InvalidArchive(
+                    format!(
+                        "central directory or zip64 end record starts {len} bytes before the end of the file, over the limit of {MAX_CENTRAL_DIRECTORY_BYTES}"
+                    )
+                    .into(),
+                )));
+            }
+        }
+        // The default `ArchiveOffset::Detect` stores the offset of every central
+        // header signature in the file, which can take many times the file size.
+        let config = zip::read::Config {
+            archive_offset: zip::read::ArchiveOffset::Known(0),
+        };
+        let mut archive = zip::ZipArchive::with_config(config, Cursor::new(bytes)).map_err(fail)?;
+        // Overlapping entries let two names read the same stored bytes. Rejecting
+        // them keeps the stored bytes all entries read within the file size.
+        // See <https://github.com/pmwoz/brushkit/issues/154>.
+        if archive.has_overlapping_entries().map_err(fail)? {
+            return Err(fail(zip::result::ZipError::InvalidArchive(
+                "entries overlap".into(),
+            )));
+        }
         let decoded = (0..archive.len())
             .filter_map(|i| {
                 let name = archive.name_for_index(i)?.ok()?;
@@ -91,28 +161,74 @@ impl<'a> Zip<'a> {
                     .then(|| (name.into_owned(), i))
             })
             .collect();
-        Zip { archive, decoded }
+        Ok(Zip { archive, decoded })
     }
 
-    pub(crate) fn index_for_name(&self, name: &str) -> Option<usize> {
+    /// Every entry name as `name_for_index` decodes it, in central-directory
+    /// order. An entry whose name does not decode is left out. A name can
+    /// repeat, as [`Zip`] describes.
+    pub fn names(&self) -> Vec<String> {
+        (0..self.archive.len())
+            .filter_map(|i| Some(self.archive.name_for_index(i)?.ok()?.into_owned()))
+            .collect()
+    }
+
+    /// Whether an entry is found by `name`, raw or decoded.
+    pub fn contains(&self, name: &str) -> bool {
+        self.index_for_name(name).is_some()
+    }
+
+    fn index_for_name(&self, name: &str) -> Option<usize> {
         self.archive
             .index_for_name(name)
             .or_else(|| self.decoded.get(name).copied())
     }
 
-    pub(crate) fn read_entry(&mut self, path: &str) -> Result<Vec<u8>, String> {
-        let index = self.index_for_name(path);
-        read_capped(&mut self.archive, index, path, MAX_ENTRY_BYTES)
+    /// Reads the entry `name` finds, of at most [`MAX_ENTRY_BYTES`]. Plist
+    /// entries go through [`Zip::read_plist`].
+    pub fn read_entry(&mut self, name: &str) -> Result<Vec<u8>, String> {
+        let index = self.index_for_name(name);
+        read_capped(&mut self.archive, index, name, MAX_ENTRY_BYTES)
     }
 
-    pub(crate) fn read_plist(&mut self, path: &str) -> Result<Vec<u8>, String> {
-        let index = self.index_for_name(path);
-        read_capped(&mut self.archive, index, path, MAX_PLIST_BYTES)
+    /// [`Zip::read_entry`] capped at [`MAX_PLIST_BYTES`].
+    pub fn read_plist(&mut self, name: &str) -> Result<Vec<u8>, String> {
+        let index = self.index_for_name(name);
+        read_capped(&mut self.archive, index, name, MAX_PLIST_BYTES)
     }
 
-    pub(crate) fn members_in_zip_order(&mut self) -> Vec<String> {
-        members_in_zip_order(&mut self.archive)
+    /// The members [`members_in_zip_order`] lists. Each finds its entries
+    /// through [`Zip::read_entry`] and [`Zip::read_plist`].
+    pub fn members_in_zip_order(&self) -> Vec<String> {
+        members_of(&self.archive)
     }
+}
+
+/// The earliest byte zip could read as a central header or a zip64 end record
+/// for the end of central directory record at `end`, or `None` when that record
+/// is cut short.
+fn earliest_directory_byte(bytes: &[u8], end: usize) -> Option<u64> {
+    fn le(bytes: &[u8], at: usize, len: usize) -> Option<u64> {
+        let field = bytes.get(at..at.checked_add(len)?)?;
+        Some(field.iter().rev().fold(0, |n, &b| (n << 8) | u64::from(b)))
+    }
+    let record = bytes.get(end..)?.get(..22)?;
+    let mut earliest = le(record, 16, 4)?; // Directory offset.
+    let locator = end
+        .checked_sub(20)
+        .and_then(|at| bytes.get(at..end))
+        .filter(|locator| locator.starts_with(b"PK\x06\x07"));
+    if let Some(locator) = locator {
+        let zip64_end = le(locator, 8, 8)?;
+        earliest = earliest.min(zip64_end);
+        let zip64_directory = usize::try_from(zip64_end)
+            .ok()
+            .and_then(|at| le(bytes, at.checked_add(48)?, 8));
+        if let Some(offset) = zip64_directory {
+            earliest = earliest.min(offset);
+        }
+    }
+    Some(earliest)
 }
 
 /// The declared uncompressed size is an attacker-controlled zip-header field,
@@ -431,8 +547,13 @@ pub fn brush_name(archive_bytes: &[u8]) -> Result<Option<String>, String> {
 /// with an entry named exactly `d/Brush.archive`, in first-appearance zip order.
 /// `d/Reset/Brush.archive` does not make `d/Reset` a member.
 /// A name that is not UTF-8 comes back decoded as CP437, so [`read_zip_entry`]
-/// and [`read_zip_plist`] do not find that member's entries.
+/// and [`read_zip_plist`] do not find that member's entries. [`Zip`] finds
+/// them.
 pub fn members_in_zip_order(zip: &mut zip::ZipArchive<Cursor<&[u8]>>) -> Vec<String> {
+    members_of(zip)
+}
+
+fn members_of(zip: &zip::ZipArchive<Cursor<&[u8]>>) -> Vec<String> {
     // By index, not `file_names()`: only the index walk is guaranteed to follow
     // the central directory, and the member order is part of the contract.
     (0..zip.len())
