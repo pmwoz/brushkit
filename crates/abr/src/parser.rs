@@ -30,7 +30,7 @@ use super::descriptor::{extract_all_brush_info_inner, BrushDescInfo, PresetTip};
 use super::pattern::parse_patt_block;
 use super::{
     AbrBrush, AbrError, AbrPack, AbrVersion, BrushDescriptor, ComputedPreset, DroppedTipDetail,
-    SampledBrush, SkippedPresetDetail, TipBitmap, UnavailableBrush, UnavailableTip,
+    DualBrushOwner, SampledBrush, SkippedPresetDetail, TipBitmap, UnavailableBrush, UnavailableTip,
     UnreadableTipDetail, UnsupportedTipPresetDetail,
 };
 use crate::limits::{MAX_DIMENSION, MAX_NAME_CODE_UNITS};
@@ -567,14 +567,14 @@ fn pair_brushes(entries: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> Paired
                 }
             }
         }
-        let mut owners: std::collections::HashMap<&str, Vec<String>> =
+        let mut owners: std::collections::HashMap<&str, Vec<DualBrushOwner>> =
             std::collections::HashMap::new();
-        for info in desc_infos {
+        for (preset_index, info) in desc_infos.iter().enumerate() {
             if let Some(dual) = info.dual_brush_uuid.as_deref() {
-                let names = owners.entry(dual).or_default();
-                if !names.contains(&info.name) {
-                    names.push(info.name.clone());
-                }
+                owners.entry(dual).or_default().push(DualBrushOwner {
+                    preset_index,
+                    name: info.name.clone(),
+                });
             }
         }
 
@@ -590,7 +590,7 @@ fn pair_brushes(entries: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> Paired
                 Err(message) => unreadable_tip_details.push(UnreadableTipDetail {
                     uuid: samp.uuid.clone(),
                     message: message.clone(),
-                    owner_preset_names: samp
+                    owners: samp
                         .uuid
                         .as_deref()
                         .and_then(|u| owners.get(u).cloned())
@@ -610,7 +610,7 @@ fn pair_brushes(entries: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> Paired
                 uuid: (*uuid).clone(),
                 width: tip.bitmap.width,
                 height: tip.bitmap.height,
-                owner_preset_names: uuid
+                owners: uuid
                     .as_deref()
                     .and_then(|u| owners.get(u).cloned())
                     .unwrap_or_default(),
@@ -1927,7 +1927,59 @@ mod tests {
         assert_eq!(skipped_preset_count, 0);
         assert_eq!(dropped_tip_details.len(), 1);
         assert_eq!(dropped_tip_details[0].uuid.as_deref(), Some("uuid-b"));
-        assert_eq!(dropped_tip_details[0].owner_preset_names, vec!["P1"]);
+        assert_eq!(
+            dropped_tip_details[0].owners,
+            [DualBrushOwner {
+                preset_index: 0,
+                name: "P1".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn same_named_dual_owners_are_told_apart_by_preset_index() {
+        let bitmaps = vec![
+            samp(Some("uuid-a")),
+            samp(Some("uuid-b")),
+            samp(Some("uuid-c")),
+            unreadable_samp(Some("uuid-d")),
+        ];
+        let infos = vec![
+            info_dual("P", Some("uuid-a"), "uuid-d"),
+            info_dual("P", Some("uuid-c"), "uuid-b"),
+            info_dual("P", Some("uuid-a"), "uuid-b"),
+        ];
+        let PairedBrushes {
+            dropped_tip_details,
+            unreadable_tip_details,
+            ..
+        } = pair_brushes(bitmaps, &infos);
+        assert_eq!(dropped_tip_details.len(), 1);
+        assert_eq!(dropped_tip_details[0].uuid.as_deref(), Some("uuid-b"));
+        assert_eq!(
+            dropped_tip_details[0].owners,
+            [
+                DualBrushOwner {
+                    preset_index: 1,
+                    name: "P".to_string(),
+                },
+                DualBrushOwner {
+                    preset_index: 2,
+                    name: "P".to_string(),
+                },
+            ]
+        );
+        assert_eq!(
+            unreadable_tip_details,
+            [UnreadableTipDetail {
+                uuid: Some("uuid-d".to_string()),
+                message: "no bitmap header".to_string(),
+                owners: vec![DualBrushOwner {
+                    preset_index: 0,
+                    name: "P".to_string(),
+                }],
+            }]
+        );
     }
 
     #[test]
@@ -1974,7 +2026,7 @@ mod tests {
         } = pair_brushes(bitmaps, &infos);
         assert_eq!(dropped_tip_details.len(), 1);
         assert_eq!(dropped_tip_details[0].uuid.as_deref(), Some("uuid-b"));
-        assert!(dropped_tip_details[0].owner_preset_names.is_empty());
+        assert!(dropped_tip_details[0].owners.is_empty());
     }
 
     fn unavailable(
@@ -2129,7 +2181,10 @@ mod tests {
             [UnreadableTipDetail {
                 uuid: Some("uuid-b".to_string()),
                 message: "no bitmap header".to_string(),
-                owner_preset_names: vec!["P1".to_string()],
+                owners: vec![DualBrushOwner {
+                    preset_index: 0,
+                    name: "P1".to_string(),
+                }],
             }]
         );
     }
@@ -3583,8 +3638,8 @@ mod tests {
             .zip(&paired.dropped_tip_details)
         {
             assert_eq!(
-                (&a.uuid, a.width, a.height, &a.owner_preset_names),
-                (&p.uuid, p.width, p.height, &p.owner_preset_names)
+                (&a.uuid, a.width, a.height, &a.owners),
+                (&p.uuid, p.width, p.height, &p.owners)
             );
             assert_eq!(
                 (a.bitmap.width, a.bitmap.height, a.bitmap.depth),
@@ -4032,7 +4087,10 @@ mod tests {
             [UnreadableTipDetail {
                 uuid: Some(TIP_D.to_string()),
                 message: UNDECODABLE.to_string(),
-                owner_preset_names: vec!["Third".to_string()],
+                owners: vec![DualBrushOwner {
+                    preset_index: 2,
+                    name: "Third".to_string(),
+                }],
             }]
         );
         assert_same_pack(&parse_abr_deferred(&d).unwrap(), &eager);
@@ -4086,7 +4144,7 @@ mod tests {
             [UnreadableTipDetail {
                 uuid: Some(TIP_B.to_string()),
                 message: UNDECODABLE.to_string(),
-                owner_preset_names: Vec::new(),
+                owners: Vec::new(),
             }]
         );
         assert_same_pack(&parse_abr_deferred(&d).unwrap(), &eager);
