@@ -533,6 +533,7 @@ fn pair_brushes(entries: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> Paired
             let unavailable = |cause| {
                 SampledBrush::Unavailable(UnavailableBrush {
                     id: id.clone(),
+                    uuid: Some(uuid.to_string()),
                     name: info.name.clone(),
                     preset_index: Some(pi),
                     cause,
@@ -554,6 +555,7 @@ fn pair_brushes(entries: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> Paired
                     sampled_brushes.push(SampledBrush::Readable(brushes.len()));
                     brushes.push(AbrBrush {
                         id,
+                        uuid: Some(uuid.to_string()),
                         name: info.name.clone(),
                         tip: tip.bitmap.clone(),
                         descriptor: info.descriptor.clone(),
@@ -642,7 +644,8 @@ fn pair_brushes(entries: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> Paired
     let mut tips: Vec<Option<DeferredTip>> = Vec::new();
     let mut sampled_brushes = Vec::new();
     for (i, samp) in entries.into_iter().enumerate().rev() {
-        let id = samp.uuid.unwrap_or_else(|| format!("brush_{i}"));
+        let uuid = samp.uuid;
+        let id = uuid.clone().unwrap_or_else(|| format!("brush_{i}"));
 
         let owner = record_owners.get(i).copied();
         let preset_index = owner.map(|(pi, _)| pi);
@@ -654,6 +657,7 @@ fn pair_brushes(entries: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> Paired
                 sampled_brushes.push(SampledBrush::Readable(brushes.len()));
                 brushes.push(AbrBrush {
                     id,
+                    uuid,
                     name,
                     tip: tip.bitmap,
                     descriptor: matched
@@ -667,6 +671,7 @@ fn pair_brushes(entries: Vec<SampEntry>, desc_infos: &[BrushDescInfo]) -> Paired
             Err(message) => {
                 sampled_brushes.push(SampledBrush::Unavailable(UnavailableBrush {
                     id,
+                    uuid,
                     name,
                     preset_index,
                     cause: UnavailableTip::Unreadable(message),
@@ -863,6 +868,7 @@ fn parse_legacy(
             Ok((data, deferred)) => {
                 let brush = AbrBrush {
                     id,
+                    uuid: None,
                     name,
                     tip: TipBitmap {
                         width,
@@ -878,6 +884,7 @@ fn parse_legacy(
             }
             Err(message) => Err(UnavailableBrush {
                 id,
+                uuid: None,
                 name,
                 preset_index: None,
                 cause: UnavailableTip::Unreadable(message),
@@ -2048,12 +2055,14 @@ mod tests {
 
     fn unavailable(
         id: &str,
+        uuid: Option<&str>,
         name: &str,
         preset_index: Option<usize>,
         cause: UnavailableTip,
     ) -> SampledBrush {
         SampledBrush::Unavailable(UnavailableBrush {
             id: id.to_string(),
+            uuid: uuid.map(str::to_string),
             name: name.to_string(),
             preset_index,
             cause,
@@ -2062,6 +2071,37 @@ mod tests {
 
     fn unreadable() -> UnavailableTip {
         UnavailableTip::Unreadable("no bitmap header".to_string())
+    }
+
+    #[test]
+    fn a_repeat_keeps_the_record_uuid_without_the_id_suffix() {
+        let bitmaps = vec![samp(Some("uuid-a")), unreadable_samp(Some("uuid-b"))];
+        let infos = vec![
+            info("A1", Some("uuid-a"), None),
+            info("A2", Some("uuid-a"), None),
+            info("B1", Some("uuid-b"), None),
+            info("B2", Some("uuid-b"), None),
+        ];
+        let PairedBrushes {
+            brushes,
+            sampled_brushes,
+            ..
+        } = pair_brushes(bitmaps, &infos);
+        let readable: Vec<_> = brushes
+            .iter()
+            .map(|b| (b.id.as_str(), b.uuid.as_deref()))
+            .collect();
+        assert_eq!(
+            readable,
+            [("uuid-a", Some("uuid-a")), ("uuid-a-2", Some("uuid-a"))]
+        );
+        assert_eq!(
+            sampled_brushes[2..],
+            [
+                unavailable("uuid-b", Some("uuid-b"), "B1", Some(2), unreadable()),
+                unavailable("uuid-b-2", Some("uuid-b"), "B2", Some(3), unreadable()),
+            ]
+        );
     }
 
     #[test]
@@ -2079,17 +2119,27 @@ mod tests {
         } = pair_brushes(bitmaps, &infos);
         let names: Vec<_> = brushes
             .iter()
-            .map(|b| (b.id.as_str(), b.name.as_str(), b.preset_index))
+            .map(|b| {
+                (
+                    b.id.as_str(),
+                    b.uuid.as_deref(),
+                    b.name.as_str(),
+                    b.preset_index,
+                )
+            })
             .collect();
         assert_eq!(
             names,
-            [("brush_2", "C", Some(2)), ("brush_0", "A", Some(0))]
+            [
+                ("brush_2", None, "C", Some(2)),
+                ("brush_0", None, "A", Some(0))
+            ]
         );
         assert_eq!(
             sampled_brushes,
             [
                 SampledBrush::Readable(0),
-                unavailable("brush_1", "B", Some(1), unreadable()),
+                unavailable("brush_1", None, "B", Some(1), unreadable()),
                 SampledBrush::Readable(1),
             ]
         );
@@ -2119,7 +2169,7 @@ mod tests {
             sampled_brushes,
             [
                 SampledBrush::Readable(0),
-                unavailable("brush_1", "", None, unreadable()),
+                unavailable("brush_1", None, "", None, unreadable()),
                 SampledBrush::Readable(1),
             ]
         );
@@ -2144,7 +2194,7 @@ mod tests {
             sampled_brushes,
             [
                 SampledBrush::Readable(0),
-                unavailable("uuid-b", "B", Some(1), unreadable()),
+                unavailable("uuid-b", Some("uuid-b"), "B", Some(1), unreadable()),
             ]
         );
         assert!(skipped_preset_details.is_empty());
@@ -2168,6 +2218,7 @@ mod tests {
             [
                 unavailable(
                     "uuid-y-dangling",
+                    Some("uuid-y-dangling"),
                     "Y",
                     Some(0),
                     UnavailableTip::Missing {
@@ -2221,6 +2272,7 @@ mod tests {
             sampled_brushes,
             [unavailable(
                 "uuid-p",
+                Some("uuid-p"),
                 "P",
                 Some(0),
                 UnavailableTip::Missing {
@@ -3831,6 +3883,7 @@ mod tests {
                         SampledBrush::Readable(0),
                         SampledBrush::Unavailable(UnavailableBrush {
                             id: "brush_1".to_string(),
+                            uuid: None,
                             name: String::new(),
                             preset_index: None,
                             cause: UnavailableTip::Unreadable("unknown compression 2".to_string()),
@@ -3879,6 +3932,7 @@ mod tests {
                     SampledBrush::Readable(0),
                     SampledBrush::Unavailable(UnavailableBrush {
                         id: "brush_1".to_string(),
+                        uuid: None,
                         name: String::new(),
                         preset_index: None,
                         cause: UnavailableTip::Unreadable(
@@ -4083,6 +4137,7 @@ mod tests {
                 SampledBrush::Readable(0),
                 SampledBrush::Unavailable(UnavailableBrush {
                     id: TIP_B.to_string(),
+                    uuid: Some(TIP_B.to_string()),
                     name: "Second".to_string(),
                     preset_index: Some(1),
                     cause: UnavailableTip::Unreadable(UNDECODABLE.to_string()),
@@ -4120,6 +4175,7 @@ mod tests {
                 SampledBrush::Readable(0),
                 SampledBrush::Unavailable(UnavailableBrush {
                     id: TIP_B.to_string(),
+                    uuid: Some(TIP_B.to_string()),
                     name: String::new(),
                     preset_index: None,
                     cause: UnavailableTip::Unreadable(UNDECODABLE.to_string()),

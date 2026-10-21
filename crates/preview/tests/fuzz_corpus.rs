@@ -327,6 +327,7 @@ fn unavailable_tips_lists_every_sampled_brush_in_place() {
     let unavailable = |id: &str, name: &str, preset_index, cause| {
         SampledBrush::Unavailable(UnavailableBrush {
             id: id.to_string(),
+            uuid: Some(id.to_string()),
             name: name.to_string(),
             preset_index: Some(preset_index),
             cause,

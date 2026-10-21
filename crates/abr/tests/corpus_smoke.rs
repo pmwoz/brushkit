@@ -137,8 +137,13 @@ fn deferred_parse_yields_the_pack_parse_abr_does() {
         assert_eq!(pack.brushes.len(), eager.brushes.len(), "{name}");
         for (i, (brush, expected)) in pack.brushes.iter().zip(&eager.brushes).enumerate() {
             assert_eq!(
-                (&brush.id, &brush.name, brush.preset_index),
-                (&expected.id, &expected.name, expected.preset_index),
+                (&brush.id, &brush.uuid, &brush.name, brush.preset_index),
+                (
+                    &expected.id,
+                    &expected.uuid,
+                    &expected.name,
+                    expected.preset_index
+                ),
                 "{name}: brush {i}"
             );
             let tip = deferred
@@ -228,4 +233,65 @@ fn deferred_parse_yields_the_pack_parse_abr_does() {
          {with_up_front} with tips decoded up front",
         files.len()
     );
+}
+
+fn sampled_data(items: &[brushkit_abr::dump::DumpItem], out: &mut Vec<String>) {
+    for item in items {
+        match &item.value {
+            brushkit_abr::dump::DumpValue::Text(text) if item.key == "sampledData" => {
+                out.push(text.clone());
+            }
+            brushkit_abr::dump::DumpValue::Objc { items, .. } => sampled_data(items, out),
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn every_corpus_brush_uuid_is_a_sampled_data_uuid_of_its_preset() {
+    let Some((root, files)) = corpus() else {
+        println!("skip: BRUSHKIT_CORPUS_DIR unset");
+        return;
+    };
+    let (mut matched, mut repeats, mut without) = (0, 0, 0);
+    for path in &files {
+        let bytes = std::fs::read(path).expect("corpus file is readable");
+        let name = path.strip_prefix(&root).unwrap_or(path).display();
+        let pack = brushkit_abr::parse_abr(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let presets = pack
+            .raw_desc_block
+            .as_deref()
+            .map(|desc| brushkit_abr::dump::dump_descriptors(desc).presets)
+            .unwrap_or_default();
+        let sampled = pack.sampled_brushes.iter().map(|b| match b {
+            brushkit_abr::SampledBrush::Readable(i) => {
+                let b = &pack.brushes[*i];
+                (&b.id, &b.uuid, b.preset_index)
+            }
+            brushkit_abr::SampledBrush::Unavailable(b) => (&b.id, &b.uuid, b.preset_index),
+        });
+        for (id, uuid, preset_index) in sampled {
+            let Some(uuid) = uuid else {
+                assert!(id.starts_with("brush_"), "{name}: {id} has no uuid");
+                without += 1;
+                continue;
+            };
+            if id != uuid {
+                let n = id.strip_prefix(&format!("{uuid}-"));
+                assert!(
+                    n.is_some_and(|n| n.parse::<usize>().is_ok_and(|n| n >= 2)),
+                    "{name}: id {id} is not uuid {uuid} or a repeat of it"
+                );
+                repeats += 1;
+            }
+            if let Some(preset) = preset_index.and_then(|pi| presets.get(pi)) {
+                let mut uuids = Vec::new();
+                sampled_data(&preset.items, &mut uuids);
+                assert!(uuids.contains(uuid), "{name}: {uuid} is not in {uuids:?}");
+                matched += 1;
+            }
+        }
+    }
+    println!("{matched} uuid(s) matched a preset, {repeats} repeat(s), {without} without a uuid");
+    assert!(matched > 0, "no corpus brush matched a preset");
 }
