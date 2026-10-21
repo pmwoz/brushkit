@@ -7,7 +7,7 @@ use brushkit_preview::procreate::MAX_PLIST_BYTES;
 use brushkit_preview::{
     preview_brush, preview_brushset, PreviewOptions, TipPreview, UnavailableReason,
 };
-use common::gray_png;
+use common::{declare_size, gray_png};
 use counting_alloc::{live, peak, reset_peak};
 
 const MIB: usize = 1 << 20;
@@ -27,17 +27,6 @@ fn zip_with_oversize_plist(path: &str, rest: &[(&str, &[u8])]) -> Vec<u8> {
         zip.write_all(bytes).expect("entry bytes");
     }
     zip.finish().expect("finish zip").into_inner()
-}
-
-/// Rewrites the uncompressed size of the zip's first entry in its central
-/// directory record, the only size the zip reader consults.
-fn declare_size(mut zip: Vec<u8>, size: u32) -> Vec<u8> {
-    let central = zip
-        .windows(4)
-        .position(|w| w == b"PK\x01\x02")
-        .expect("central directory record");
-    zip[central + 24..central + 28].copy_from_slice(&size.to_le_bytes());
-    zip
 }
 
 fn growth(read: impl FnOnce()) -> usize {

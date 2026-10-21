@@ -1,7 +1,9 @@
 mod common;
 
-use brushkit_preview::procreate::Zip;
-use common::{brush_archive, corpus_files, gray_png_with_scanlines, real_4x4_png, zip_with};
+use brushkit_preview::procreate::{Zip, MAX_ENTRY_BYTES};
+use common::{
+    brush_archive, corpus_files, declare_size, gray_png_with_scanlines, real_4x4_png, zip_with,
+};
 use std::path::Path;
 
 #[test]
@@ -18,6 +20,33 @@ fn a_listed_cp437_name_reads_its_entry() {
     assert!(zip.contains("Pünsel/Shape.png"));
     assert_eq!(zip.read_plist("Pünsel/Brush.archive"), Ok(archive));
     assert_eq!(zip.read_entry("Pünsel/Shape.png"), Ok(png));
+}
+
+#[test]
+fn an_entry_over_the_caller_limit_fails_on_its_declared_size() {
+    let png = real_4x4_png();
+    let size = png.len();
+    let bytes = zip_with(&[("Shape.png", &png[..])]);
+
+    let mut zip = Zip::open(&bytes).expect("zip opens");
+    assert_eq!(zip.read_entry_within("Shape.png", size), Ok(png.clone()));
+    assert_eq!(zip.read_entry_within("Shape.png", usize::MAX), Ok(png));
+    assert_eq!(
+        zip.read_entry_within("Shape.png", size - 1),
+        Err(format!("Shape.png: declared size {size} exceeds limit"))
+    );
+}
+
+#[test]
+fn a_caller_limit_cannot_raise_the_entry_ceiling() {
+    let over = MAX_ENTRY_BYTES as u32 + 1;
+    let bytes = declare_size(zip_with(&[("Shape.png", &real_4x4_png()[..])]), over);
+
+    let mut zip = Zip::open(&bytes).expect("zip opens");
+    assert_eq!(
+        zip.read_entry_within("Shape.png", usize::MAX),
+        Err(format!("Shape.png: declared size {over} exceeds limit"))
+    );
 }
 
 #[test]
