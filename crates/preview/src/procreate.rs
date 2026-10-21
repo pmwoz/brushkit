@@ -179,14 +179,20 @@ impl<'a> Zip<'a> {
     /// Reads the entry `name` finds, of at most [`MAX_ENTRY_BYTES`]. Plist
     /// entries go through [`Zip::read_plist`].
     pub fn read_entry(&mut self, name: &str) -> Result<Vec<u8>, String> {
-        let index = self.index_for_name(name);
-        read_capped(&mut self.archive, index, name, MAX_ENTRY_BYTES)
+        self.read_entry_within(name, MAX_ENTRY_BYTES)
     }
 
     /// [`Zip::read_entry`] capped at [`MAX_PLIST_BYTES`].
     pub fn read_plist(&mut self, name: &str) -> Result<Vec<u8>, String> {
+        self.read_entry_within(name, MAX_PLIST_BYTES)
+    }
+
+    /// Reads the entry `name` finds, of at most `limit` bytes and never more
+    /// than [`MAX_ENTRY_BYTES`]. An entry whose declared size exceeds the cap
+    /// fails before its buffer is allocated.
+    pub fn read_entry_within(&mut self, name: &str, limit: usize) -> Result<Vec<u8>, String> {
         let index = self.index_for_name(name);
-        read_capped(&mut self.archive, index, name, MAX_PLIST_BYTES)
+        read_capped(&mut self.archive, index, name, limit.min(MAX_ENTRY_BYTES))
     }
 
     /// The members [`members_in_zip_order`] lists. Each finds its entries

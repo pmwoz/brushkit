@@ -21,6 +21,21 @@ fn a_listed_cp437_name_reads_its_entry() {
 }
 
 #[test]
+fn an_entry_over_the_caller_limit_fails_on_its_declared_size() {
+    let png = real_4x4_png();
+    let size = png.len();
+    let bytes = zip_with(&[("Shape.png", &png[..])]);
+
+    let mut zip = Zip::open(&bytes).expect("zip opens");
+    assert_eq!(zip.read_entry_within("Shape.png", size), Ok(png.clone()));
+    assert_eq!(zip.read_entry_within("Shape.png", usize::MAX), Ok(png));
+    assert_eq!(
+        zip.read_entry_within("Shape.png", size - 1),
+        Err(format!("Shape.png: declared size {size} exceeds limit"))
+    );
+}
+
+#[test]
 fn two_end_of_central_directory_records_are_rejected() {
     let mut bytes = zip_with(&[("Brush.archive", &brush_archive("Solo")[..])]);
     assert!(Zip::open(&bytes).is_ok());
