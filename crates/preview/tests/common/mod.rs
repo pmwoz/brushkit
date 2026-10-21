@@ -376,6 +376,17 @@ pub fn zip_with<P: AsRef<[u8]>>(entries: &[(P, &[u8])]) -> Vec<u8> {
     zip
 }
 
+/// Rewrites the uncompressed size of the zip's first entry in its central
+/// directory record, the only size the zip reader consults.
+pub fn declare_size(mut zip: Vec<u8>, size: u32) -> Vec<u8> {
+    let central = zip
+        .windows(4)
+        .position(|w| w == b"PK\x01\x02")
+        .expect("central directory record");
+    zip[central + 24..central + 28].copy_from_slice(&size.to_le_bytes());
+    zip
+}
+
 /// One sampled tip for [`samp_abr`]: `width` x `height` raw 8-bit pixels of
 /// `fill`. A `corrupt` tip declares RLE instead, so its first row byte count
 /// (two `fill` bytes) overruns the payload and decoding fails.

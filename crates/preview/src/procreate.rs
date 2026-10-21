@@ -188,8 +188,8 @@ impl<'a> Zip<'a> {
     }
 
     /// Reads the entry `name` finds, of at most `limit` bytes and never more
-    /// than [`MAX_ENTRY_BYTES`]. An entry whose declared size exceeds the cap
-    /// fails before its buffer is allocated.
+    /// than [`MAX_ENTRY_BYTES`]. An entry whose declared size exceeds the
+    /// smaller of the two fails before its buffer is allocated.
     pub fn read_entry_within(&mut self, name: &str, limit: usize) -> Result<Vec<u8>, String> {
         let index = self.index_for_name(name);
         read_capped(&mut self.archive, index, name, limit.min(MAX_ENTRY_BYTES))
