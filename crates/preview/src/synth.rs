@@ -6,6 +6,21 @@ pub fn can_synthesize(geom: &brushkit_abr::ComputedGeometry) -> bool {
     geom.diameter_px.is_some_and(|d| d >= 1.0)
 }
 
+/// The width and height of the square tip `synthesize_computed_tip` returns,
+/// without rasterizing it. `None` iff `can_synthesize` is false.
+pub fn synthesized_tip_side(geom: &brushkit_abr::ComputedGeometry) -> Option<u32> {
+    if !can_synthesize(geom) {
+        return None;
+    }
+    Some(diameter_side(
+        geom.diameter_px.unwrap().clamp(1.0, MAX_TIP_PX),
+    ))
+}
+
+fn diameter_side(diameter: f64) -> u32 {
+    (diameter.ceil() as u32) + 2
+}
+
 /// Rasterize a monochrome elliptical tip from computed-brush geometry.
 ///
 /// `None` iff `can_synthesize` is false. Output is single-channel grayscale,
@@ -20,7 +35,7 @@ pub fn synthesize_computed_tip(geom: &brushkit_abr::ComputedGeometry) -> Option<
     let angle = geom.angle_deg.unwrap_or(0.0);
     let roundness = geom.roundness_pct.unwrap_or(100.0).clamp(0.0, 100.0);
 
-    let side = (diameter.ceil() as u32) + 2;
+    let side = diameter_side(diameter);
     let center = side as f64 / 2.0;
 
     let a = diameter / 2.0;
@@ -197,6 +212,23 @@ mod tests {
         let tiny = geom(Some(0.5), None, None, None);
         assert!(!can_synthesize(&tiny));
         assert!(synthesize_computed_tip(&tiny).is_none());
+        assert_eq!(synthesized_tip_side(&none), None);
+        assert_eq!(synthesized_tip_side(&tiny), None);
+    }
+
+    #[test]
+    fn synthesized_tip_side_is_the_side_synthesis_allocates() {
+        for diameter in [1.0, 1.5, 30.0, 39.2, 4096.0, 100000.0] {
+            let g = geom(Some(diameter), Some(0.0), Some(30.0), Some(40.0));
+            let bmp = synthesize_computed_tip(&g).unwrap();
+            assert_eq!(bmp.width, bmp.height, "diameter {diameter}");
+            assert_eq!(
+                synthesized_tip_side(&g),
+                Some(bmp.width),
+                "diameter {diameter}"
+            );
+            assert_eq!(bmp.data.len(), (bmp.width * bmp.height) as usize);
+        }
     }
 
     #[test]
