@@ -217,6 +217,9 @@ pub struct UnavailableBrush {
     /// `brush_{i}`. For a [`UnavailableTip::Missing`] brush, the dangling uuid
     /// with the same suffix.
     pub id: String,
+    /// As [`AbrBrush::uuid`]. For a [`UnavailableTip::Missing`] brush, the
+    /// uuid the preset names.
+    pub uuid: Option<String>,
     /// Preset name from the descriptor, or empty if absent.
     pub name: String,
     /// As [`AbrBrush::preset_index`].
@@ -640,6 +643,10 @@ pub struct BrushDescriptor {
 pub struct AbrBrush {
     /// Unique identifier — from descriptor UUID or synthesized from index.
     pub id: String,
+    /// The uuid of the samp record the brush samples, without the `-N` suffix
+    /// `id` adds for a repeat. `None` when the record carries none: a v1/v2
+    /// entry, or a fallback-path record without a uuid.
+    pub uuid: Option<String>,
     /// Brush name from Unicode descriptor, or empty if not found.
     pub name: String,
     /// The brush tip bitmap (decompressed grayscale).
