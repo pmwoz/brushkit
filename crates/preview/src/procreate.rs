@@ -7,7 +7,7 @@
 
 use crate::bitmap::{decode_guarded, tip_plane, GuardedDecodeError, TipSample};
 use crate::GrayscaleBitmap;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{Cursor, Read};
 
 /// Defensive ceilings for untrusted archives: anything above them is treated
@@ -122,6 +122,11 @@ pub struct Zip<'a> {
     /// one entry per 46-byte central header, so
     /// [`MAX_CENTRAL_DIRECTORY_BYTES`] bounds it.
     decoded: HashMap<String, usize>,
+    /// Finding these names walks the central headers zip read, each at least
+    /// 46 bytes, and copies each one zip dropped once, so
+    /// [`MAX_CENTRAL_DIRECTORY_BYTES`] bounds the walk, the names and each
+    /// copy.
+    conflicting_names: Vec<String>,
 }
 
 impl<'a> Zip<'a> {
@@ -180,7 +185,23 @@ impl<'a> Zip<'a> {
                     .then(|| (name.into_owned(), i))
             })
             .collect();
-        Ok(Zip { archive, decoded })
+        let conflicting_names = conflicting_names(&archive, bytes).map_err(fail)?;
+        Ok(Zip {
+            archive,
+            decoded,
+            conflicting_names,
+        })
+    }
+
+    /// The names, as [`Zip::names`] decodes them, that two or more central
+    /// headers list with a different CRC-32 or uncompressed size, sorted and
+    /// each once. zip 9 keeps only the last of the headers with one raw name,
+    /// so no read reaches the others. Headers with an equal CRC-32 and size,
+    /// such as the 0-byte `.empty` entries real Procreate files repeat, are
+    /// not reported.
+    /// See <https://github.com/pmwoz/brushkit/issues/248>.
+    pub fn conflicting_names(&self) -> &[String] {
+        &self.conflicting_names
     }
 
     /// Every entry name as `name_for_index` decodes it, in central-directory
@@ -270,6 +291,72 @@ fn directory_start(bytes: &[u8], end: usize) -> Option<u64> {
     // central header it reads there fails its signature check.
     let directory = files > 0 && offset + 4 <= end as u64;
     (directory && bytes[offset as usize..].starts_with(b"PK\x01\x02")).then_some(offset)
+}
+
+/// zip 9 reads central headers back to back from the directory's start and,
+/// of the headers with one raw name, keeps the data of the last. So the last
+/// header it read is kept, and every header before it that it did not keep
+/// was dropped.
+fn conflicting_names(
+    archive: &zip::ZipArchive<Cursor<&[u8]>>,
+    bytes: &[u8],
+) -> zip::result::ZipResult<Vec<String>> {
+    let mut kept = HashSet::new();
+    let mut headers = Vec::new();
+    for i in 0..archive.len() {
+        let entry = archive.by_index_data(i)?;
+        kept.insert(entry.central_header_start());
+        headers.extend(header_fields(&entry));
+    }
+    if let Some(&last) = kept.iter().max() {
+        let mut at = archive.central_directory_start();
+        while at <= last {
+            let header = central_header(bytes, at).ok_or_else(|| {
+                zip::result::ZipError::InvalidArchive("central header out of range".into())
+            })?;
+            if !kept.contains(&at) {
+                headers.extend(dropped_header_fields(header)?);
+            }
+            at += header.len() as u64;
+        }
+    }
+    let mut first = HashMap::new();
+    let mut conflicting = BTreeSet::new();
+    for (name, crc32, size) in headers {
+        if *first.entry(name.clone()).or_insert((crc32, size)) != (crc32, size) {
+            conflicting.insert(name);
+        }
+    }
+    Ok(conflicting.into_iter().collect())
+}
+
+/// The central header at `at`, its 46 fixed bytes and the name, extra field
+/// and comment whose lengths they declare.
+fn central_header(bytes: &[u8], at: u64) -> Option<&[u8]> {
+    let at = usize::try_from(at).ok()?;
+    let fixed: &[u8; 46] = bytes.get(at..at.checked_add(46)?)?.try_into().ok()?;
+    let len = |field: usize| usize::from(u16::from_le_bytes([fixed[field], fixed[field + 1]]));
+    bytes.get(at..at.checked_add(46 + len(28) + len(30) + len(32))?)
+}
+
+/// zip parses a header it dropped on its own, so the zip64 sizes and the
+/// Unicode path field apply as they did when it read the archive.
+fn dropped_header_fields(header: &[u8]) -> zip::result::ZipResult<Option<(String, u32, u64)>> {
+    let mut one = header.to_vec();
+    // An end of central directory record for one header at offset 0.
+    one.extend_from_slice(b"PK\x05\x06\0\0\0\0\x01\0\x01\0");
+    one.extend_from_slice(&(header.len() as u32).to_le_bytes());
+    one.extend_from_slice(&[0; 6]);
+    let config = zip::read::Config {
+        archive_offset: zip::read::ArchiveOffset::Known(0),
+    };
+    let archive = zip::ZipArchive::with_config(config, Cursor::new(one))?;
+    let entry = archive.by_index_data(0)?;
+    Ok(header_fields(&entry))
+}
+
+fn header_fields(entry: &zip::read::ZipFileEntry) -> Option<(String, u32, u64)> {
+    Some((entry.name().ok()?.into_owned(), entry.crc32(), entry.size()))
 }
 
 /// The declared uncompressed size is an attacker-controlled zip-header field,
