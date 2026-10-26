@@ -55,7 +55,7 @@ pub fn read_zip_entry(
     path: &str,
 ) -> Result<Vec<u8>, String> {
     let index = zip.index_for_name(path);
-    read_capped(zip, index, path, MAX_ENTRY_BYTES)
+    read_capped(zip, index, path, MAX_ENTRY_BYTES).map_err(|e| e.to_string())
 }
 
 /// [`read_zip_entry`] capped at [`MAX_PLIST_BYTES`], so an oversize plist
@@ -65,8 +65,35 @@ pub fn read_zip_plist(
     path: &str,
 ) -> Result<Vec<u8>, String> {
     let index = zip.index_for_name(path);
-    read_capped(zip, index, path, MAX_PLIST_BYTES)
+    read_capped(zip, index, path, MAX_PLIST_BYTES).map_err(|e| e.to_string())
 }
+
+/// Why a [`Zip`] read failed. `Display` gives the message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ZipReadError {
+    /// The entry declares more bytes than `limit`, the limit the read
+    /// applied, so none were read.
+    OverLimit {
+        name: String,
+        declared: u64,
+        limit: usize,
+    },
+    /// Any other failure, with a message naming the entry.
+    Failed(String),
+}
+
+impl std::fmt::Display for ZipReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ZipReadError::OverLimit { name, declared, .. } => {
+                write!(f, "{name}: declared size {declared} exceeds limit")
+            }
+            ZipReadError::Failed(msg) => f.write_str(msg),
+        }
+    }
+}
+
+impl std::error::Error for ZipReadError {}
 
 /// A Procreate `.brush` or `.brushset` zip with two guards that
 /// `zip::ZipArchive::new` lacks, so a consumer opens one through
@@ -178,21 +205,21 @@ impl<'a> Zip<'a> {
 
     /// Reads the entry `name` finds, of at most [`MAX_ENTRY_BYTES`]. Plist
     /// entries go through [`Zip::read_plist`].
-    pub fn read_entry(&mut self, name: &str) -> Result<Vec<u8>, String> {
+    pub fn read_entry(&mut self, name: &str) -> Result<Vec<u8>, ZipReadError> {
         self.read_entry_within(name, MAX_ENTRY_BYTES)
     }
 
     /// [`Zip::read_entry`] capped at [`MAX_PLIST_BYTES`].
-    pub fn read_plist(&mut self, name: &str) -> Result<Vec<u8>, String> {
+    pub fn read_plist(&mut self, name: &str) -> Result<Vec<u8>, ZipReadError> {
         self.read_entry_within(name, MAX_PLIST_BYTES)
     }
 
     /// Reads the entry `name` finds, of at most `limit` bytes and never more
     /// than [`MAX_ENTRY_BYTES`]. An entry whose declared size exceeds the
-    /// smaller of the two fails before its buffer is allocated. An entry that
-    /// reads fewer bytes than it declares fails, so an `Ok` buffer holds
-    /// exactly its declared size.
-    pub fn read_entry_within(&mut self, name: &str, limit: usize) -> Result<Vec<u8>, String> {
+    /// smaller of the two fails with [`ZipReadError::OverLimit`] before its
+    /// buffer is allocated. An entry that reads fewer bytes than it declares
+    /// fails, so an `Ok` buffer holds exactly its declared size.
+    pub fn read_entry_within(&mut self, name: &str, limit: usize) -> Result<Vec<u8>, ZipReadError> {
         let index = self.index_for_name(name);
         read_capped(&mut self.archive, index, name, limit.min(MAX_ENTRY_BYTES))
     }
@@ -258,28 +285,35 @@ fn read_capped(
     index: Option<usize>,
     path: &str,
     limit: usize,
-) -> Result<Vec<u8>, String> {
-    let index = index.ok_or_else(|| format!("{path} not found"))?;
+) -> Result<Vec<u8>, ZipReadError> {
+    let index = index.ok_or_else(|| ZipReadError::Failed(format!("{path} not found")))?;
     let mut file = zip
         .by_index(index)
-        .map_err(|e| format!("{path}: cannot open: {e}"))?;
+        .map_err(|e| ZipReadError::Failed(format!("{path}: cannot open: {e}")))?;
     let size = file.size();
     if size > limit as u64 {
-        return Err(format!("{path}: declared size {size} exceeds limit"));
+        return Err(ZipReadError::OverLimit {
+            name: path.to_string(),
+            declared: size,
+            limit,
+        });
     }
-    let read_error = |e: std::io::Error| format!("failed to read {path}: {e}");
+    let read_error =
+        |e: std::io::Error| ZipReadError::Failed(format!("failed to read {path}: {e}"));
     let mut buf = Vec::with_capacity(size as usize);
     (&mut file)
         .take(size)
         .read_to_end(&mut buf)
         .map_err(read_error)?;
     if (buf.len() as u64) < size {
-        return Err(format!(
+        return Err(ZipReadError::Failed(format!(
             "{path}: entry is shorter than its declared size {size}"
-        ));
+        )));
     }
     if file.read(&mut [0]).map_err(read_error)? > 0 {
-        return Err(format!("{path}: entry exceeds its declared size"));
+        return Err(ZipReadError::Failed(format!(
+            "{path}: entry exceeds its declared size"
+        )));
     }
     Ok(buf)
 }
