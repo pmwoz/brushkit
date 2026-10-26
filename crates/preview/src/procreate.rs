@@ -68,7 +68,7 @@ pub fn read_zip_plist(
     read_capped(zip, index, path, MAX_PLIST_BYTES).map_err(|e| e.to_string())
 }
 
-/// Why a [`Zip`] read failed. `Display` gives the message.
+/// Why a [`Zip`] read failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ZipReadError {
     /// The entry declares more bytes than `limit`, the limit the read
