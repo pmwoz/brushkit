@@ -1,6 +1,6 @@
 mod common;
 
-use brushkit_preview::procreate::{Zip, ZipReadError, MAX_ENTRY_BYTES};
+use brushkit_preview::procreate::{Zip, ZipReadError, MAX_ENTRY_BYTES, MAX_PLIST_BYTES};
 use common::{
     brush_archive, corpus_files, declare_size, gray_png_with_scanlines, real_4x4_png, zip_with,
 };
@@ -59,6 +59,25 @@ fn a_caller_limit_cannot_raise_the_entry_ceiling() {
             name: "Shape.png".into(),
             declared: over.into(),
             limit: MAX_ENTRY_BYTES,
+        })
+    );
+}
+
+#[test]
+fn a_plist_over_its_ceiling_reports_the_plist_limit() {
+    let over = MAX_PLIST_BYTES as u32 + 1;
+    let bytes = declare_size(
+        zip_with(&[("Brush.archive", &brush_archive("Big")[..])]),
+        over,
+    );
+
+    let mut zip = Zip::open(&bytes).expect("zip opens");
+    assert_eq!(
+        zip.read_plist("Brush.archive"),
+        Err(ZipReadError::OverLimit {
+            name: "Brush.archive".into(),
+            declared: over.into(),
+            limit: MAX_PLIST_BYTES,
         })
     );
 }
