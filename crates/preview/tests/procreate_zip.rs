@@ -4,6 +4,7 @@ use brushkit_preview::procreate::{Zip, MAX_ENTRY_BYTES};
 use common::{
     brush_archive, corpus_files, declare_size, gray_png_with_scanlines, real_4x4_png, zip_with,
 };
+use std::io::{Cursor, Write};
 use std::path::Path;
 
 #[test]
@@ -47,6 +48,35 @@ fn a_caller_limit_cannot_raise_the_entry_ceiling() {
         zip.read_entry_within("Shape.png", usize::MAX),
         Err(format!("Shape.png: declared size {over} exceeds limit"))
     );
+}
+
+#[test]
+fn an_entry_shorter_than_its_declared_size_fails() {
+    let png = real_4x4_png();
+    let declared = png.len() as u32 + 1;
+    let mut deflated = zip::write::ZipWriter::new(Cursor::new(Vec::new()));
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    deflated.start_file("Shape.png", opts).expect("start entry");
+    deflated.write_all(&png).expect("entry bytes");
+    let deflated = deflated.finish().expect("finish zip").into_inner();
+
+    for (method, bytes) in [
+        ("stored", zip_with(&[("Shape.png", &png[..])])),
+        ("deflated", deflated),
+    ] {
+        let bytes = declare_size(bytes, declared);
+        let mut zip = Zip::open(&bytes).expect("zip opens");
+        let error = Err(format!(
+            "Shape.png: entry is shorter than its declared size {declared}"
+        ));
+        assert_eq!(zip.read_entry("Shape.png"), error, "{method}");
+        assert_eq!(
+            zip.read_entry_within("Shape.png", usize::MAX),
+            error,
+            "{method}"
+        );
+    }
 }
 
 #[test]

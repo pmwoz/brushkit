@@ -189,7 +189,9 @@ impl<'a> Zip<'a> {
 
     /// Reads the entry `name` finds, of at most `limit` bytes and never more
     /// than [`MAX_ENTRY_BYTES`]. An entry whose declared size exceeds the
-    /// smaller of the two fails before its buffer is allocated.
+    /// smaller of the two fails before its buffer is allocated. An entry that
+    /// reads fewer bytes than it declares fails, so an `Ok` buffer holds
+    /// exactly its declared size.
     pub fn read_entry_within(&mut self, name: &str, limit: usize) -> Result<Vec<u8>, String> {
         let index = self.index_for_name(name);
         read_capped(&mut self.archive, index, name, limit.min(MAX_ENTRY_BYTES))
@@ -247,7 +249,10 @@ fn directory_start(bytes: &[u8], end: usize) -> Option<u64> {
 /// and a small declared size can hide a huge inflate. So the read stops at the
 /// declared size, which fits the buffer allocated for it. One more read
 /// reaches the end of the entry, where zip checks the CRC and rejects bytes
-/// past the declared size before this function sees them.
+/// past the declared size before this function sees them. zip accepts data
+/// that ends before the declared size when the CRC matches it, so a short
+/// entry is rejected here. Otherwise it would hold the declared capacity for
+/// fewer bytes.
 fn read_capped(
     zip: &mut zip::ZipArchive<Cursor<&[u8]>>,
     index: Option<usize>,
@@ -268,6 +273,11 @@ fn read_capped(
         .take(size)
         .read_to_end(&mut buf)
         .map_err(read_error)?;
+    if (buf.len() as u64) < size {
+        return Err(format!(
+            "{path}: entry is shorter than its declared size {size}"
+        ));
+    }
     if file.read(&mut [0]).map_err(read_error)? > 0 {
         return Err(format!("{path}: entry exceeds its declared size"));
     }
