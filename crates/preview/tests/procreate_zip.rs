@@ -1,6 +1,6 @@
 mod common;
 
-use brushkit_preview::procreate::{Zip, MAX_ENTRY_BYTES};
+use brushkit_preview::procreate::{Zip, ZipReadError, MAX_ENTRY_BYTES, MAX_PLIST_BYTES};
 use common::{
     brush_archive, corpus_files, declare_size, gray_png_with_scanlines, real_4x4_png, zip_with,
 };
@@ -32,9 +32,18 @@ fn an_entry_over_the_caller_limit_fails_on_its_declared_size() {
     let mut zip = Zip::open(&bytes).expect("zip opens");
     assert_eq!(zip.read_entry_within("Shape.png", size), Ok(png.clone()));
     assert_eq!(zip.read_entry_within("Shape.png", usize::MAX), Ok(png));
+    let error = zip.read_entry_within("Shape.png", size - 1).unwrap_err();
     assert_eq!(
-        zip.read_entry_within("Shape.png", size - 1),
-        Err(format!("Shape.png: declared size {size} exceeds limit"))
+        error,
+        ZipReadError::OverLimit {
+            name: "Shape.png".into(),
+            declared: size as u64,
+            limit: size - 1,
+        }
+    );
+    assert_eq!(
+        error.to_string(),
+        format!("Shape.png: declared size {size} exceeds limit")
     );
 }
 
@@ -46,7 +55,30 @@ fn a_caller_limit_cannot_raise_the_entry_ceiling() {
     let mut zip = Zip::open(&bytes).expect("zip opens");
     assert_eq!(
         zip.read_entry_within("Shape.png", usize::MAX),
-        Err(format!("Shape.png: declared size {over} exceeds limit"))
+        Err(ZipReadError::OverLimit {
+            name: "Shape.png".into(),
+            declared: over.into(),
+            limit: MAX_ENTRY_BYTES,
+        })
+    );
+}
+
+#[test]
+fn a_plist_over_its_ceiling_reports_the_plist_limit() {
+    let over = MAX_PLIST_BYTES as u32 + 1;
+    let bytes = declare_size(
+        zip_with(&[("Brush.archive", &brush_archive("Big")[..])]),
+        over,
+    );
+
+    let mut zip = Zip::open(&bytes).expect("zip opens");
+    assert_eq!(
+        zip.read_plist("Brush.archive"),
+        Err(ZipReadError::OverLimit {
+            name: "Brush.archive".into(),
+            declared: over.into(),
+            limit: MAX_PLIST_BYTES,
+        })
     );
 }
 
@@ -67,9 +99,9 @@ fn an_entry_shorter_than_its_declared_size_fails() {
     ] {
         let bytes = declare_size(bytes, declared);
         let mut zip = Zip::open(&bytes).expect("zip opens");
-        let error = Err(format!(
+        let error = Err(ZipReadError::Failed(format!(
             "Shape.png: entry is shorter than its declared size {declared}"
-        ));
+        )));
         assert_eq!(zip.read_entry("Shape.png"), error, "{method}");
         assert_eq!(
             zip.read_entry_within("Shape.png", usize::MAX),

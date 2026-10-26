@@ -537,7 +537,9 @@ fn brushset(
     let mut zip = procreate::Zip::open(bytes).map_err(PreviewError)?;
 
     let (set_name, prefixes) = if zip.contains("brushset.plist") {
-        let buf = zip.read_plist("brushset.plist").map_err(PreviewError)?;
+        let buf = zip
+            .read_plist("brushset.plist")
+            .map_err(|e| PreviewError(e.to_string()))?;
         let (name, uuids) = procreate::parse_brushset_plist(&buf).map_err(PreviewError)?;
         (name, uuids.into_iter().map(|u| format!("{u}/")).collect())
     } else {
@@ -693,11 +695,12 @@ fn read_member(
 
     let archive = zip
         .read_plist(&format!("{prefix}Brush.archive"))
+        .map_err(|e| e.to_string())
         .and_then(|buf| procreate::brush_name(&buf));
 
     let shape_path = format!("{prefix}Shape.png");
     let shape = if zip.contains(&shape_path) {
-        Some(zip.read_entry(&shape_path))
+        Some(zip.read_entry(&shape_path).map_err(|e| e.to_string()))
     } else {
         None
     };
