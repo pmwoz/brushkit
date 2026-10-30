@@ -1,6 +1,6 @@
 ---
 name: verify-brushkit
-description: Drive the brushkit library the way a downstream Rust consumer does and capture proof. Builds a probe crate that calls the public `brushkit` facade (parse_abr*, preview_abr/brush/brushset, *_first_available, contact sheets, descriptor dump) on real or synthetic brush files and writes JSON summaries and PNGs. Use to prove a reader or renderer change works on real files, beyond `cargo test`.
+description: Drive the brushkit library the way a downstream Rust consumer does and capture proof. Builds a probe crate that calls the public `brushkit` facade (parse_abr*, preview_abr/brush/brushset, *_first_available, preview with keep_going, contact sheets, procreate::Zip, descriptor dump) on real or synthetic brush files and writes JSON summaries and PNGs. Use to prove a reader or renderer change works on real files, beyond `cargo test`.
 ---
 
 # verify-brushkit
@@ -25,11 +25,11 @@ $H build
 ```
 
 Release build of the probe into `target/verify-brushkit/`. The first build
-takes about 10 s on a warm cargo cache. `$H run` rebuilds on every call, so a
-run never uses a stale binary. Ready means `build` exits 0. There is no process
-to keep alive and no port, so any number of runs can go in parallel.
-Parallel runs need distinct `RUN_ID`s or labels, or they overwrite each other's
-evidence.
+takes up to a minute, a rebuild with no change under a second. `$H run`
+rebuilds on every call, so a run never uses a stale binary. Ready means
+`build` exits 0. There is no process to keep alive and no port, so any number
+of runs can go in parallel. Parallel runs need distinct `RUN_ID`s or labels,
+or they overwrite each other's evidence.
 
 ## Doctor
 
@@ -60,8 +60,9 @@ The helper appends `--out <evidence dir>` itself. Commands:
 
 | Command | Public API called | Flags |
 |---|---|---|
-| `parse` | `abr::parse_abr` or a deferred variant, then `DeferredPack::decode_tip` per brush | `--mode eager\|deferred\|deferred-no-patterns\|all-deferred` (default `eager`) |
-| `preview` | `preview::preview_abr`, `preview_brush` or `preview_brushset`, or the `_first_available` twin with `--first`, then `generate_preview_png` per tip and `generate_contact_sheet_png` | `--kind abr\|brush\|brushset` (default from the file extension, required for extensionless fuzz seeds), `--max-cell N` (default 128), `--first N` |
+| `parse` | `abr::parse_abr` or a deferred variant, then `DeferredPack::decode_tip` per brush and `up_front_decoded_len`, and `preview::synthesized_tip_side` per computed preset | `--mode eager\|deferred\|deferred-no-patterns\|all-deferred` (default `eager`) |
+| `preview` | `preview::preview_abr`, `preview_brush` or `preview_brushset`, or the `_first_available` twin with `--first`, or `preview::preview` with a counting `keep_going` with `--stop-after`, then `generate_preview_png` per tip and `generate_contact_sheet_png` | `--kind abr\|brush\|brushset` (default from the file extension, required for extensionless fuzz seeds), `--max-cell N` (default 128), `--first N`, `--stop-after N` |
+| `zip` | `preview::procreate::Zip::open`, `names`, `members_in_zip_order`, `conflicting_names`, and with `--read` `read_entry` or `read_entry_within` | `--read NAME`, `--limit N` |
 | `dump` | `abr::parse_abr`, then `abr::dump::dump_descriptors` on `raw_desc_block`, serialized by serde | none |
 
 Examples:
@@ -75,8 +76,9 @@ RUN_ID=demo $H run parse-real parse "$BRUSHKIT_CORPUS_DIR/<pack>.abr" --mode all
 Read the result with `jq`, for example
 `jq '.result.counts' /tmp/verify-brushkit/demo/preview-real/summary.json`.
 Probe exit codes: `0` the library returned `Ok`, `1` it returned `Err` (the
-message is in `result.error`), `2` probe usage or I/O error. `101` is a panic
-inside the library. Malformed input must never panic, so `101` is a bug.
+message is in `result.error`, or in `result.read.result` for a `zip --read`),
+`2` probe usage or I/O error. `101` is a panic inside the library. Malformed
+input must never panic, so `101` is a bug.
 
 The feature map in [`features/README.md`](features/README.md) lists each
 feature, its entry points and the proof for each.

@@ -1,8 +1,9 @@
 //! Drives the public `brushkit` API on one file and writes what it returned.
 //!
 //!   brushkit-probe parse   <file> --out DIR [--mode eager|deferred|deferred-no-patterns|all-deferred]
-//!   brushkit-probe preview <file> --out DIR [--kind abr|brush|brushset] [--max-cell N] [--first N]
+//!   brushkit-probe preview <file> --out DIR [--kind abr|brush|brushset] [--max-cell N] [--first N] [--stop-after N]
 //!   brushkit-probe dump    <file> --out DIR
+//!   brushkit-probe zip     <file> --out DIR [--read NAME] [--limit N]
 //!
 //! Every command writes `summary.json` into DIR and prints it to stdout.
 //! `preview` also writes `tips/NNN.png` per available tip and `sheet.png`.
@@ -10,8 +11,9 @@
 //! error is in `summary.json`), 2 on a usage or I/O error.
 
 use brushkit::abr::{self, AbrPack, SampledBrush, UnavailableTip};
+use brushkit::preview::procreate::{Zip, ZipReadError};
 use brushkit::preview::{
-    self, ContactSheetConfig, PreviewOptions, PreviewSet, SheetBrush, TipPreview,
+    self, ContactSheetConfig, Format, PreviewOptions, PreviewSet, SheetBrush, Take, TipPreview,
 };
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -80,6 +82,7 @@ fn run() -> Result<bool, String> {
         "parse" => parse(&bytes, args.flag("mode").unwrap_or("eager"))?,
         "preview" => preview(&bytes, &args)?,
         "dump" => dump(&bytes),
+        "zip" => zip(&bytes, &args)?,
         other => return Err(format!("unknown command {other}")),
     };
 
@@ -123,10 +126,12 @@ fn parse(bytes: &[u8], mode: &str) -> Result<(bool, Value), String> {
 /// Tips of a deferred pack are decoded through `decode_tip`, the way a
 /// consumer reads them.
 fn deferred_json(d: &abr::DeferredPack) -> Value {
-    pack_json(&d.pack, |i| match d.decode_tip(i) {
+    let mut pack = pack_json(&d.pack, |i| match d.decode_tip(i) {
         Ok(tip) => tip_json(&tip),
         Err(e) => json!({ "error": e.to_string() }),
-    })
+    });
+    pack["up_front_decoded_len"] = json!(d.up_front_decoded_len());
+    pack
 }
 
 fn tip_json(tip: &abr::TipBitmap) -> Value {
@@ -140,6 +145,7 @@ fn pack_json(pack: &AbrPack, tip: impl Fn(usize) -> Value) -> Value {
         "brushes": pack.brushes.iter().enumerate().map(|(i, b)| json!({
             "index": i,
             "id": b.id,
+            "uuid": b.uuid,
             "name": b.name,
             "preset_index": b.preset_index,
             "tip": tip(i),
@@ -148,6 +154,7 @@ fn pack_json(pack: &AbrPack, tip: impl Fn(usize) -> Value) -> Value {
             SampledBrush::Readable(i) => json!({ "readable": i }),
             SampledBrush::Unavailable(u) => json!({ "unavailable": {
                 "id": u.id,
+                "uuid": u.uuid,
                 "name": u.name,
                 "preset_index": u.preset_index,
                 "cause": match &u.cause {
@@ -165,6 +172,7 @@ fn pack_json(pack: &AbrPack, tip: impl Fn(usize) -> Value) -> Value {
                 "hardness_pct": g.hardness_pct,
                 "angle_deg": g.angle_deg,
                 "roundness_pct": g.roundness_pct,
+                "synthesized_side": preview::synthesized_tip_side(&g),
             })
         }).collect::<Vec<_>>(),
         "patterns": pack.patterns.iter().map(|p| json!({
@@ -212,18 +220,44 @@ fn preview(bytes: &[u8], args: &Args) -> Result<(bool, Value), String> {
         .flag("first")
         .map(|n| parse_num(n, "--first"))
         .transpose()?;
+    let stop_after: Option<usize> = args
+        .flag("stop-after")
+        .map(|n| parse_num(n, "--stop-after"))
+        .transpose()?;
     let opts = PreviewOptions { max_cell };
 
-    let result = match (kind.as_str(), first) {
-        ("abr", None) => preview::preview_abr(bytes, opts),
-        ("abr", Some(n)) => preview::preview_abr_first_available(bytes, opts, n),
-        ("brush", None) => preview::preview_brush(bytes, opts),
-        ("brush", Some(n)) => preview::preview_brush_first_available(bytes, opts, n),
-        ("brushset", None) => preview::preview_brushset(bytes, opts),
-        ("brushset", Some(n)) => preview::preview_brushset_first_available(bytes, opts, n),
-        (other, _) => return Err(format!("unknown kind {other}")),
+    // `--stop-after K` calls `preview` directly with a `keep_going` that
+    // returns true K times, the way a host with a time limit stops a call.
+    let mut calls = 0;
+    let result = match (kind.as_str(), first, stop_after) {
+        (kind, first, Some(k)) => {
+            let format = match kind {
+                "abr" => Format::Abr,
+                "brush" => Format::Brush,
+                "brushset" => Format::Brushset,
+                other => return Err(format!("unknown kind {other}")),
+            };
+            let take = first.map_or(Take::All, Take::FirstAvailable);
+            preview::preview(bytes, format, opts, take, &mut || {
+                calls += 1;
+                calls <= k
+            })
+        }
+        ("abr", None, None) => preview::preview_abr(bytes, opts),
+        ("abr", Some(n), None) => preview::preview_abr_first_available(bytes, opts, n),
+        ("brush", None, None) => preview::preview_brush(bytes, opts),
+        ("brush", Some(n), None) => preview::preview_brush_first_available(bytes, opts, n),
+        ("brushset", None, None) => preview::preview_brushset(bytes, opts),
+        ("brushset", Some(n), None) => preview::preview_brushset_first_available(bytes, opts, n),
+        (other, _, None) => return Err(format!("unknown kind {other}")),
     };
-    let head = json!({ "kind": kind, "max_cell": max_cell, "first": first });
+    let head = json!({
+        "kind": kind,
+        "max_cell": max_cell,
+        "first": first,
+        "stop_after": stop_after,
+        "keep_going_calls": stop_after.map(|_| calls),
+    });
     match result {
         Ok(set) => Ok((true, set_json(&set, head, &args.out)?)),
         Err(e) => Ok((false, json!({ "call": head, "error": e.to_string() }))),
@@ -284,6 +318,7 @@ fn set_json(set: &PreviewSet, head: Value, out: &Path) -> Result<Value, String> 
         "call": head,
         "set_name": set.set_name,
         "counts": { "entries": set.entries.len(), "available": available, "unavailable": unavailable },
+        "not_reached": set.not_reached,
         "entries": entries,
         "sheet": "sheet.png",
     }))
@@ -301,4 +336,43 @@ fn dump(bytes: &[u8]) -> (bool, Value) {
         },
         Err(e) => (false, json!({ "error": e.to_string() })),
     }
+}
+
+/// Opens the file through the guarded `procreate::Zip`, lists its entries
+/// and, with `--read`, reads one entry, under `--limit` when given.
+fn zip(bytes: &[u8], args: &Args) -> Result<(bool, Value), String> {
+    let mut zip = match Zip::open(bytes) {
+        Ok(zip) => zip,
+        Err(e) => return Ok((false, json!({ "error": e }))),
+    };
+    let mut body = json!({
+        "names": zip.names(),
+        "members_in_zip_order": zip.members_in_zip_order(),
+        "conflicting_names": zip.conflicting_names(),
+    });
+    let Some(name) = args.flag("read") else {
+        return Ok((true, body));
+    };
+    let limit: Option<usize> = args
+        .flag("limit")
+        .map(|n| parse_num(n, "--limit"))
+        .transpose()?;
+    let read = match limit {
+        Some(limit) => zip.read_entry_within(name, limit),
+        None => zip.read_entry(name),
+    };
+    let ok = read.is_ok();
+    body["read"] = json!({
+        "name": name,
+        "contains": zip.contains(name),
+        "limit": limit,
+        "result": match read {
+            Ok(data) => json!({ "len": data.len() }),
+            Err(ZipReadError::OverLimit { name, declared, limit }) => {
+                json!({ "over_limit": { "name": name, "declared": declared, "limit": limit } })
+            }
+            Err(ZipReadError::Failed(message)) => json!({ "failed": message }),
+        },
+    });
+    Ok((ok, body))
 }
