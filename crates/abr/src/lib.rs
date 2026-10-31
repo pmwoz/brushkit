@@ -516,6 +516,30 @@ pub struct BrushDescriptor {
     /// Photoshop `opVr:brVr/jitter` (`#Prc`) — opacity-jitter amount, present only
     /// when `usePaintDynamics` is true.
     pub opacity_jitter_pct: Option<f64>,
+    /// Photoshop `prVr:brVr/bVTy` (numeric `long` control selector), present
+    /// only when `usePaintDynamics` is true.
+    pub flow_control: Option<i32>,
+    /// Photoshop `wtVr:brVr/bVTy` (numeric `long` control selector), present
+    /// only when `usePaintDynamics` is true.
+    pub wetness_control: Option<i32>,
+    /// Photoshop `mxVr:brVr/bVTy` (numeric `long` control selector), present
+    /// only when `usePaintDynamics` is true.
+    pub mix_control: Option<i32>,
+    /// Photoshop `roundnessDynamics:brVr/bVTy` (numeric `long` control selector), present
+    /// only when `useTipDynamics` is true.
+    pub roundness_control: Option<i32>,
+    /// Photoshop `scatterDynamics:brVr/bVTy` (numeric `long` control selector), present
+    /// only when `useScatter` is true.
+    pub scatter_control: Option<i32>,
+    /// Photoshop `countDynamics:brVr/bVTy` (numeric `long` control selector), present
+    /// only when `useScatter` is true.
+    pub count_control: Option<i32>,
+    /// Photoshop `textureDepthDynamics:brVr/bVTy` (numeric `long` control selector), present
+    /// only when `useTexture` is true.
+    pub texture_depth_control: Option<i32>,
+    /// Photoshop `clVr:brVr/bVTy` (numeric `long` control selector), present
+    /// only when `useColorDynamics` is true.
+    pub color_fg_bg_control: Option<i32>,
     /// Photoshop `prVr:brVr/jitter` (`#Prc`) — PS Transfer-panel Flow Jitter amount,
     /// present only when `usePaintDynamics` is true.
     pub flow_jitter_pct: Option<f64>,
