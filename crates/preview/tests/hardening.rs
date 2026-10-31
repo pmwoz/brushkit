@@ -1,6 +1,8 @@
 mod common;
 
-use brushkit_preview::procreate::{parse_plist_guarded, read_zip_entry, MAX_PNG_DIMENSION};
+use brushkit_preview::procreate::{
+    parse_plist_guarded, read_zip_entry, Zip, ZipReadError, MAX_PNG_DIMENSION,
+};
 use brushkit_preview::{decode_tip_image, TipImageError, MAX_IMPORT_DIMENSION};
 use brushkit_preview::{preview_brush, preview_brushset, PreviewOptions, TipPreview};
 use brushkit_preview::{preview_brush_first_available, preview_brushset_first_available};
@@ -185,6 +187,22 @@ fn listed_brushset_plist_that_cannot_open_fails_the_set() {
     let err = preview_brushset(&zip_bytes, PreviewOptions { max_cell: 8 })
         .expect_err("an unopenable brushset.plist must fail the set");
     assert_eq!(err.0, format!("failed to read brushset.plist: {METHOD_77}"));
+}
+
+#[test]
+fn listed_entry_over_the_limit_that_cannot_open_is_over_limit() {
+    let png = real_4x4_png();
+    let zip_bytes = unopenable(zip_with(&[("Shape.png", &png)]), "Shape.png");
+    let mut zip = Zip::open(&zip_bytes).expect("open zip");
+
+    assert_eq!(
+        zip.read_entry_within("Shape.png", 0),
+        Err(ZipReadError::OverLimit {
+            name: "Shape.png".to_string(),
+            declared: png.len() as u64,
+            limit: 0,
+        })
+    );
 }
 
 #[test]

@@ -376,8 +376,7 @@ fn read_capped(
     let index = index.ok_or_else(|| ZipReadError::Failed(format!("{path} not found")))?;
     let failed =
         |e: &dyn std::fmt::Display| ZipReadError::Failed(format!("failed to read {path}: {e}"));
-    let mut file = zip.by_index(index).map_err(|e| failed(&e))?;
-    let size = file.size();
+    let size = zip.by_index_data(index).map_err(|e| failed(&e))?.size();
     if size > limit as u64 {
         return Err(ZipReadError::OverLimit {
             name: path.to_string(),
@@ -385,6 +384,7 @@ fn read_capped(
             limit,
         });
     }
+    let mut file = zip.by_index(index).map_err(|e| failed(&e))?;
     let mut buf = Vec::with_capacity(size as usize);
     (&mut file)
         .take(size)
