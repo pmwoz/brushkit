@@ -478,6 +478,33 @@ pub struct DualBrush {
     pub flip: Option<bool>,
 }
 
+/// The top-level `toolOptions` object of a preset: the tool settings saved
+/// with it. Each `Option` field is `None` when the object omits the key or
+/// carries it with another wire type.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ToolOptions {
+    /// The object's class id, which names the tool the preset was saved for
+    /// (e.g. "PbTl", "MixB").
+    pub tool: String,
+    /// `toolOptions/Opct` (`long`) — opacity percent.
+    pub opacity_pct: Option<i32>,
+    /// `toolOptions/flow` (`long`) — flow percent.
+    pub flow_pct: Option<i32>,
+    /// `toolOptions/Md  ` (`enum` `BlnM`, key = "Md" + two spaces) — the raw
+    /// blend-mode value id (e.g. "Nrml").
+    pub blend_mode: Option<String>,
+    /// `toolOptions/smoothing` (`bool`).
+    pub smoothing: Option<bool>,
+    /// `toolOptions/smoothingValue` (`doub`).
+    pub smoothing_pct: Option<f64>,
+    /// `toolOptions/wetness` (`doub`). On real files, `MixB` presets carry it.
+    pub wetness_pct: Option<f64>,
+    /// `toolOptions/dryness` (`doub`). On real files, `MixB` presets carry it.
+    pub dryness_pct: Option<f64>,
+    /// `toolOptions/mix` (`doub`). On real files, `MixB` presets carry it.
+    pub mix_pct: Option<f64>,
+}
+
 /// Per-brush Photoshop dynamics extracted from the ABR descriptor.
 ///
 /// Each field is `Option`: `None` means the source `.abr` carried no value for
@@ -660,6 +687,12 @@ pub struct BrushDescriptor {
     /// Photoshop top-level `brushProjection` (`bool`) — tip projection follows
     /// stylus tilt/rotation.
     pub brush_projection: bool,
+    /// Photoshop top-level `toolOptions` (`Objc`), `Some` iff the preset carries
+    /// it. No enable flag gates it.
+    pub tool_options: Option<ToolOptions>,
+    /// Photoshop `Brsh/Intr` (`bool`) of the main tip, read for every inner
+    /// class. The dual brush's own `Brsh/Intr` is not read.
+    pub interpolation: Option<bool>,
 }
 
 /// A single brush extracted from the ABR pack.

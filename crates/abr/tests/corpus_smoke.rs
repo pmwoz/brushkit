@@ -351,3 +351,80 @@ fn corpus_sets_a_nonzero_control_on_every_brvr_panel() {
         assert!(count > 0, "no corpus preset sets a nonzero {field}");
     }
 }
+
+type DescriptorCheck = fn(&brushkit_abr::BrushDescriptor) -> bool;
+
+const NON_DEFAULT_TOOL_SETTINGS: [(&str, DescriptorCheck); 9] = [
+    ("a tool other than PbTl", |d| {
+        d.tool_options.as_ref().is_some_and(|t| t.tool != "PbTl")
+    }),
+    ("opacity_pct < 100", |d| {
+        d.tool_options
+            .as_ref()
+            .and_then(|t| t.opacity_pct)
+            .is_some_and(|v| v < 100)
+    }),
+    ("flow_pct < 100", |d| {
+        d.tool_options
+            .as_ref()
+            .and_then(|t| t.flow_pct)
+            .is_some_and(|v| v < 100)
+    }),
+    ("a blend_mode other than Nrml", |d| {
+        d.tool_options
+            .as_ref()
+            .and_then(|t| t.blend_mode.as_deref())
+            .is_some_and(|m| m != "Nrml")
+    }),
+    ("smoothing on with smoothing_pct > 0", |d| {
+        d.tool_options
+            .as_ref()
+            .is_some_and(|t| t.smoothing == Some(true) && t.smoothing_pct.is_some_and(|v| v > 0.0))
+    }),
+    ("wetness_pct", |d| {
+        d.tool_options
+            .as_ref()
+            .is_some_and(|t| t.wetness_pct.is_some())
+    }),
+    ("dryness_pct", |d| {
+        d.tool_options
+            .as_ref()
+            .is_some_and(|t| t.dryness_pct.is_some())
+    }),
+    ("mix_pct", |d| {
+        d.tool_options.as_ref().is_some_and(|t| t.mix_pct.is_some())
+    }),
+    ("interpolation false", |d| d.interpolation == Some(false)),
+];
+
+#[test]
+fn corpus_sets_a_non_default_value_for_every_tool_setting_and_intr() {
+    let Some((root, files)) = corpus() else {
+        println!("skip: BRUSHKIT_CORPUS_DIR unset");
+        return;
+    };
+    let mut presets = [0usize; NON_DEFAULT_TOOL_SETTINGS.len()];
+    for path in &files {
+        let bytes = std::fs::read(path).expect("corpus file is readable");
+        let name = path.strip_prefix(&root).unwrap_or(path).display();
+        let all = brushkit_abr::parse_abr_all_deferred_without_patterns(&bytes)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let descriptors = all
+            .pack
+            .brushes
+            .iter()
+            .map(|b| &b.descriptor)
+            .chain(all.pack.computed_presets.iter().map(|p| &p.descriptor));
+        for d in descriptors {
+            for (count, (_, check)) in presets.iter_mut().zip(NON_DEFAULT_TOOL_SETTINGS) {
+                if check(d) {
+                    *count += 1;
+                }
+            }
+        }
+    }
+    for ((condition, _), count) in NON_DEFAULT_TOOL_SETTINGS.iter().zip(presets) {
+        println!("{condition}: {count} preset(s)");
+        assert!(count > 0, "no corpus preset has {condition}");
+    }
+}

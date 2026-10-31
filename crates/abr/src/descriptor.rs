@@ -210,6 +210,8 @@ fn parse_brush_preset_objc(cursor: &mut Cursor<&[u8]>) -> io::Result<BrushDescIn
     let mut color_purity = None;
     let mut color_fg_bg_jitter = None;
     let mut color_per_tip: Option<bool> = None;
+    let mut tool_options = None;
+    let mut interpolation = None;
 
     for _ in 0..item_count {
         let key = read_id(cursor)?;
@@ -226,6 +228,9 @@ fn parse_brush_preset_objc(cursor: &mut Cursor<&[u8]>) -> io::Result<BrushDescIn
             }
             if spacing_pct.is_none() {
                 spacing_pct = inner.spacing_pct;
+            }
+            if interpolation.is_none() {
+                interpolation = inner.interpolation;
             }
             if computed.is_none() {
                 computed = inner.computed;
@@ -360,6 +365,8 @@ fn parse_brush_preset_objc(cursor: &mut Cursor<&[u8]>) -> io::Result<BrushDescIn
             texture_brightness = Some(cursor.read_i32::<BigEndian>()? as i64);
         } else if key == "textureContrast" && type_tag == "long" {
             texture_contrast = Some(cursor.read_i32::<BigEndian>()? as i64);
+        } else if key == "toolOptions" && type_tag == "Objc" {
+            tool_options = Some(parse_tool_options(cursor)?);
         } else if skip_descriptor_value(cursor, &type_tag, 0).is_err() {
             break;
         }
@@ -523,6 +530,8 @@ fn parse_brush_preset_objc(cursor: &mut Cursor<&[u8]>) -> io::Result<BrushDescIn
             },
             use_brush_pose,
             brush_projection,
+            tool_options,
+            interpolation,
         },
     })
 }
@@ -587,6 +596,7 @@ fn parse_dual_brush(cursor: &mut Cursor<&[u8]>) -> io::Result<(bool, crate::Dual
 struct InnerBrush {
     uuid: Option<String>,
     spacing_pct: Option<f64>,
+    interpolation: Option<bool>,
     /// `Some` iff the inner class id is `computedBrush` — the witnessed
     /// procedural-tip geometry keys (Dmtr/Hrdn/Angl/Rndn), each optional.
     computed: Option<crate::ComputedGeometry>,
@@ -651,6 +661,7 @@ fn parse_inner_brush(cursor: &mut Cursor<&[u8]>) -> io::Result<InnerBrush> {
     };
     let mut uuid = None;
     let mut spacing_pct = None;
+    let mut interpolation = None;
     let mut geometry = crate::ComputedGeometry::default();
     let mut diameter_px = None;
     let mut sampled_angle_deg = None;
@@ -668,6 +679,8 @@ fn parse_inner_brush(cursor: &mut Cursor<&[u8]>) -> io::Result<InnerBrush> {
             uuid = Some(read_unicode_string(cursor)?);
         } else if key == "Spcn" && type_tag == "UntF" {
             spacing_pct = Some(read_unit_float(cursor)?);
+        } else if key == "Intr" && type_tag == "bool" {
+            interpolation = Some(cursor.read_u8()? != 0);
         } else if is_computed
             && type_tag == "UntF"
             && matches!(key.as_str(), "Dmtr" | "Hrdn" | "Angl" | "Rndn")
@@ -719,6 +732,7 @@ fn parse_inner_brush(cursor: &mut Cursor<&[u8]>) -> io::Result<InnerBrush> {
     Ok(InnerBrush {
         uuid,
         spacing_pct,
+        interpolation,
         computed: is_computed.then_some(geometry),
         diameter_px,
         sampled_angle_deg,
@@ -789,6 +803,41 @@ fn parse_txtr(cursor: &mut Cursor<&[u8]>) -> io::Result<Txtr> {
         }
     }
     Ok(Txtr { name, id })
+}
+
+fn parse_tool_options(cursor: &mut Cursor<&[u8]>) -> io::Result<crate::ToolOptions> {
+    let _class_name = read_unicode_string(cursor)?;
+    let mut options = crate::ToolOptions {
+        tool: read_id(cursor)?,
+        ..Default::default()
+    };
+    let item_count = cursor.read_u32::<BigEndian>()?;
+
+    for _ in 0..item_count {
+        let key = read_id(cursor)?;
+        let type_tag = read_type_tag(cursor)?;
+        match (key.as_str(), type_tag.as_str()) {
+            ("Opct", "long") => options.opacity_pct = Some(cursor.read_i32::<BigEndian>()?),
+            ("flow", "long") => options.flow_pct = Some(cursor.read_i32::<BigEndian>()?),
+            ("Md  ", "enum") => {
+                let _enum_type = read_id(cursor)?;
+                options.blend_mode = Some(read_id(cursor)?);
+            }
+            ("smoothing", "bool") => options.smoothing = Some(cursor.read_u8()? != 0),
+            ("smoothingValue", "doub") => {
+                options.smoothing_pct = Some(cursor.read_f64::<BigEndian>()?)
+            }
+            ("wetness", "doub") => options.wetness_pct = Some(cursor.read_f64::<BigEndian>()?),
+            ("dryness", "doub") => options.dryness_pct = Some(cursor.read_f64::<BigEndian>()?),
+            ("mix", "doub") => options.mix_pct = Some(cursor.read_f64::<BigEndian>()?),
+            _ => {
+                if skip_descriptor_value(cursor, &type_tag, 0).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(options)
 }
 
 pub(crate) fn read_unicode_string(cursor: &mut Cursor<&[u8]>) -> io::Result<String> {
@@ -1221,6 +1270,81 @@ mod tests {
             d.texture_depth_control,
             d.color_fg_bg_control,
         ]
+    }
+
+    fn write_doub(buf: &mut Vec<u8>, key: &[u8], val: f64) {
+        write_key(buf, key);
+        buf.extend_from_slice(b"doub");
+        buf.write_f64::<BigEndian>(val).unwrap();
+    }
+
+    fn build_tool_options_desc_block(tip_class: &[u8], opacity_as_doub: bool) -> Vec<u8> {
+        let mut buf = Vec::new();
+
+        buf.write_u32::<BigEndian>(16).unwrap();
+        buf.write_u32::<BigEndian>(1).unwrap();
+        buf.write_u16::<BigEndian>(0).unwrap();
+        buf.write_u32::<BigEndian>(0).unwrap();
+        buf.extend_from_slice(b"null");
+        buf.write_u32::<BigEndian>(1).unwrap();
+
+        buf.write_u32::<BigEndian>(0).unwrap();
+        buf.extend_from_slice(b"Brsh");
+        buf.extend_from_slice(b"VlLs");
+        buf.write_u32::<BigEndian>(1).unwrap();
+
+        buf.extend_from_slice(b"Objc");
+        buf.write_u32::<BigEndian>(1).unwrap();
+        buf.write_u16::<BigEndian>(0).unwrap();
+        buf.write_u32::<BigEndian>(11).unwrap();
+        buf.extend_from_slice(b"brushPreset");
+        buf.write_u32::<BigEndian>(3).unwrap();
+
+        write_key(&mut buf, b"Brsh");
+        buf.extend_from_slice(b"Objc");
+        buf.write_u32::<BigEndian>(1).unwrap();
+        buf.write_u16::<BigEndian>(0).unwrap();
+        write_key(&mut buf, tip_class);
+        buf.write_u32::<BigEndian>(1).unwrap();
+        write_bool(&mut buf, b"Intr", false);
+
+        write_key(&mut buf, b"toolOptions");
+        buf.extend_from_slice(b"Objc");
+        buf.write_u32::<BigEndian>(1).unwrap();
+        buf.write_u16::<BigEndian>(0).unwrap();
+        write_key(&mut buf, b"MixB");
+        buf.write_u32::<BigEndian>(9).unwrap();
+        if opacity_as_doub {
+            write_doub(&mut buf, b"Opct", 70.0);
+        } else {
+            write_long(&mut buf, b"Opct", 70);
+        }
+        write_long(&mut buf, b"flow", 45);
+        write_brvr(&mut buf, b"prVr", 2, 0.0);
+        write_enum(&mut buf, b"Md  ", b"BlnM", b"Mltp");
+        write_bool(&mut buf, b"smoothing", true);
+        write_doub(&mut buf, b"smoothingValue", 12.5);
+        write_doub(&mut buf, b"wetness", 80.0);
+        write_doub(&mut buf, b"dryness", 30.0);
+        write_doub(&mut buf, b"mix", 55.0);
+
+        write_text(&mut buf, b"Nm  ", "Mixer");
+
+        buf
+    }
+
+    fn mixer_tool_options() -> crate::ToolOptions {
+        crate::ToolOptions {
+            tool: "MixB".to_string(),
+            opacity_pct: Some(70),
+            flow_pct: Some(45),
+            blend_mode: Some("Mltp".to_string()),
+            smoothing: Some(true),
+            smoothing_pct: Some(12.5),
+            wetness_pct: Some(80.0),
+            dryness_pct: Some(30.0),
+            mix_pct: Some(55.0),
+        }
     }
 
     fn build_sampled_flip_desc_block() -> Vec<u8> {
@@ -1721,6 +1845,52 @@ mod tests {
                 String::from_utf8_lossy(gate)
             );
         }
+    }
+
+    #[test]
+    fn tool_options_and_interpolation_are_parsed() {
+        let infos = extract_all_brush_info(&build_tool_options_desc_block(b"sampledBrush", false));
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].name, "Mixer");
+        let d = &infos[0].descriptor;
+        assert_eq!(d.tool_options, Some(mixer_tool_options()));
+        assert_eq!(d.interpolation, Some(false));
+    }
+
+    #[test]
+    fn interpolation_is_read_for_every_tip_class() {
+        for class in [&b"sampledBrush"[..], b"computedBrush", b"dTips", b"dBrush"] {
+            let infos = extract_all_brush_info(&build_tool_options_desc_block(class, false));
+            assert_eq!(infos.len(), 1);
+            assert_eq!(
+                infos[0].descriptor.interpolation,
+                Some(false),
+                "{}",
+                String::from_utf8_lossy(class)
+            );
+        }
+    }
+
+    #[test]
+    fn no_tool_options_or_intr_yields_none() {
+        let infos = extract_all_brush_info(&build_sampled_shape_desc_block("Plain", 0.0, 100.0));
+        assert_eq!(infos.len(), 1);
+        let d = &infos[0].descriptor;
+        assert_eq!(d.tool_options, None);
+        assert_eq!(d.interpolation, None);
+    }
+
+    #[test]
+    fn tool_option_with_another_wire_type_is_none() {
+        let infos = extract_all_brush_info(&build_tool_options_desc_block(b"sampledBrush", true));
+        assert_eq!(infos.len(), 1);
+        assert_eq!(
+            infos[0].descriptor.tool_options,
+            Some(crate::ToolOptions {
+                opacity_pct: None,
+                ..mixer_tool_options()
+            })
+        );
     }
 
     #[test]
