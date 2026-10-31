@@ -100,7 +100,7 @@ fn entry_whose_data_runs_into_the_next_entry_is_rejected() {
     );
 }
 
-const CANNOT_OPEN: &str = "cannot open: compression method not supported: 77";
+const METHOD_77: &str = "compression method not supported: 77";
 
 fn unopenable(mut zip_bytes: Vec<u8>, path: &str) -> Vec<u8> {
     let name_len = u16::try_from(path.len()).unwrap().to_le_bytes();
@@ -122,7 +122,7 @@ fn listed_entry_that_cannot_open_reports_the_zip_error() {
 
     assert_eq!(
         read_zip_entry(&mut zip, "a/Shape.png"),
-        Err(format!("a/Shape.png: {CANNOT_OPEN}"))
+        Err(format!("failed to read a/Shape.png: {METHOD_77}"))
     );
     assert_eq!(
         read_zip_entry(&mut zip, "b/Shape.png"),
@@ -147,7 +147,7 @@ fn listed_shape_png_that_cannot_open_is_corrupt() {
     };
     assert_eq!(
         reason,
-        &UnavailableReason::Corrupt(format!("a/Shape.png: {CANNOT_OPEN}"))
+        &UnavailableReason::Corrupt(format!("failed to read a/Shape.png: {METHOD_77}"))
     );
 }
 
@@ -167,7 +167,7 @@ fn listed_brush_archive_that_cannot_open_is_corrupt() {
     };
     assert_eq!(
         reason,
-        &UnavailableReason::Corrupt(format!("Brush.archive: {CANNOT_OPEN}"))
+        &UnavailableReason::Corrupt(format!("failed to read Brush.archive: {METHOD_77}"))
     );
 }
 
@@ -184,7 +184,7 @@ fn listed_brushset_plist_that_cannot_open_fails_the_set() {
 
     let err = preview_brushset(&zip_bytes, PreviewOptions { max_cell: 8 })
         .expect_err("an unopenable brushset.plist must fail the set");
-    assert_eq!(err.0, format!("brushset.plist: {CANNOT_OPEN}"));
+    assert_eq!(err.0, format!("failed to read brushset.plist: {METHOD_77}"));
 }
 
 #[test]

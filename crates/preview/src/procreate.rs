@@ -374,9 +374,9 @@ fn read_capped(
     limit: usize,
 ) -> Result<Vec<u8>, ZipReadError> {
     let index = index.ok_or_else(|| ZipReadError::Failed(format!("{path} not found")))?;
-    let mut file = zip
-        .by_index(index)
-        .map_err(|e| ZipReadError::Failed(format!("{path}: cannot open: {e}")))?;
+    let failed =
+        |e: &dyn std::fmt::Display| ZipReadError::Failed(format!("failed to read {path}: {e}"));
+    let mut file = zip.by_index(index).map_err(|e| failed(&e))?;
     let size = file.size();
     if size > limit as u64 {
         return Err(ZipReadError::OverLimit {
@@ -385,19 +385,17 @@ fn read_capped(
             limit,
         });
     }
-    let read_error =
-        |e: std::io::Error| ZipReadError::Failed(format!("failed to read {path}: {e}"));
     let mut buf = Vec::with_capacity(size as usize);
     (&mut file)
         .take(size)
         .read_to_end(&mut buf)
-        .map_err(read_error)?;
+        .map_err(|e| failed(&e))?;
     if (buf.len() as u64) < size {
         return Err(ZipReadError::Failed(format!(
             "{path}: entry is shorter than its declared size {size}"
         )));
     }
-    if file.read(&mut [0]).map_err(read_error)? > 0 {
+    if file.read(&mut [0]).map_err(|e| failed(&e))? > 0 {
         return Err(ZipReadError::Failed(format!(
             "{path}: entry exceeds its declared size"
         )));
