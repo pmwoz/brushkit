@@ -9,47 +9,86 @@ pub fn can_synthesize(geom: &brushkit_abr::ComputedGeometry) -> bool {
 /// The width and height of the square tip `synthesize_computed_tip` returns,
 /// without rasterizing it. `None` iff `can_synthesize` is false.
 pub fn synthesized_tip_side(geom: &brushkit_abr::ComputedGeometry) -> Option<u32> {
-    if !can_synthesize(geom) {
-        return None;
-    }
-    Some(diameter_side(
-        geom.diameter_px.unwrap().clamp(1.0, MAX_TIP_PX),
-    ))
+    can_synthesize(geom).then(|| Profile::new(geom).side())
 }
 
-fn diameter_side(diameter: f64) -> u32 {
-    (diameter.ceil() as u32) + 2
+/// The radial alpha profile of a computed tip, in units of the nominal radius.
+struct Profile {
+    diameter: f64,
+    /// Alpha is 1 up to here.
+    core: f64,
+    k: f64,
+    /// Alpha is 0 from here.
+    outer: f64,
+}
+
+impl Profile {
+    fn new(geom: &brushkit_abr::ComputedGeometry) -> Self {
+        let diameter = geom.diameter_px.unwrap().clamp(1.0, MAX_TIP_PX);
+        let hardness = geom.hardness_pct.unwrap_or(100.0).clamp(0.0, 100.0);
+        let h = hardness / 100.0;
+        let core = h.min(1.0 - 2.0 / diameter).max(0.0);
+        let k = falloff_k(hardness);
+        // A ramp narrowed to one pixel only antialiases the edge, and
+        // Photoshop's hard tip ends at the nominal edge. A wider ramp is
+        // Photoshop's falloff, which runs past the edge until alpha rounds
+        // to 0.
+        let outer = if core == h {
+            core + (1.0 - core) * ((2.0 * 255.0_f64).ln() / k).sqrt()
+        } else {
+            1.0
+        };
+        Profile {
+            diameter,
+            core,
+            k,
+            outer,
+        }
+    }
+
+    fn side(&self) -> u32 {
+        ((self.diameter * self.outer).ceil() as u32) + 2
+    }
+
+    fn alpha(&self, r: f64) -> f64 {
+        if r <= self.core {
+            1.0
+        } else if r >= self.outer {
+            0.0
+        } else {
+            let t = (r - self.core) / (1.0 - self.core);
+            (-self.k * t * t).exp()
+        }
+    }
 }
 
 /// Rasterize a monochrome elliptical tip from computed-brush geometry.
 ///
 /// `None` iff `can_synthesize` is false. Output is single-channel grayscale,
 /// white=stamp (`255`) / black=transparent (`0`).
+///
+/// The tip's nominal diameter is `diameter_px`, centred in the bitmap. A tip
+/// below 100% hardness keeps Photoshop's falloff past the nominal edge, so its
+/// bitmap is wider than the diameter: about 1.65 times at 0%.
 pub fn synthesize_computed_tip(geom: &brushkit_abr::ComputedGeometry) -> Option<GrayscaleBitmap> {
     if !can_synthesize(geom) {
         return None;
     }
 
-    let diameter = geom.diameter_px.unwrap().clamp(1.0, MAX_TIP_PX);
-    let hardness = geom.hardness_pct.unwrap_or(100.0).clamp(0.0, 100.0);
+    let profile = Profile::new(geom);
     let angle = geom.angle_deg.unwrap_or(0.0);
     let roundness = geom.roundness_pct.unwrap_or(100.0).clamp(0.0, 100.0);
 
-    let side = diameter_side(diameter);
+    let side = profile.side();
     let center = side as f64 / 2.0;
 
-    let a = diameter / 2.0;
+    let a = profile.diameter / 2.0;
     let b = (a * roundness / 100.0).max(0.5);
-
-    let h = hardness / 100.0;
-    let h_eff = h.min(1.0 - 1.0 / a).max(0.0);
 
     // Photoshop's `Angl` is CCW-positive in canvas (y-up) orientation; the
     // bitmap's y axis points down, so the angle is negated to rotate the tip
     // the way Photoshop does.
     let (sin, cos) = (-angle).to_radians().sin_cos();
-
-    let k = falloff_k(hardness);
 
     let mut data = vec![0u8; (side * side) as usize];
     for y in 0..side {
@@ -59,15 +98,7 @@ pub fn synthesize_computed_tip(geom: &brushkit_abr::ComputedGeometry) -> Option<
             let u = dx * cos + dy * sin;
             let v = -dx * sin + dy * cos;
             let r = ((u / a).powi(2) + (v / b).powi(2)).sqrt();
-            let alpha = if r <= h_eff {
-                1.0
-            } else if r >= 1.0 {
-                0.0
-            } else {
-                let t = (r - h_eff) / (1.0 - h_eff);
-                (-k * t * t).exp()
-            };
-            data[(y * side + x) as usize] = (alpha * 255.0).round() as u8;
+            data[(y * side + x) as usize] = (profile.alpha(r) * 255.0).round() as u8;
         }
     }
 
@@ -201,6 +232,8 @@ mod tests {
     fn diameter_is_capped() {
         let bmp = synthesize_computed_tip(&geom(Some(100000.0), None, None, Some(100.0))).unwrap();
         assert!(bmp.width <= 4098, "width was {}", bmp.width);
+        let soft = synthesized_tip_side(&geom(Some(100000.0), Some(0.0), None, None)).unwrap();
+        assert!(soft <= 6762, "soft side was {soft}");
     }
 
     #[test]
@@ -257,7 +290,7 @@ mod tests {
     fn gaussian_falloff_value_at_named_pixel() {
         let bmp =
             synthesize_computed_tip(&geom(Some(200.0), Some(0.0), Some(0.0), Some(100.0))).unwrap();
-        let v = pixel_at(&bmp, 151, 101);
+        let v = pixel_at(&bmp, bmp.width / 2 + 50, bmp.height / 2);
         assert!((139..=145).contains(&v), "expected 142 ± 3, got {v}");
     }
 

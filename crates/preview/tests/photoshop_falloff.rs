@@ -100,6 +100,11 @@ fn soft_tip_matches_photoshops_profile_inside_and_past_the_nominal_edge() {
         .map(|(o, p)| (o - p).abs())
         .collect();
     let disc_mae = gaps[..DISC_BINS].iter().sum::<f64>() / DISC_BINS as f64;
+    println!(
+        "MAE inside the nominal radius {disc_mae:.4}, over the tail {:.4}, largest bin gap {:.4}",
+        gaps.iter().sum::<f64>() / TAIL_BINS as f64,
+        gaps.iter().fold(0.0_f64, |m, &g| m.max(g))
+    );
     assert!(
         disc_mae <= 0.02,
         "MAE inside the nominal radius {disc_mae:.4}"
