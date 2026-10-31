@@ -261,6 +261,42 @@ mod tests {
         assert!((139..=145).contains(&v), "expected 142 ± 3, got {v}");
     }
 
+    /// Photoshop 27.11 draws a `Hrdn` 0 dab as `exp(-2.30 r²)` of the nominal
+    /// radius with no cut: alpha 0.10 at the nominal edge, 0.036 at 1.2 radii,
+    /// and 0 once it rounds below half a level, at about 1.65 radii.
+    #[test]
+    fn soft_tip_carries_the_tail_past_the_nominal_edge() {
+        let bmp =
+            synthesize_computed_tip(&geom(Some(200.0), Some(0.0), Some(0.0), Some(100.0))).unwrap();
+        let (c, y) = (bmp.width / 2, bmp.height / 2);
+        let at = |r: f64| pixel_at(&bmp, c + (r * 100.0) as u32, y);
+        assert!((24..=28).contains(&at(1.0)), "r 1.0: {}", at(1.0));
+        assert!((7..=11).contains(&at(1.2)), "r 1.2: {}", at(1.2));
+        assert!(at(1.6) > 0, "r 1.6 should still hold ink");
+        let last_inked = (c..bmp.width).rev().find(|&x| pixel_at(&bmp, x, y) > 0);
+        assert!(
+            last_inked.is_some_and(|x| x < bmp.width - 1),
+            "the tail must fit inside the bitmap: last inked {last_inked:?} of {}",
+            bmp.width
+        );
+    }
+
+    #[test]
+    fn hard_tip_ends_at_the_nominal_edge() {
+        let bmp = synthesize_computed_tip(&geom(Some(40.0), Some(100.0), Some(0.0), Some(100.0)))
+            .unwrap();
+        assert_eq!(bmp.width, 42);
+        let c = f64::from(bmp.width) / 2.0;
+        for y in 0..bmp.height {
+            for x in 0..bmp.width {
+                let r = (f64::from(x) + 0.5 - c).hypot(f64::from(y) + 0.5 - c) / 20.0;
+                if r >= 1.0 {
+                    assert_eq!(pixel_at(&bmp, x, y), 0, "ink at ({x}, {y}), r {r:.3}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn radial_profile_is_monotone_non_increasing() {
         let bmp =
