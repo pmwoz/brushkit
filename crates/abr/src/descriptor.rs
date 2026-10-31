@@ -172,6 +172,14 @@ fn parse_brush_preset_objc(cursor: &mut Cursor<&[u8]>) -> io::Result<BrushDescIn
     let mut op_jitter = None;
     let mut flow_jitter = None;
     let mut wetness_jitter = None;
+    let mut flow_control = None;
+    let mut wetness_control = None;
+    let mut mix_control = None;
+    let mut roundness_control = None;
+    let mut scatter_control = None;
+    let mut count_control = None;
+    let mut texture_depth_control = None;
+    let mut color_fg_bg_control = None;
     let mut mix_jitter = None;
     let mut angle_control = None;
     let mut angle_jitter = None;
@@ -260,19 +268,29 @@ fn parse_brush_preset_objc(cursor: &mut Cursor<&[u8]>) -> io::Result<BrushDescIn
             op_control = b.control;
             op_jitter = b.jitter_pct;
         } else if key == "prVr" && type_tag == "Objc" {
-            flow_jitter = parse_brvr(cursor)?.jitter_pct;
+            let b = parse_brvr(cursor)?;
+            flow_jitter = b.jitter_pct;
+            flow_control = b.control;
         } else if key == "wtVr" && type_tag == "Objc" {
-            wetness_jitter = parse_brvr(cursor)?.jitter_pct;
+            let b = parse_brvr(cursor)?;
+            wetness_jitter = b.jitter_pct;
+            wetness_control = b.control;
         } else if key == "mxVr" && type_tag == "Objc" {
-            mix_jitter = parse_brvr(cursor)?.jitter_pct;
+            let b = parse_brvr(cursor)?;
+            mix_jitter = b.jitter_pct;
+            mix_control = b.control;
         } else if key == "angleDynamics" && type_tag == "Objc" {
             let b = parse_brvr(cursor)?;
             angle_control = b.control;
             angle_jitter = b.jitter_pct;
         } else if key == "scatterDynamics" && type_tag == "Objc" {
-            scatter_jitter = parse_brvr(cursor)?.jitter_pct;
+            let b = parse_brvr(cursor)?;
+            scatter_jitter = b.jitter_pct;
+            scatter_control = b.control;
         } else if key == "countDynamics" && type_tag == "Objc" {
-            count_jitter = parse_brvr(cursor)?.jitter_pct;
+            let b = parse_brvr(cursor)?;
+            count_jitter = b.jitter_pct;
+            count_control = b.control;
         } else if key == "Cnt " && type_tag == "doub" {
             scatter_count = Some(cursor.read_f64::<BigEndian>()?);
         } else if key == "bothAxes" && type_tag == "bool" {
@@ -280,7 +298,9 @@ fn parse_brush_preset_objc(cursor: &mut Cursor<&[u8]>) -> io::Result<BrushDescIn
         } else if key == "minimumDiameter" && type_tag == "UntF" {
             minimum_diameter = Some(read_unit_float(cursor)?);
         } else if key == "roundnessDynamics" && type_tag == "Objc" {
-            roundness_jitter = parse_brvr(cursor)?.jitter_pct;
+            let b = parse_brvr(cursor)?;
+            roundness_jitter = b.jitter_pct;
+            roundness_control = b.control;
         } else if key == "minimumRoundness" && type_tag == "UntF" {
             minimum_roundness = Some(read_unit_float(cursor)?);
         } else if key == "flipX" && type_tag == "bool" {
@@ -300,7 +320,9 @@ fn parse_brush_preset_objc(cursor: &mut Cursor<&[u8]>) -> io::Result<BrushDescIn
         } else if key == "purity" && type_tag == "UntF" {
             color_purity = Some(read_unit_float(cursor)?);
         } else if key == "clVr" && type_tag == "Objc" {
-            color_fg_bg_jitter = parse_brvr(cursor)?.jitter_pct;
+            let b = parse_brvr(cursor)?;
+            color_fg_bg_jitter = b.jitter_pct;
+            color_fg_bg_control = b.control;
         } else if key == "colorDynamicsPerTip" && type_tag == "bool" {
             color_per_tip = Some(cursor.read_u8()? != 0);
         } else if key == "useBrushPose" && type_tag == "bool" {
@@ -321,7 +343,9 @@ fn parse_brush_preset_objc(cursor: &mut Cursor<&[u8]>) -> io::Result<BrushDescIn
         } else if key == "minimumDepth" && type_tag == "UntF" {
             texture_minimum_depth = Some(read_unit_float(cursor)?);
         } else if key == "textureDepthDynamics" && type_tag == "Objc" {
-            texture_depth_jitter = parse_brvr(cursor)?.jitter_pct;
+            let b = parse_brvr(cursor)?;
+            texture_depth_jitter = b.jitter_pct;
+            texture_depth_control = b.control;
         } else if key == "Txtr" && type_tag == "Objc" {
             let t = parse_txtr(cursor)?;
             texture_pattern_name = t.name;
@@ -363,6 +387,38 @@ fn parse_brush_preset_objc(cursor: &mut Cursor<&[u8]>) -> io::Result<BrushDescIn
             pressure_size_control: if use_tip_dynamics { sz_control } else { None },
             pressure_opacity_control: if use_paint_dynamics { op_control } else { None },
             opacity_jitter_pct: if use_paint_dynamics { op_jitter } else { None },
+            flow_control: if use_paint_dynamics {
+                flow_control
+            } else {
+                None
+            },
+            wetness_control: if use_paint_dynamics {
+                wetness_control
+            } else {
+                None
+            },
+            mix_control: if use_paint_dynamics {
+                mix_control
+            } else {
+                None
+            },
+            roundness_control: if use_tip_dynamics {
+                roundness_control
+            } else {
+                None
+            },
+            scatter_control: if use_scatter { scatter_control } else { None },
+            count_control: if use_scatter { count_control } else { None },
+            texture_depth_control: if use_texture {
+                texture_depth_control
+            } else {
+                None
+            },
+            color_fg_bg_control: if use_color_dynamics {
+                color_fg_bg_control
+            } else {
+                None
+            },
             flow_jitter_pct: if use_paint_dynamics {
                 flow_jitter
             } else {
@@ -1102,6 +1158,71 @@ mod tests {
         buf
     }
 
+    const BRVR_CONTROL_GATES: [&[u8]; 5] = [
+        b"usePaintDynamics",
+        b"useTipDynamics",
+        b"useScatter",
+        b"useTexture",
+        b"useColorDynamics",
+    ];
+
+    const BRVR_CONTROL_PANELS: [(&[u8], &[u8], i32); 8] = [
+        (b"prVr", b"usePaintDynamics", 2),
+        (b"wtVr", b"usePaintDynamics", 3),
+        (b"mxVr", b"usePaintDynamics", 4),
+        (b"roundnessDynamics", b"useTipDynamics", 5),
+        (b"scatterDynamics", b"useScatter", 6),
+        (b"countDynamics", b"useScatter", 7),
+        (b"textureDepthDynamics", b"useTexture", 8),
+        (b"clVr", b"useColorDynamics", 9),
+    ];
+
+    fn build_brvr_controls_desc_block(gate_off: Option<&[u8]>) -> Vec<u8> {
+        let mut buf = Vec::new();
+
+        buf.write_u32::<BigEndian>(16).unwrap();
+        buf.write_u32::<BigEndian>(1).unwrap();
+        buf.write_u16::<BigEndian>(0).unwrap();
+        buf.write_u32::<BigEndian>(0).unwrap();
+        buf.extend_from_slice(b"null");
+        buf.write_u32::<BigEndian>(1).unwrap();
+
+        buf.write_u32::<BigEndian>(0).unwrap();
+        buf.extend_from_slice(b"Brsh");
+        buf.extend_from_slice(b"VlLs");
+        buf.write_u32::<BigEndian>(1).unwrap();
+
+        buf.extend_from_slice(b"Objc");
+        buf.write_u32::<BigEndian>(1).unwrap();
+        buf.write_u16::<BigEndian>(0).unwrap();
+        buf.write_u32::<BigEndian>(11).unwrap();
+        buf.extend_from_slice(b"brushPreset");
+        buf.write_u32::<BigEndian>((BRVR_CONTROL_GATES.len() + BRVR_CONTROL_PANELS.len()) as u32)
+            .unwrap();
+
+        for gate in BRVR_CONTROL_GATES {
+            write_bool(&mut buf, gate, gate_off != Some(gate));
+        }
+        for (panel, _, control) in BRVR_CONTROL_PANELS {
+            write_brvr(&mut buf, panel, control, 10.0);
+        }
+
+        buf
+    }
+
+    fn brvr_controls(d: &crate::BrushDescriptor) -> [Option<i32>; 8] {
+        [
+            d.flow_control,
+            d.wetness_control,
+            d.mix_control,
+            d.roundness_control,
+            d.scatter_control,
+            d.count_control,
+            d.texture_depth_control,
+            d.color_fg_bg_control,
+        ]
+    }
+
     fn build_sampled_flip_desc_block() -> Vec<u8> {
         let mut buf = Vec::new();
 
@@ -1576,6 +1697,30 @@ mod tests {
         let d = &infos[0].descriptor;
         assert!(d.pressure_size_control.is_none());
         assert!(d.pressure_opacity_control.is_none());
+    }
+
+    #[test]
+    fn brvr_panel_controls_are_parsed() {
+        let infos = extract_all_brush_info(&build_brvr_controls_desc_block(None));
+        assert_eq!(infos.len(), 1);
+        assert_eq!(
+            brvr_controls(&infos[0].descriptor),
+            BRVR_CONTROL_PANELS.map(|(_, _, control)| Some(control))
+        );
+    }
+
+    #[test]
+    fn each_brvr_panel_control_is_gated_by_its_panel_flag() {
+        for gate in BRVR_CONTROL_GATES {
+            let infos = extract_all_brush_info(&build_brvr_controls_desc_block(Some(gate)));
+            assert_eq!(infos.len(), 1);
+            assert_eq!(
+                brvr_controls(&infos[0].descriptor),
+                BRVR_CONTROL_PANELS.map(|(_, g, control)| (g != gate).then_some(control)),
+                "{} off",
+                String::from_utf8_lossy(gate)
+            );
+        }
     }
 
     #[test]

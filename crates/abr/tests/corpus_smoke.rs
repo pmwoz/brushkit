@@ -295,3 +295,59 @@ fn every_corpus_brush_uuid_is_a_sampled_data_uuid_of_its_preset() {
     println!("{matched} uuid(s) matched a preset, {repeats} repeat(s), {without} without a uuid");
     assert!(matched > 0, "no corpus brush matched a preset");
 }
+
+const BRVR_CONTROL_FIELDS: [&str; 8] = [
+    "flow_control",
+    "wetness_control",
+    "mix_control",
+    "roundness_control",
+    "scatter_control",
+    "count_control",
+    "texture_depth_control",
+    "color_fg_bg_control",
+];
+
+fn brvr_controls(d: &brushkit_abr::BrushDescriptor) -> [Option<i32>; 8] {
+    [
+        d.flow_control,
+        d.wetness_control,
+        d.mix_control,
+        d.roundness_control,
+        d.scatter_control,
+        d.count_control,
+        d.texture_depth_control,
+        d.color_fg_bg_control,
+    ]
+}
+
+#[test]
+fn corpus_sets_a_nonzero_control_on_every_brvr_panel() {
+    let Some((root, files)) = corpus() else {
+        println!("skip: BRUSHKIT_CORPUS_DIR unset");
+        return;
+    };
+    let mut presets = [0usize; 8];
+    for path in &files {
+        let bytes = std::fs::read(path).expect("corpus file is readable");
+        let name = path.strip_prefix(&root).unwrap_or(path).display();
+        let all = brushkit_abr::parse_abr_all_deferred_without_patterns(&bytes)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let descriptors = all
+            .pack
+            .brushes
+            .iter()
+            .map(|b| &b.descriptor)
+            .chain(all.pack.computed_presets.iter().map(|p| &p.descriptor));
+        for d in descriptors {
+            for (count, control) in presets.iter_mut().zip(brvr_controls(d)) {
+                if control.is_some_and(|c| c != 0) {
+                    *count += 1;
+                }
+            }
+        }
+    }
+    for (field, count) in BRVR_CONTROL_FIELDS.iter().zip(presets) {
+        println!("{field}: {count} preset(s) with a nonzero control");
+        assert!(count > 0, "no corpus preset sets a nonzero {field}");
+    }
+}
