@@ -9,47 +9,87 @@ pub fn can_synthesize(geom: &brushkit_abr::ComputedGeometry) -> bool {
 /// The width and height of the square tip `synthesize_computed_tip` returns,
 /// without rasterizing it. `None` iff `can_synthesize` is false.
 pub fn synthesized_tip_side(geom: &brushkit_abr::ComputedGeometry) -> Option<u32> {
-    if !can_synthesize(geom) {
-        return None;
-    }
-    Some(diameter_side(
-        geom.diameter_px.unwrap().clamp(1.0, MAX_TIP_PX),
-    ))
+    can_synthesize(geom).then(|| Profile::new(geom).side())
 }
 
-fn diameter_side(diameter: f64) -> u32 {
-    (diameter.ceil() as u32) + 2
+const HALF_LEVEL: f64 = 0.5 / 255.0;
+const ANTIALIAS_PX: f64 = 1.0;
+
+struct Profile {
+    diameter: f64,
+    opaque_until: f64,
+    k: f64,
+    clear_from: f64,
+}
+
+impl Profile {
+    fn new(geom: &brushkit_abr::ComputedGeometry) -> Self {
+        let diameter = geom.diameter_px.unwrap().clamp(1.0, MAX_TIP_PX);
+        let hardness = geom.hardness_pct.unwrap_or(100.0).clamp(0.0, 100.0);
+        let h = hardness / 100.0;
+        let k = falloff_k(hardness);
+        let radius = diameter / 2.0;
+        let antialias_only = (1.0 - h) * radius <= ANTIALIAS_PX;
+        // Photoshop's soft falloff runs past the nominal edge until alpha
+        // rounds to 0. Its hard tip stops at the edge.
+        let (opaque_until, clear_from) = if antialias_only {
+            ((1.0 - ANTIALIAS_PX / radius).max(0.0), 1.0)
+        } else {
+            (h, h + (1.0 - h) * (-HALF_LEVEL.ln() / k).sqrt())
+        };
+        Profile {
+            diameter,
+            opaque_until,
+            k,
+            clear_from,
+        }
+    }
+
+    fn side(&self) -> u32 {
+        ((self.diameter * self.clear_from).ceil() as u32) + 2
+    }
+
+    fn alpha(&self, r: f64) -> f64 {
+        if r <= self.opaque_until {
+            1.0
+        } else if r >= self.clear_from {
+            0.0
+        } else {
+            let t = (r - self.opaque_until) / (1.0 - self.opaque_until);
+            (-self.k * t * t).exp()
+        }
+    }
 }
 
 /// Rasterize a monochrome elliptical tip from computed-brush geometry.
 ///
 /// `None` iff `can_synthesize` is false. Output is single-channel grayscale,
 /// white=stamp (`255`) / black=transparent (`0`).
+///
+/// The tip's nominal diameter is `diameter_px`, centred in the bitmap. A tip
+/// whose falloff ramp, `100 - hardness_pct` percent of the radius, is wider
+/// than one pixel keeps the falloff past the nominal edge, as Photoshop draws
+/// a 0% hardness tip, so its bitmap is wider than the diameter: about 1.65
+/// times at 0% hardness. A ramp of one pixel or less ends at the nominal edge.
 pub fn synthesize_computed_tip(geom: &brushkit_abr::ComputedGeometry) -> Option<GrayscaleBitmap> {
     if !can_synthesize(geom) {
         return None;
     }
 
-    let diameter = geom.diameter_px.unwrap().clamp(1.0, MAX_TIP_PX);
-    let hardness = geom.hardness_pct.unwrap_or(100.0).clamp(0.0, 100.0);
+    let profile = Profile::new(geom);
     let angle = geom.angle_deg.unwrap_or(0.0);
     let roundness = geom.roundness_pct.unwrap_or(100.0).clamp(0.0, 100.0);
 
-    let side = diameter_side(diameter);
+    let side = profile.side();
     let center = side as f64 / 2.0;
 
-    let a = diameter / 2.0;
+    let a = profile.diameter / 2.0;
     let b = (a * roundness / 100.0).max(0.5);
-
-    let h = hardness / 100.0;
-    let h_eff = h.min(1.0 - 1.0 / a).max(0.0);
 
     // Photoshop's `Angl` is CCW-positive in canvas (y-up) orientation; the
     // bitmap's y axis points down, so the angle is negated to rotate the tip
     // the way Photoshop does.
     let (sin, cos) = (-angle).to_radians().sin_cos();
-
-    let k = falloff_k(hardness);
 
     let mut data = vec![0u8; (side * side) as usize];
     for y in 0..side {
@@ -59,15 +99,7 @@ pub fn synthesize_computed_tip(geom: &brushkit_abr::ComputedGeometry) -> Option<
             let u = dx * cos + dy * sin;
             let v = -dx * sin + dy * cos;
             let r = ((u / a).powi(2) + (v / b).powi(2)).sqrt();
-            let alpha = if r <= h_eff {
-                1.0
-            } else if r >= 1.0 {
-                0.0
-            } else {
-                let t = (r - h_eff) / (1.0 - h_eff);
-                (-k * t * t).exp()
-            };
-            data[(y * side + x) as usize] = (alpha * 255.0).round() as u8;
+            data[(y * side + x) as usize] = (profile.alpha(r) * 255.0).round() as u8;
         }
     }
 
@@ -201,6 +233,14 @@ mod tests {
     fn diameter_is_capped() {
         let bmp = synthesize_computed_tip(&geom(Some(100000.0), None, None, Some(100.0))).unwrap();
         assert!(bmp.width <= 4098, "width was {}", bmp.width);
+        let largest = (0..=10_000)
+            .map(|h| {
+                synthesized_tip_side(&geom(Some(100000.0), Some(h as f64 / 100.0), None, None))
+            })
+            .max()
+            .flatten()
+            .unwrap();
+        assert!(largest <= 6892, "largest side was {largest}");
     }
 
     #[test]
@@ -257,8 +297,53 @@ mod tests {
     fn gaussian_falloff_value_at_named_pixel() {
         let bmp =
             synthesize_computed_tip(&geom(Some(200.0), Some(0.0), Some(0.0), Some(100.0))).unwrap();
-        let v = pixel_at(&bmp, 151, 101);
+        let v = pixel_at(&bmp, bmp.width / 2 + 50, bmp.height / 2);
         assert!((139..=145).contains(&v), "expected 142 ± 3, got {v}");
+    }
+
+    /// Photoshop 27.11 draws a `Hrdn` 0 dab as `exp(-2.30 r²)` of the nominal
+    /// radius with no cut: alpha 0.10 at the nominal edge, 0.036 at 1.2 radii,
+    /// and 0 once it rounds below half a level, at about 1.65 radii.
+    #[test]
+    fn soft_tip_carries_the_tail_past_the_nominal_edge() {
+        let bmp =
+            synthesize_computed_tip(&geom(Some(200.0), Some(0.0), Some(0.0), Some(100.0))).unwrap();
+        let (c, y) = (bmp.width / 2, bmp.height / 2);
+        let at = |r: f64| pixel_at(&bmp, c + (r * 100.0) as u32, y);
+        assert!((24..=28).contains(&at(1.0)), "r 1.0: {}", at(1.0));
+        assert!((7..=11).contains(&at(1.2)), "r 1.2: {}", at(1.2));
+        assert!(at(1.6) > 0, "r 1.6 should still hold ink");
+        let last_inked = (c..bmp.width).rev().find(|&x| pixel_at(&bmp, x, y) > 0);
+        assert!(
+            last_inked.is_some_and(|x| x < bmp.width - 1),
+            "the tail must fit inside the bitmap: last inked {last_inked:?} of {}",
+            bmp.width
+        );
+    }
+
+    #[test]
+    fn a_ramp_of_one_pixel_or_less_gets_no_tail() {
+        let one_px = synthesize_computed_tip(&geom(Some(32.0), Some(93.75), None, None)).unwrap();
+        assert_eq!(one_px.width, 34);
+        let tiny = synthesize_computed_tip(&geom(Some(1.0), Some(0.0), None, None)).unwrap();
+        assert_eq!(tiny.width, 3);
+        assert_eq!(pixel_at(&tiny, 1, 1), 255);
+    }
+
+    #[test]
+    fn hard_tip_ends_at_the_nominal_edge() {
+        let bmp = synthesize_computed_tip(&geom(Some(40.0), Some(100.0), Some(0.0), Some(100.0)))
+            .unwrap();
+        assert_eq!(bmp.width, 42);
+        let c = f64::from(bmp.width) / 2.0;
+        for y in 0..bmp.height {
+            for x in 0..bmp.width {
+                let r = (f64::from(x) + 0.5 - c).hypot(f64::from(y) + 0.5 - c) / 20.0;
+                if r >= 1.0 {
+                    assert_eq!(pixel_at(&bmp, x, y), 0, "ink at ({x}, {y}), r {r:.3}");
+                }
+            }
+        }
     }
 
     #[test]
