@@ -472,7 +472,6 @@ fn hard_tip_is_as_wide_as_photoshops_hard_null() {
     assert_eq!(ours_widest, ps_widest);
 }
 
-/// The width of the bounding box of inked pixels.
 fn inked_width(width: u32, alpha: &[f64]) -> u32 {
     let columns: Vec<u32> = (0..alpha.len())
         .filter(|&i| alpha[i] > 0.0)
