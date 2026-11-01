@@ -1,0 +1,18 @@
+name: Minimal dependencies
+on:
+  push: { branches: [main] }
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1"
+jobs:
+  test-minimal-deps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo +nightly update -Z direct-minimal-versions
+      - uses: ./.github/actions/rust-cache
+      - uses: ./.github/actions/single-copy
+      - run: cargo test --workspace --all-features
