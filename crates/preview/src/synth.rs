@@ -15,32 +15,104 @@ pub fn synthesized_tip_side(geom: &brushkit_abr::ComputedGeometry) -> Option<u32
 const HALF_LEVEL: f64 = 0.5 / 255.0;
 const ANTIALIAS_PX: f64 = 1.0;
 
+#[derive(Clone, Copy)]
+struct Knot {
+    hardness_pct: f64,
+    opaque_until: f64,
+    width: f64,
+}
+
+/// Fitted to Photoshop 27.11 renders of a computed round tip at Size 512 (#264).
+const KNOTS: [Knot; 5] = [
+    Knot {
+        hardness_pct: 0.0,
+        opaque_until: 0.0,
+        width: 0.659,
+    },
+    Knot {
+        hardness_pct: 20.0,
+        opaque_until: 0.303,
+        width: 0.484,
+    },
+    Knot {
+        hardness_pct: 50.0,
+        opaque_until: 0.659,
+        width: 0.266,
+    },
+    Knot {
+        hardness_pct: 80.0,
+        opaque_until: 0.897,
+        width: 0.093,
+    },
+    Knot {
+        hardness_pct: 100.0,
+        opaque_until: 1.0,
+        width: 0.0,
+    },
+];
+
+fn falloff_at(hardness_pct: f64) -> Knot {
+    let h = hardness_pct.clamp(0.0, 100.0);
+    match KNOTS.windows(2).find(|w| h <= w[1].hardness_pct) {
+        Some([lo, hi]) => {
+            let t = (h - lo.hardness_pct) / (hi.hardness_pct - lo.hardness_pct);
+            Knot {
+                hardness_pct: h,
+                opaque_until: lo.opaque_until + t * (hi.opaque_until - lo.opaque_until),
+                width: lo.width + t * (hi.width - lo.width),
+            }
+        }
+        _ => KNOTS[KNOTS.len() - 1],
+    }
+}
+
+fn antialias_steepness(hardness_pct: f64) -> f64 {
+    const KNOTS: [(f64, f64); 2] = [(0.0, 2.29), (50.0, 1.14)];
+    let h = hardness_pct.clamp(KNOTS[0].0, KNOTS[KNOTS.len() - 1].0);
+    for w in KNOTS.windows(2) {
+        let (h0, k0) = w[0];
+        let (h1, k1) = w[1];
+        if h <= h1 {
+            return k0 + (h - h0) / (h1 - h0) * (k1 - k0);
+        }
+    }
+    KNOTS[KNOTS.len() - 1].1
+}
+
 struct Profile {
     diameter: f64,
     opaque_until: f64,
-    k: f64,
+    ramp: f64,
+    steepness: f64,
     clear_from: f64,
 }
 
 impl Profile {
     fn new(geom: &brushkit_abr::ComputedGeometry) -> Self {
         let diameter = geom.diameter_px.unwrap().clamp(1.0, MAX_TIP_PX);
-        let hardness = geom.hardness_pct.unwrap_or(100.0).clamp(0.0, 100.0);
-        let h = hardness / 100.0;
-        let k = falloff_k(hardness);
+        let hardness = geom
+            .hardness_pct
+            .filter(|h| !h.is_nan())
+            .unwrap_or(100.0)
+            .clamp(0.0, 100.0);
         let radius = diameter / 2.0;
-        let antialias_only = (1.0 - h) * radius <= ANTIALIAS_PX;
+        let antialias_only = (1.0 - hardness / 100.0) * radius <= ANTIALIAS_PX;
         // Photoshop's soft falloff runs past the nominal edge until alpha
         // rounds to 0. Its hard tip stops at the edge.
-        let (opaque_until, clear_from) = if antialias_only {
-            ((1.0 - ANTIALIAS_PX / radius).max(0.0), 1.0)
+        let (opaque_until, ramp, steepness, clear_from) = if antialias_only {
+            let opaque_until = (1.0 - ANTIALIAS_PX / radius).max(0.0);
+            let steepness = antialias_steepness(hardness);
+            (opaque_until, 1.0 - opaque_until, steepness, 1.0)
         } else {
-            (h, h + (1.0 - h) * (-HALF_LEVEL.ln() / k).sqrt())
+            let knot = falloff_at(hardness);
+            let clear_from = knot.opaque_until + knot.width * (-HALF_LEVEL.ln()).sqrt();
+            (knot.opaque_until, knot.width, 1.0, clear_from)
         };
         Profile {
             diameter,
             opaque_until,
-            k,
+            ramp,
+            steepness,
             clear_from,
         }
     }
@@ -55,8 +127,8 @@ impl Profile {
         } else if r >= self.clear_from {
             0.0
         } else {
-            let t = (r - self.opaque_until) / (1.0 - self.opaque_until);
-            (-self.k * t * t).exp()
+            let t = (r - self.opaque_until) / self.ramp;
+            (-self.steepness * t * t).exp()
         }
     }
 }
@@ -66,11 +138,14 @@ impl Profile {
 /// `None` iff `can_synthesize` is false. Output is single-channel grayscale,
 /// white=stamp (`255`) / black=transparent (`0`).
 ///
-/// The tip's nominal diameter is `diameter_px`, centred in the bitmap. A tip
-/// whose falloff ramp, `100 - hardness_pct` percent of the radius, is wider
-/// than one pixel keeps the falloff past the nominal edge, as Photoshop draws
-/// a 0% hardness tip, so its bitmap is wider than the diameter: about 1.65
-/// times at 0% hardness. A ramp of one pixel or less ends at the nominal edge.
+/// The tip's nominal diameter is `diameter_px`, centred in the bitmap. Its
+/// alpha follows Photoshop 27.11's computed tip, measured at 0, 20, 50, 80 and
+/// 100% hardness and interpolated between them: an opaque core, then a
+/// Gaussian falloff that runs past the nominal edge until alpha rounds to 0.
+/// So the bitmap is wider than the diameter: about 1.65 times at 0% hardness
+/// and 1.13 times at 80%. A tip whose ramp, `100 - hardness_pct` percent of the
+/// radius, is one pixel or less only antialiases its edge and ends at the
+/// nominal edge.
 pub fn synthesize_computed_tip(geom: &brushkit_abr::ComputedGeometry) -> Option<GrayscaleBitmap> {
     if !can_synthesize(geom) {
         return None;
@@ -108,19 +183,6 @@ pub fn synthesize_computed_tip(geom: &brushkit_abr::ComputedGeometry) -> Option<
         height: side,
         data,
     })
-}
-
-fn falloff_k(hardness_pct: f64) -> f64 {
-    const KNOTS: [(f64, f64); 2] = [(0.0, 2.29), (50.0, 1.14)];
-    let h = hardness_pct.clamp(KNOTS[0].0, KNOTS[KNOTS.len() - 1].0);
-    for w in KNOTS.windows(2) {
-        let (h0, k0) = w[0];
-        let (h1, k1) = w[1];
-        if h <= h1 {
-            return k0 + (h - h0) / (h1 - h0) * (k1 - k0);
-        }
-    }
-    KNOTS[KNOTS.len() - 1].1
 }
 
 #[cfg(test)]
@@ -240,7 +302,7 @@ mod tests {
             .max()
             .flatten()
             .unwrap();
-        assert!(largest <= 6892, "largest side was {largest}");
+        assert!(largest <= 6742, "largest side was {largest}");
     }
 
     #[test]
@@ -272,28 +334,6 @@ mod tests {
     }
 
     #[test]
-    fn falloff_k_knots_interpolation_and_clamp() {
-        let approx = |a: f64, b: f64| (a - b).abs() < 1e-6;
-        assert!(approx(falloff_k(0.0), 2.29), "k(0) = {}", falloff_k(0.0));
-        assert!(approx(falloff_k(50.0), 1.14), "k(50) = {}", falloff_k(50.0));
-        assert!(
-            approx(falloff_k(25.0), 1.715),
-            "k(25) = {}",
-            falloff_k(25.0)
-        );
-        assert!(
-            approx(falloff_k(100.0), 1.14),
-            "k(100) = {}",
-            falloff_k(100.0)
-        );
-        assert!(
-            approx(falloff_k(-10.0), 2.29),
-            "k(-10) = {}",
-            falloff_k(-10.0)
-        );
-    }
-
-    #[test]
     fn gaussian_falloff_value_at_named_pixel() {
         let bmp =
             synthesize_computed_tip(&geom(Some(200.0), Some(0.0), Some(0.0), Some(100.0))).unwrap();
@@ -322,12 +362,52 @@ mod tests {
     }
 
     #[test]
+    fn intermediate_hardness_follows_photoshops_core_and_falloff() {
+        let bmp = synthesize_computed_tip(&geom(Some(200.0), Some(50.0), Some(0.0), Some(100.0)))
+            .unwrap();
+        let (c, y) = (bmp.width / 2, bmp.height / 2);
+        let at = |r: f64| pixel_at(&bmp, c + (r * 100.0) as u32, y);
+        assert_eq!(at(0.6), 255, "r 0.6 is inside the opaque core");
+        assert!((47..=51).contains(&at(1.0)), "r 1.0: {}", at(1.0));
+        assert!(at(1.3) > 0, "r 1.3 should still hold ink");
+        assert!(
+            (c + 133..bmp.width).all(|x| pixel_at(&bmp, x, y) == 0),
+            "ink from r 1.33 on"
+        );
+    }
+
+    #[test]
     fn a_ramp_of_one_pixel_or_less_gets_no_tail() {
         let one_px = synthesize_computed_tip(&geom(Some(32.0), Some(93.75), None, None)).unwrap();
         assert_eq!(one_px.width, 34);
         let tiny = synthesize_computed_tip(&geom(Some(1.0), Some(0.0), None, None)).unwrap();
         assert_eq!(tiny.width, 3);
         assert_eq!(pixel_at(&tiny, 1, 1), 255);
+    }
+
+    #[test]
+    fn a_ramp_of_one_pixel_or_less_keeps_its_antialiased_ring() {
+        let row = |d: f64, h: f64, y: u32| {
+            let bmp =
+                synthesize_computed_tip(&geom(Some(d), Some(h), Some(0.0), Some(100.0))).unwrap();
+            bmp.data[(y * bmp.width) as usize..((y + 1) * bmp.width) as usize].to_vec()
+        };
+        assert_eq!(row(2.0, 0.0, 1), [0, 81, 81, 0]);
+        assert_eq!(row(1.4678140119077667, 100.0, 1), [0, 88, 88, 0]);
+        assert_eq!(
+            row(12.175668985559687, 100.0, 1),
+            [0, 0, 0, 0, 0, 0, 83, 99, 83, 0, 0, 0, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn nan_hardness_draws_like_missing_hardness() {
+        let nan = synthesize_computed_tip(&geom(Some(40.0), Some(f64::NAN), None, None)).unwrap();
+        let missing = synthesize_computed_tip(&geom(Some(40.0), None, None, None)).unwrap();
+        assert_eq!(
+            (nan.width, nan.height, nan.data),
+            (missing.width, missing.height, missing.data)
+        );
     }
 
     #[test]
@@ -371,7 +451,7 @@ mod tests {
             .find(|&v| v < 255)
             .expect("expected a falloff pixel below 255");
         assert!(
-            first_falloff >= 250,
+            first_falloff >= 246,
             "core seam: first falloff pixel was {first_falloff}"
         );
     }
