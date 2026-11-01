@@ -11,7 +11,7 @@ readme.workspace = true
 thiserror.workspace = true
 byteorder.workspace = true
 flate2.workspace = true
-serde = { version = "1", features = ["derive"], optional = true }
+serde = { version = "1.0.184", features = ["derive"], optional = true }
 
 [dev-dependencies]
 brushkit-fixture = { path = "../fixture" }
