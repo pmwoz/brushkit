@@ -15,11 +15,11 @@ brushkit-abr = { path = "crates/abr", version = "0.13.0" }
 brushkit-preview = { path = "crates/preview", version = "0.13.0", default-features = false }
 thiserror = "2"
 byteorder = "1"
-flate2 = "1"
+flate2 = "1.1.0"
 zip = { version = "9.0.3", default-features = false, features = ["deflate-flate2"] }
 plist = { version = "~1.8", features = ["enable_unstable_features_that_may_break_with_minor_version_bumps"] } # tilde pin: the streaming API is unstable across plist minor bumps
-image = { version = "0.25", default-features = false, features = ["png"] }
-ab_glyph = "0.2"
+image = { version = "0.25.9", default-features = false, features = ["png"] }
+ab_glyph = "0.2.2"
 # The tests compare `decode_png` with image's PNG decoder, so `png` must
 # resolve to the copy `image` uses, which CI checks. Exact pin: the eXIf limit
 # in `decode_png` and the eXIf sentence of `TipImageError::TooLarge` in
