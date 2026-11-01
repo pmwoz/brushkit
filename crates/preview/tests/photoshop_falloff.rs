@@ -7,6 +7,7 @@ const SITTING_905: &str = "device-validation/ps-sitting-2026-10-31/905";
 const SITTING_264: &str = "device-validation/ps-sitting-2026-11-01/264";
 const SITTING_269: &str = "device-validation/ps-sitting-2026-11-01/269";
 const SITTING_271: &str = "device-validation/ps-sitting-2026-11-01/271";
+const SITTING_273: &str = "device-validation/ps-sitting-2026-11-01/273-run4";
 const SIZE: f64 = 512.0;
 const BIN: f64 = 0.05;
 /// Photoshop's `Hrdn` 0 dab reaches alpha 0 at 1.65 nominal radii, farther
@@ -349,6 +350,94 @@ fn size_8_hardness_100_tip_matches_photoshops_profile() {
     assert_profile_matches_photoshop(
         &format!("{SITTING_271}/size8-hard-null.png"),
         8.0,
+        100.0,
+        0.0,
+        100.0,
+    );
+}
+
+#[test]
+fn size_16_hardness_100_tip_matches_photoshops_profile() {
+    assert_profile_matches_photoshop(
+        &format!("{SITTING_273}/size16-hard-A.png"),
+        16.0,
+        100.0,
+        0.0,
+        100.0,
+    );
+}
+
+#[test]
+fn size_32_hardness_100_tip_matches_photoshops_profile() {
+    assert_profile_matches_photoshop(
+        &format!("{SITTING_273}/size32-hard-A.png"),
+        32.0,
+        100.0,
+        0.0,
+        100.0,
+    );
+}
+
+#[test]
+fn size_64_hardness_100_tip_matches_photoshops_profile() {
+    assert_profile_matches_photoshop(
+        &format!("{SITTING_273}/size64-hard-A.png"),
+        64.0,
+        100.0,
+        0.0,
+        100.0,
+    );
+}
+
+#[test]
+fn size_128_hardness_100_tip_matches_photoshops_profile() {
+    assert_profile_matches_photoshop(
+        &format!("{SITTING_273}/size128-hard-A.png"),
+        128.0,
+        100.0,
+        0.0,
+        100.0,
+    );
+}
+
+#[test]
+fn size_256_hardness_100_tip_matches_photoshops_profile() {
+    assert_profile_matches_photoshop(
+        &format!("{SITTING_273}/size256-hard-A.png"),
+        256.0,
+        100.0,
+        0.0,
+        100.0,
+    );
+}
+
+#[test]
+fn size_384_hardness_100_tip_matches_photoshops_profile() {
+    assert_profile_matches_photoshop(
+        &format!("{SITTING_273}/size384-hard-A.png"),
+        384.0,
+        100.0,
+        0.0,
+        100.0,
+    );
+}
+
+#[test]
+fn size_512_hardness_100_tip_matches_photoshops_profile() {
+    assert_profile_matches_photoshop(
+        &format!("{SITTING_273}/size512-hard-A.png"),
+        512.0,
+        100.0,
+        0.0,
+        100.0,
+    );
+}
+
+#[test]
+fn size_1024_hardness_100_tip_matches_photoshops_profile() {
+    assert_profile_matches_photoshop(
+        &format!("{SITTING_273}/size1024-hard-A.png"),
+        1024.0,
         100.0,
         0.0,
         100.0,
