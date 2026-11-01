@@ -12,8 +12,8 @@ pub fn synthesized_tip_side(geom: &brushkit_abr::ComputedGeometry) -> Option<u32
     can_synthesize(geom).then(|| Profile::new(geom).side())
 }
 
-/// Alpha below half a level rounds to 0 in an 8-bit tip.
 const HALF_LEVEL: f64 = 0.5 / 255.0;
+const ANTIALIAS_PX: f64 = 1.0;
 
 struct Profile {
     diameter: f64,
@@ -28,14 +28,14 @@ impl Profile {
         let hardness = geom.hardness_pct.unwrap_or(100.0).clamp(0.0, 100.0);
         let h = hardness / 100.0;
         let k = falloff_k(hardness);
-        let ramp_px = (1.0 - h) * diameter / 2.0;
+        let radius = diameter / 2.0;
+        let antialias_only = (1.0 - h) * radius <= ANTIALIAS_PX;
         // Photoshop's soft falloff runs past the nominal edge until alpha
-        // rounds to 0. Its hard tip stops at the edge, and a ramp of one pixel
-        // or less only antialiases that edge.
-        let (opaque_until, clear_from) = if ramp_px > 1.0 {
-            (h, h + (1.0 - h) * (-HALF_LEVEL.ln() / k).sqrt())
+        // rounds to 0. Its hard tip stops at the edge.
+        let (opaque_until, clear_from) = if antialias_only {
+            ((1.0 - ANTIALIAS_PX / radius).max(0.0), 1.0)
         } else {
-            ((1.0 - 2.0 / diameter).max(0.0), 1.0)
+            (h, h + (1.0 - h) * (-HALF_LEVEL.ln() / k).sqrt())
         };
         Profile {
             diameter,
@@ -67,10 +67,10 @@ impl Profile {
 /// white=stamp (`255`) / black=transparent (`0`).
 ///
 /// The tip's nominal diameter is `diameter_px`, centred in the bitmap. A tip
-/// whose falloff ramp is wider than one pixel keeps the falloff past the
-/// nominal edge, as Photoshop draws a 0% hardness tip, so its bitmap is wider
-/// than the diameter: about 1.65 times at 0% hardness and at most 1.69 times.
-/// A tip with a narrower ramp ends at the nominal edge.
+/// whose falloff ramp, `100 - hardness_pct` percent of the radius, is wider
+/// than one pixel keeps the falloff past the nominal edge, as Photoshop draws
+/// a 0% hardness tip, so its bitmap is wider than the diameter: about 1.65
+/// times at 0% hardness. A ramp of one pixel or less ends at the nominal edge.
 pub fn synthesize_computed_tip(geom: &brushkit_abr::ComputedGeometry) -> Option<GrayscaleBitmap> {
     if !can_synthesize(geom) {
         return None;
