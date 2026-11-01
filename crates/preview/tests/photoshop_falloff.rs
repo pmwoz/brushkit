@@ -1,17 +1,19 @@
 //! The synthesized computed tip against Photoshop 27.11's own render of the
-//! same geometry. Photoshop drew one dab of the `e25-texbc` preset's tip
-//! (`Hrdn` 0, `Rndn` 100) at Size 512, and one dab of a `Hrdn` 100 null at the
-//! same size.
+//! same geometry at Size 512, `Rndn` 100: one dab of the `e25-texbc` preset's
+//! tip (`Hrdn` 0), one of a `Hrdn` 100 null, and one of a computed round tip at
+//! each of `Hrdn` 20, 50 and 80.
 
 use std::path::PathBuf;
 
 use brushkit_abr::ComputedGeometry;
 use brushkit_preview::{synthesize_computed_tip, GrayscaleBitmap};
 
-const SITTING: &str = "device-validation/ps-sitting-2026-10-31/905";
+const SITTING_905: &str = "device-validation/ps-sitting-2026-10-31/905";
+const SITTING_264: &str = "device-validation/ps-sitting-2026-11-01/264";
 const SIZE: f64 = 512.0;
 const BIN: f64 = 0.05;
-/// Photoshop's soft dab reaches alpha 0 at 1.65 nominal radii.
+/// Photoshop's `Hrdn` 0 dab reaches alpha 0 at 1.65 nominal radii, farther
+/// out than any harder dab.
 const TAIL_BINS: usize = 33;
 const DISC_BINS: usize = 20;
 
@@ -20,8 +22,8 @@ fn corpus_file(relative: &str) -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
-fn photoshop_alpha(name: &str) -> Option<(u32, u32, Vec<f64>)> {
-    let image = image::open(corpus_file(&format!("{SITTING}/{name}"))?)
+fn photoshop_alpha(render: &str) -> Option<(u32, u32, Vec<f64>)> {
+    let image = image::open(corpus_file(render)?)
         .expect("Photoshop render decodes")
         .into_rgba8();
     let alpha = image.pixels().map(|p| f64::from(p[3]) / 255.0).collect();
@@ -71,12 +73,10 @@ fn inked_columns(width: u32, alpha: &[f64], row: u32) -> usize {
         .count()
 }
 
-#[test]
-fn soft_tip_matches_photoshops_profile_inside_and_past_the_nominal_edge() {
-    let (Some(geom), Some((width, _, ps))) =
-        (e25_geometry_at_size(), photoshop_alpha("soft-A.png"))
+fn assert_profile_matches_photoshop(render: &str, hardness_pct: f64) {
+    let (Some(geom), Some((width, _, ps))) = (e25_geometry_at_size(), photoshop_alpha(render))
     else {
-        println!("skip: BRUSHKIT_CORPUS_DIR unset or the 905 sitting is missing");
+        println!("skip: BRUSHKIT_CORPUS_DIR unset or {render} is missing");
         return;
     };
     let (sum, mut cx, mut cy) = (ps.iter().sum::<f64>(), 0.0, 0.0);
@@ -86,7 +86,11 @@ fn soft_tip_matches_photoshops_profile_inside_and_past_the_nominal_edge() {
     }
     let photoshop = radial_profile(width, &ps, cx / sum, cy / sum);
 
-    let tip = synthesize_computed_tip(&geom).unwrap();
+    let tip = synthesize_computed_tip(&ComputedGeometry {
+        hardness_pct: Some(hardness_pct),
+        ..geom
+    })
+    .unwrap();
     let centre = f64::from(tip.width) / 2.0;
     let ours = radial_profile(tip.width, &alpha_of(&tip), centre, centre);
 
@@ -96,20 +100,25 @@ fn soft_tip_matches_photoshops_profile_inside_and_past_the_nominal_edge() {
         .map(|(o, p)| (o - p).abs())
         .collect();
     let disc_mae = gaps[..DISC_BINS].iter().sum::<f64>() / DISC_BINS as f64;
+    let (widest_bin, widest) = gaps.iter().copied().enumerate().fold(
+        (0, 0.0_f64),
+        |m, (bin, g)| if g > m.1 { (bin, g) } else { m },
+    );
     println!(
-        "MAE inside the nominal radius {disc_mae:.4}, over the tail {:.4}, largest bin gap {:.4}",
+        "Hrdn {hardness_pct}: MAE inside the nominal radius {disc_mae:.4}, over the tail {:.4}, \
+         largest bin gap {widest:.4} at r {:.2}",
         gaps.iter().sum::<f64>() / TAIL_BINS as f64,
-        gaps.iter().fold(0.0_f64, |m, &g| m.max(g))
+        widest_bin as f64 * BIN
     );
     assert!(
         disc_mae <= 0.02,
-        "MAE inside the nominal radius {disc_mae:.4}"
+        "Hrdn {hardness_pct}: MAE inside the nominal radius {disc_mae:.4}"
     );
     for (bin, gap) in gaps.iter().enumerate() {
         let r = bin as f64 * BIN;
         assert!(
             *gap <= 0.02,
-            "r {r:.2}..{:.2}: ours {:.4}, Photoshop {:.4}",
+            "Hrdn {hardness_pct}, r {r:.2}..{:.2}: ours {:.4}, Photoshop {:.4}",
             r + BIN,
             ours[bin],
             photoshop[bin]
@@ -118,10 +127,31 @@ fn soft_tip_matches_photoshops_profile_inside_and_past_the_nominal_edge() {
 }
 
 #[test]
+fn soft_tip_matches_photoshops_profile_inside_and_past_the_nominal_edge() {
+    assert_profile_matches_photoshop(&format!("{SITTING_905}/soft-A.png"), 0.0);
+}
+
+#[test]
+fn hardness_20_tip_matches_photoshops_profile_inside_and_past_the_nominal_edge() {
+    assert_profile_matches_photoshop(&format!("{SITTING_264}/hrdn20-A.png"), 20.0);
+}
+
+#[test]
+fn hardness_50_tip_matches_photoshops_profile_inside_and_past_the_nominal_edge() {
+    assert_profile_matches_photoshop(&format!("{SITTING_264}/hrdn50-A.png"), 50.0);
+}
+
+#[test]
+fn hardness_80_tip_matches_photoshops_profile_inside_and_past_the_nominal_edge() {
+    assert_profile_matches_photoshop(&format!("{SITTING_264}/hrdn80-A.png"), 80.0);
+}
+
+#[test]
 fn hard_tip_is_as_wide_as_photoshops_hard_null() {
-    let (Some(soft), Some((width, height, ps))) =
-        (e25_geometry_at_size(), photoshop_alpha("hard-null.png"))
-    else {
+    let (Some(soft), Some((width, height, ps))) = (
+        e25_geometry_at_size(),
+        photoshop_alpha(&format!("{SITTING_905}/hard-null.png")),
+    ) else {
         println!("skip: BRUSHKIT_CORPUS_DIR unset or the 905 sitting is missing");
         return;
     };
