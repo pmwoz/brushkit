@@ -471,3 +471,40 @@ fn hard_tip_is_as_wide_as_photoshops_hard_null() {
         .unwrap();
     assert_eq!(ours_widest, ps_widest);
 }
+
+/// The width of the bounding box of inked pixels.
+fn inked_width(width: u32, alpha: &[f64]) -> u32 {
+    let columns: Vec<u32> = (0..alpha.len())
+        .filter(|&i| alpha[i] > 0.0)
+        .map(|i| i as u32 % width)
+        .collect();
+    columns.iter().max().unwrap() - columns.iter().min().unwrap() + 1
+}
+
+#[test]
+fn hard_tip_is_as_wide_as_photoshops_at_each_size() {
+    for size in [16, 32, 64, 128, 256, 384, 512, 1024] {
+        let photoshop = |render: &str| {
+            let (width, _, alpha) = photoshop_alpha(render)?;
+            Some(inked_width(width, &alpha))
+        };
+        let (Some(geom), Some(a), Some(b)) = (
+            e25_geometry(f64::from(size)),
+            photoshop(&format!("{SITTING_273}/size{size}-hard-A.png")),
+            photoshop(&format!("{SITTING_273}/size{size}-hard-B.png")),
+        ) else {
+            println!("skip: BRUSHKIT_CORPUS_DIR unset or the 273 sitting is missing");
+            return;
+        };
+        let tip = synthesize_computed_tip(&ComputedGeometry {
+            hardness_pct: Some(100.0),
+            ..geom
+        })
+        .unwrap();
+        let ours = inked_width(tip.width, &alpha_of(&tip));
+        assert!(
+            ours == a || ours == b,
+            "Size {size}: ours {ours}, Photoshop {a} and {b}"
+        );
+    }
+}
