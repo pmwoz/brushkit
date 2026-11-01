@@ -1,8 +1,7 @@
 //! The synthesized computed tip against Photoshop 27.11's own render of the
 //! same geometry. Photoshop drew one dab of the `e25-texbc` preset's tip
 //! (`Hrdn` 0, `Rndn` 100) at Size 512, and one dab of a `Hrdn` 100 null at the
-//! same size. Both renders live in the corpus, so the test is skipped without
-//! `BRUSHKIT_CORPUS_DIR`.
+//! same size.
 
 use std::path::PathBuf;
 
@@ -21,7 +20,6 @@ fn corpus_file(relative: &str) -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
-/// The alpha plane of one of the sitting's RGBA renders, scaled to `0..=1`.
 fn photoshop_alpha(name: &str) -> Option<(u32, u32, Vec<f64>)> {
     let image = image::open(corpus_file(&format!("{SITTING}/{name}"))?)
         .expect("Photoshop render decodes")
@@ -46,7 +44,6 @@ fn e25_geometry_at_size() -> Option<ComputedGeometry> {
     })
 }
 
-/// Mean alpha in rings `BIN` nominal radii wide around `(cx, cy)`.
 fn radial_profile(width: u32, alpha: &[f64], cx: f64, cy: f64) -> Vec<f64> {
     let nominal_radius = SIZE / 2.0;
     let mut sums = vec![(0.0, 0usize); TAIL_BINS];
@@ -66,8 +63,7 @@ fn alpha_of(bitmap: &GrayscaleBitmap) -> Vec<f64> {
     bitmap.data.iter().map(|&v| f64::from(v) / 255.0).collect()
 }
 
-/// Columns of the row through the dab's centre that hold any ink.
-fn support_width(width: u32, alpha: &[f64], row: u32) -> usize {
+fn inked_columns(width: u32, alpha: &[f64], row: u32) -> usize {
     let start = (row * width) as usize;
     alpha[start..start + width as usize]
         .iter()
@@ -130,7 +126,7 @@ fn hard_tip_is_as_wide_as_photoshops_hard_null() {
         return;
     };
     let ps_widest = (0..height)
-        .map(|row| support_width(width, &ps, row))
+        .map(|row| inked_columns(width, &ps, row))
         .max()
         .unwrap();
     assert_eq!(ps_widest, SIZE as usize);
@@ -142,7 +138,7 @@ fn hard_tip_is_as_wide_as_photoshops_hard_null() {
     .unwrap();
     let ours = alpha_of(&tip);
     let ours_widest = (0..tip.height)
-        .map(|row| support_width(tip.width, &ours, row))
+        .map(|row| inked_columns(tip.width, &ours, row))
         .max()
         .unwrap();
     assert_eq!(ours_widest, ps_widest);
