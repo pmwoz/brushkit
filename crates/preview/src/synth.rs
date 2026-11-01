@@ -22,12 +22,18 @@ struct Knot {
     width: f64,
 }
 
-/// Fitted to Photoshop 27.11 renders of a computed round tip at Size 512 (#264).
-const KNOTS: [Knot; 5] = [
+/// Fitted to Photoshop 27.11 renders of a computed round tip at Size 512 (#264,
+/// #269).
+const KNOTS: [Knot; 9] = [
     Knot {
         hardness_pct: 0.0,
         opaque_until: 0.0,
         width: 0.659,
+    },
+    Knot {
+        hardness_pct: 10.0,
+        opaque_until: 0.160,
+        width: 0.567,
     },
     Knot {
         hardness_pct: 20.0,
@@ -35,14 +41,29 @@ const KNOTS: [Knot; 5] = [
         width: 0.484,
     },
     Knot {
+        hardness_pct: 35.0,
+        opaque_until: 0.496,
+        width: 0.370,
+    },
+    Knot {
         hardness_pct: 50.0,
         opaque_until: 0.659,
         width: 0.266,
     },
     Knot {
+        hardness_pct: 65.0,
+        opaque_until: 0.792,
+        width: 0.174,
+    },
+    Knot {
         hardness_pct: 80.0,
         opaque_until: 0.897,
         width: 0.093,
+    },
+    Knot {
+        hardness_pct: 90.0,
+        opaque_until: 0.950,
+        width: 0.047,
     },
     Knot {
         hardness_pct: 100.0,
@@ -53,17 +74,44 @@ const KNOTS: [Knot; 5] = [
 
 fn falloff_at(hardness_pct: f64) -> Knot {
     let h = hardness_pct.clamp(0.0, 100.0);
-    match KNOTS.windows(2).find(|w| h <= w[1].hardness_pct) {
-        Some([lo, hi]) => {
-            let t = (h - lo.hardness_pct) / (hi.hardness_pct - lo.hardness_pct);
-            Knot {
-                hardness_pct: h,
-                opaque_until: lo.opaque_until + t * (hi.opaque_until - lo.opaque_until),
-                width: lo.width + t * (hi.width - lo.width),
-            }
-        }
-        _ => KNOTS[KNOTS.len() - 1],
+    Knot {
+        hardness_pct: h,
+        opaque_until: monotone_cubic(h, |k| k.opaque_until),
+        width: monotone_cubic(h, |k| k.width),
     }
+}
+
+fn monotone_cubic(h: f64, y: fn(&Knot) -> f64) -> f64 {
+    let last = KNOTS.len() - 1;
+    let x = |k: usize| KNOTS[k].hardness_pct;
+    let step = |k: usize| x(k + 1) - x(k);
+    let secant = |k: usize| (y(&KNOTS[k + 1]) - y(&KNOTS[k])) / step(k);
+    let slope = |k: usize| {
+        if k == 0 {
+            return secant(0);
+        }
+        if k == last {
+            return secant(last - 1);
+        }
+        let (d0, d1) = (secant(k - 1), secant(k));
+        if d0 * d1 <= 0.0 {
+            return 0.0;
+        }
+        let w1 = 2.0 * step(k) + step(k - 1);
+        let w2 = step(k) + 2.0 * step(k - 1);
+        (w1 + w2) / (w1 / d0 + w2 / d1)
+    };
+    let i = (0..last).find(|&i| h <= x(i + 1)).unwrap_or(last - 1);
+    let t = (h - x(i)) / step(i);
+    let (t2, t3) = (t * t, t * t * t);
+    let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+    let h10 = t3 - 2.0 * t2 + t;
+    let h01 = -2.0 * t3 + 3.0 * t2;
+    let h11 = t3 - t2;
+    h00 * y(&KNOTS[i])
+        + h10 * step(i) * slope(i)
+        + h01 * y(&KNOTS[i + 1])
+        + h11 * step(i) * slope(i + 1)
 }
 
 fn antialias_steepness(hardness_pct: f64) -> f64 {
@@ -139,13 +187,11 @@ impl Profile {
 /// white=stamp (`255`) / black=transparent (`0`).
 ///
 /// The tip's nominal diameter is `diameter_px`, centred in the bitmap. Its
-/// alpha follows Photoshop 27.11's computed tip, measured at 0, 20, 50, 80 and
-/// 100% hardness and interpolated between them: an opaque core, then a
-/// Gaussian falloff that runs past the nominal edge until alpha rounds to 0.
-/// So the bitmap is wider than the diameter: about 1.65 times at 0% hardness
-/// and 1.13 times at 80%. A tip whose ramp, `100 - hardness_pct` percent of the
-/// radius, is one pixel or less only antialiases its edge and ends at the
-/// nominal edge.
+/// alpha follows Photoshop 27.11's computed tip: an opaque core, then a Gaussian
+/// falloff that runs past the nominal edge until alpha rounds to 0. So the
+/// bitmap is wider than the diameter: about 1.65 times at 0% hardness and 1.13
+/// times at 80%. A tip whose ramp, `100 - hardness_pct` percent of the radius,
+/// is one pixel or less only antialiases its edge and ends at the nominal edge.
 pub fn synthesize_computed_tip(geom: &brushkit_abr::ComputedGeometry) -> Option<GrayscaleBitmap> {
     if !can_synthesize(geom) {
         return None;
