@@ -1,3 +1,5 @@
+use std::f64::consts::FRAC_1_SQRT_2;
+
 use crate::GrayscaleBitmap;
 
 const MAX_TIP_PX: f64 = 4096.0;
@@ -97,6 +99,64 @@ fn at_diameter(diameter: f64, knot: Knot) -> Knot {
     }
 }
 
+#[derive(Clone, Copy)]
+struct HardEdgeInset {
+    diameter_px: f64,
+    inset_px: f64,
+}
+
+/// Fitted to Photoshop 27.11 renders of a `Hrdn` 100 computed tip at Size 16
+/// to 1024 (#273).
+const HARD_EDGE_INSETS: [HardEdgeInset; 4] = [
+    HardEdgeInset {
+        diameter_px: 64.0,
+        inset_px: 1.325,
+    },
+    HardEdgeInset {
+        diameter_px: 128.0,
+        inset_px: 1.53,
+    },
+    HardEdgeInset {
+        diameter_px: 256.0,
+        inset_px: 2.01,
+    },
+    HardEdgeInset {
+        diameter_px: 384.0,
+        inset_px: 2.70,
+    },
+];
+const HARD_EDGE_WIDTH_PX: f64 = 1.38;
+const HARD_EDGE_CLEAR_LEVEL: f64 = 1.5 / 255.0;
+
+fn hard_edge_inset_px(diameter: f64) -> f64 {
+    let (first, last) = (
+        HARD_EDGE_INSETS[0],
+        HARD_EDGE_INSETS[HARD_EDGE_INSETS.len() - 1],
+    );
+    if diameter <= first.diameter_px {
+        return first.inset_px;
+    }
+    for w in HARD_EDGE_INSETS.windows(2) {
+        let (lo, hi) = (w[0], w[1]);
+        if diameter <= hi.diameter_px {
+            let t = (diameter - lo.diameter_px) / (hi.diameter_px - lo.diameter_px);
+            return lo.inset_px + t * (hi.inset_px - lo.inset_px);
+        }
+    }
+    last.inset_px
+}
+
+fn capped_at_hard_edge(diameter: f64, knot: Knot) -> Option<Knot> {
+    let radius = diameter / 2.0;
+    let core = (1.0 - hard_edge_inset_px(diameter) / radius).max(0.0);
+    let width = (HARD_EDGE_WIDTH_PX / radius).min(KNOTS[0].width);
+    (knot.opaque_until > core || knot.width < width).then(|| Knot {
+        opaque_until: knot.opaque_until.min(core),
+        width: knot.width.max(width),
+        ..knot
+    })
+}
+
 fn monotone_cubic(h: f64, y: fn(&Knot) -> f64) -> f64 {
     let last = KNOTS.len() - 1;
     let x = |k: usize| KNOTS[k].hardness_pct;
@@ -150,7 +210,6 @@ struct Profile {
     steepness: f64,
     clear_from: f64,
     side: u32,
-    samples_per_axis: u32,
 }
 
 impl Profile {
@@ -163,26 +222,19 @@ impl Profile {
             .clamp(0.0, 100.0);
         let radius = diameter / 2.0;
         let knot = at_diameter(diameter, falloff_at(hardness));
-        let antialias_only =
-            (1.0 - (hardness / 100.0).min(knot.opaque_until)) * radius <= ANTIALIAS_PX;
-        // Photoshop's soft falloff runs past the nominal edge until alpha
-        // rounds to 0. Its hard tip stops at the edge.
+        let (knot, clear_level) = match capped_at_hard_edge(diameter, knot) {
+            Some(hard) => (hard, HARD_EDGE_CLEAR_LEVEL),
+            None => (knot, HALF_LEVEL),
+        };
+        let antialias_only = radius <= ANTIALIAS_PX;
         let (opaque_until, ramp, steepness, clear_from) = if antialias_only {
-            let opaque_until = (1.0 - ANTIALIAS_PX / radius).max(0.0);
-            let steepness = antialias_steepness(hardness);
-            (opaque_until, 1.0 - opaque_until, steepness, 1.0)
+            (0.0, 1.0, antialias_steepness(hardness), 1.0)
         } else {
-            let clear_from = knot.opaque_until + knot.width * (-HALF_LEVEL.ln()).sqrt();
+            let clear_from = knot.opaque_until + knot.width * (-clear_level.ln()).sqrt();
             (knot.opaque_until, knot.width, 1.0, clear_from)
         };
-        let side = (diameter * clear_from).ceil() as u32 + 2;
-        // Photoshop centres a small dab between pixels and shades each pixel
-        // by coverage.
-        let (side, samples_per_axis) = if diameter < SUBSAMPLED_BELOW_PX {
-            (side.next_multiple_of(2), SUBSAMPLES)
-        } else {
-            (side, 1)
-        };
+        // Photoshop centres a dab between pixels.
+        let side = ((diameter * clear_from).ceil() as u32 + 2).next_multiple_of(2);
         Profile {
             diameter,
             opaque_until,
@@ -190,7 +242,6 @@ impl Profile {
             steepness,
             clear_from,
             side,
-            samples_per_axis,
         }
     }
 
@@ -217,11 +268,12 @@ impl Profile {
 /// bitmap is wider than the diameter: at a diameter of 512 px or more, about
 /// 1.65 times at 0% hardness and 1.13 times at 80%. A smaller tip has a
 /// narrower core and a wider falloff, as in Photoshop, so even a 100% hardness
-/// tip falls off past its nominal edge at 8 px. A tip whose ramp, from the
-/// smaller of its core and `hardness_pct` percent of the radius out to the
-/// nominal edge, is one pixel or less only antialiases its edge and ends at the
-/// nominal edge. Below 128 px the side is even and each pixel is the mean of
-/// 8×8 samples.
+/// tip falls off past its nominal edge at 8 px. No tip is harder than
+/// Photoshop's hard edge, a falloff about 1.4 px wide whose core ends 1.3 px
+/// inside the nominal edge below 64 px and 2.7 px inside from 384 px on. A tip
+/// whose radius is one pixel or less only antialiases its edge and ends at the
+/// nominal edge. The side is even. When the tip's minor axis is below 128 px,
+/// each pixel is the mean of 8×8 samples.
 pub fn synthesize_computed_tip(geom: &brushkit_abr::ComputedGeometry) -> Option<GrayscaleBitmap> {
     if !can_synthesize(geom) {
         return None;
@@ -233,24 +285,37 @@ pub fn synthesize_computed_tip(geom: &brushkit_abr::ComputedGeometry) -> Option<
 
     let side = profile.side;
     let center = side as f64 / 2.0;
-    let n = profile.samples_per_axis;
+    let a = profile.diameter / 2.0;
+    let b = (a * roundness / 100.0).max(0.5);
+    let n = if 2.0 * b < SUBSAMPLED_BELOW_PX {
+        SUBSAMPLES
+    } else {
+        1
+    };
     let offsets: Vec<f64> = (0..n)
         .map(|i| (f64::from(i) + 0.5) / f64::from(n))
         .collect();
-
-    let a = profile.diameter / 2.0;
-    let b = (a * roundness / 100.0).max(0.5);
 
     // Photoshop's `Angl` is CCW-positive in canvas (y-up) orientation; the
     // bitmap's y axis points down, so the angle is negated to rotate the tip
     // the way Photoshop does.
     let (sin, cos) = (-angle).to_radians().sin_cos();
 
-    let alpha_at = |px: f64, py: f64| {
+    let to_axes = |px: f64, py: f64| {
         let (dx, dy) = (px - center, py - center);
-        let u = dx * cos + dy * sin;
-        let v = -dx * sin + dy * cos;
+        (dx * cos + dy * sin, -dx * sin + dy * cos)
+    };
+    let alpha_at = |px: f64, py: f64| {
+        let (u, v) = to_axes(px, py);
         profile.alpha(((u / a).powi(2) + (v / b).powi(2)).sqrt())
+    };
+    let (u_reach, v_reach) = (
+        a * profile.clear_from + FRAC_1_SQRT_2,
+        b * profile.clear_from + FRAC_1_SQRT_2,
+    );
+    let beyond_reach = |x: u32, y: u32| {
+        let (u, v) = to_axes(x as f64 + 0.5, y as f64 + 0.5);
+        u.abs() > u_reach || v.abs() > v_reach
     };
 
     let mut data = vec![0u8; (side * side) as usize];
@@ -258,6 +323,8 @@ pub fn synthesize_computed_tip(geom: &brushkit_abr::ComputedGeometry) -> Option<
         for x in 0..side {
             let alpha = if n == 1 {
                 alpha_at(x as f64 + 0.5, y as f64 + 0.5)
+            } else if beyond_reach(x, y) {
+                0.0
             } else {
                 let sum: f64 = offsets
                     .iter()
@@ -317,8 +384,8 @@ mod tests {
     #[test]
     fn canvas_side_from_diameter() {
         let bmp = synthesize_computed_tip(&geom(Some(30.0), None, None, Some(100.0))).unwrap();
-        assert_eq!(bmp.width, 32);
-        assert_eq!(bmp.height, 32);
+        assert_eq!(bmp.width, 36);
+        assert_eq!(bmp.height, 36);
     }
 
     #[test]
@@ -336,7 +403,7 @@ mod tests {
         let bmp = synthesize_computed_tip(&geom(Some(40.0), None, Some(0.0), Some(50.0))).unwrap();
         let row = nonzero_in_row(&bmp);
         let col = nonzero_in_col(&bmp);
-        assert!((38..=42).contains(&row), "row extent was {row}");
+        assert!((42..=46).contains(&row), "row extent was {row}");
         assert!((18..=22).contains(&col), "col extent was {col}");
     }
 
@@ -386,7 +453,7 @@ mod tests {
     #[test]
     fn diameter_is_capped() {
         let bmp = synthesize_computed_tip(&geom(Some(100000.0), None, None, Some(100.0))).unwrap();
-        assert!(bmp.width <= 4098, "width was {}", bmp.width);
+        assert!(bmp.width <= 4100, "width was {}", bmp.width);
         let largest = (0..=10_000)
             .map(|h| {
                 synthesized_tip_side(&geom(Some(100000.0), Some(h as f64 / 100.0), None, None))
@@ -469,10 +536,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ramp_of_one_pixel_or_less_gets_no_tail() {
-        let one_px =
-            synthesize_computed_tip(&geom(Some(512.0), Some(99.609375), None, None)).unwrap();
-        assert_eq!(one_px.width, 514);
+    fn a_tip_of_radius_one_pixel_or_less_gets_no_tail() {
         let tiny = synthesize_computed_tip(&geom(Some(1.0), Some(0.0), None, None)).unwrap();
         assert_eq!(tiny.width, 4);
         let inked: Vec<(usize, usize)> = (0..tiny.data.len())
@@ -483,7 +547,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ramp_of_one_pixel_or_less_keeps_its_antialiased_ring() {
+    fn a_tip_of_radius_one_pixel_or_less_keeps_its_antialiased_ring() {
         let row = |d: f64, h: f64, y: u32| {
             let bmp =
                 synthesize_computed_tip(&geom(Some(d), Some(h), Some(0.0), Some(100.0))).unwrap();
@@ -504,20 +568,79 @@ mod tests {
     }
 
     #[test]
-    fn hard_tip_ends_at_the_nominal_edge() {
-        let bmp = synthesize_computed_tip(&geom(Some(40.0), Some(100.0), Some(0.0), Some(100.0)))
-            .unwrap();
-        assert_eq!(bmp.width, 42);
-        let c = f64::from(bmp.width) / 2.0;
-        let nearest = |p: u32| c.clamp(f64::from(p), f64::from(p + 1)) - c;
-        for y in 0..bmp.height {
+    fn hard_tip_is_as_wide_as_photoshops() {
+        let photoshop = [
+            (16.0, 20),
+            (32.0, 36),
+            (64.0, 68),
+            (128.0, 132),
+            (256.0, 258),
+            (384.0, 384),
+            (512.0, 512),
+            (1024.0, 1024),
+        ];
+        for (d, inked) in photoshop {
+            let bmp = synthesize_computed_tip(&geom(Some(d), Some(100.0), Some(0.0), Some(100.0)))
+                .unwrap();
+            assert_eq!(nonzero_in_row(&bmp), inked, "Size {d}");
+        }
+    }
+
+    #[test]
+    fn hard_tip_follows_the_hard_edge_fit() {
+        for d in [512.0, 1024.0] {
+            let radius = d / 2.0;
+            let core = 1.0 - 2.70 / radius;
+            let width = 1.38 / radius;
+            let clear_from = core + width * (-(1.5f64 / 255.0).ln()).sqrt();
+            let bmp = synthesize_computed_tip(&geom(Some(d), Some(100.0), Some(0.0), Some(100.0)))
+                .unwrap();
+            let (c, y) = (f64::from(bmp.width) / 2.0, bmp.height / 2);
+            let dy = f64::from(y) + 0.5 - c;
             for x in 0..bmp.width {
-                let r = nearest(x).hypot(nearest(y)) / 20.0;
-                if r >= 1.0 {
-                    assert_eq!(pixel_at(&bmp, x, y), 0, "ink at ({x}, {y}), r {r:.3}");
-                }
+                let r = (f64::from(x) + 0.5 - c).hypot(dy) / radius;
+                let alpha = if r <= core {
+                    1.0
+                } else if r >= clear_from {
+                    0.0
+                } else {
+                    (-((r - core) / width).powi(2)).exp()
+                };
+                assert_eq!(
+                    pixel_at(&bmp, x, y),
+                    (alpha * 255.0).round() as u8,
+                    "Size {d}, r {r:.4}"
+                );
             }
         }
+    }
+
+    #[test]
+    fn a_flat_ellipse_keeps_its_length() {
+        let bmp =
+            synthesize_computed_tip(&geom(Some(511.0), Some(100.0), Some(0.0), Some(0.1))).unwrap();
+        let widest = (0..bmp.height)
+            .map(|y| (0..bmp.width).filter(|&x| pixel_at(&bmp, x, y) > 0).count())
+            .max()
+            .unwrap();
+        assert!(widest >= 505, "widest row inks {widest} px");
+    }
+
+    #[test]
+    fn hardness_is_continuous_where_the_hard_edge_starts() {
+        let tip = |h: f64| {
+            synthesize_computed_tip(&geom(Some(64.0), Some(h), Some(0.0), Some(100.0))).unwrap()
+        };
+        let (below, above) = (tip(96.735801), tip(96.735803));
+        assert_eq!(below.width, above.width);
+        let jump = below
+            .data
+            .iter()
+            .zip(&above.data)
+            .map(|(&p, &q)| p.abs_diff(q))
+            .max()
+            .unwrap();
+        assert!(jump <= 1, "largest pixel jump {jump}");
     }
 
     #[test]
@@ -526,7 +649,11 @@ mod tests {
         for d in [512.0, 1024.0] {
             let bmp = synthesize_computed_tip(&geom(Some(d), Some(50.0), Some(0.0), Some(100.0)))
                 .unwrap();
-            assert_eq!(bmp.width, (d * clear_from).ceil() as u32 + 2, "Size {d}");
+            assert_eq!(
+                bmp.width,
+                ((d * clear_from).ceil() as u32 + 2).next_multiple_of(2),
+                "Size {d}"
+            );
             let (c, y) = (f64::from(bmp.width) / 2.0, bmp.height / 2);
             let dy = f64::from(y) + 0.5 - c;
             for x in 0..bmp.width {

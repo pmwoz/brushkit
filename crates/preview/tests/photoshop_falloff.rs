@@ -7,6 +7,7 @@ const SITTING_905: &str = "device-validation/ps-sitting-2026-10-31/905";
 const SITTING_264: &str = "device-validation/ps-sitting-2026-11-01/264";
 const SITTING_269: &str = "device-validation/ps-sitting-2026-11-01/269";
 const SITTING_271: &str = "device-validation/ps-sitting-2026-11-01/271";
+const SITTING_273: &str = "device-validation/ps-sitting-2026-11-01/273-run4";
 const SIZE: f64 = 512.0;
 const BIN: f64 = 0.05;
 /// Photoshop's `Hrdn` 0 dab reaches alpha 0 at 1.65 nominal radii, farther
@@ -356,6 +357,94 @@ fn size_8_hardness_100_tip_matches_photoshops_profile() {
 }
 
 #[test]
+fn size_16_hardness_100_tip_matches_photoshops_profile() {
+    assert_profile_matches_photoshop(
+        &format!("{SITTING_273}/size16-hard-A.png"),
+        16.0,
+        100.0,
+        0.0,
+        100.0,
+    );
+}
+
+#[test]
+fn size_32_hardness_100_tip_matches_photoshops_profile() {
+    assert_profile_matches_photoshop(
+        &format!("{SITTING_273}/size32-hard-A.png"),
+        32.0,
+        100.0,
+        0.0,
+        100.0,
+    );
+}
+
+#[test]
+fn size_64_hardness_100_tip_matches_photoshops_profile() {
+    assert_profile_matches_photoshop(
+        &format!("{SITTING_273}/size64-hard-A.png"),
+        64.0,
+        100.0,
+        0.0,
+        100.0,
+    );
+}
+
+#[test]
+fn size_128_hardness_100_tip_matches_photoshops_profile() {
+    assert_profile_matches_photoshop(
+        &format!("{SITTING_273}/size128-hard-A.png"),
+        128.0,
+        100.0,
+        0.0,
+        100.0,
+    );
+}
+
+#[test]
+fn size_256_hardness_100_tip_matches_photoshops_profile() {
+    assert_profile_matches_photoshop(
+        &format!("{SITTING_273}/size256-hard-A.png"),
+        256.0,
+        100.0,
+        0.0,
+        100.0,
+    );
+}
+
+#[test]
+fn size_384_hardness_100_tip_matches_photoshops_profile() {
+    assert_profile_matches_photoshop(
+        &format!("{SITTING_273}/size384-hard-A.png"),
+        384.0,
+        100.0,
+        0.0,
+        100.0,
+    );
+}
+
+#[test]
+fn size_512_hardness_100_tip_matches_photoshops_profile() {
+    assert_profile_matches_photoshop(
+        &format!("{SITTING_273}/size512-hard-A.png"),
+        512.0,
+        100.0,
+        0.0,
+        100.0,
+    );
+}
+
+#[test]
+fn size_1024_hardness_100_tip_matches_photoshops_profile() {
+    assert_profile_matches_photoshop(
+        &format!("{SITTING_273}/size1024-hard-A.png"),
+        1024.0,
+        100.0,
+        0.0,
+        100.0,
+    );
+}
+
+#[test]
 fn hard_tip_is_as_wide_as_photoshops_hard_null() {
     let (Some(soft), Some((width, height, ps))) = (
         e25_geometry(SIZE),
@@ -381,4 +470,40 @@ fn hard_tip_is_as_wide_as_photoshops_hard_null() {
         .max()
         .unwrap();
     assert_eq!(ours_widest, ps_widest);
+}
+
+fn inked_width(width: u32, alpha: &[f64]) -> u32 {
+    let columns: Vec<u32> = (0..alpha.len())
+        .filter(|&i| alpha[i] > 0.0)
+        .map(|i| i as u32 % width)
+        .collect();
+    columns.iter().max().unwrap() - columns.iter().min().unwrap() + 1
+}
+
+#[test]
+fn hard_tip_is_as_wide_as_photoshops_at_each_size() {
+    for size in [16, 32, 64, 128, 256, 384, 512, 1024] {
+        let photoshop = |render: &str| {
+            let (width, _, alpha) = photoshop_alpha(render)?;
+            Some(inked_width(width, &alpha))
+        };
+        let (Some(geom), Some(a), Some(b)) = (
+            e25_geometry(f64::from(size)),
+            photoshop(&format!("{SITTING_273}/size{size}-hard-A.png")),
+            photoshop(&format!("{SITTING_273}/size{size}-hard-B.png")),
+        ) else {
+            println!("skip: BRUSHKIT_CORPUS_DIR unset or the 273 sitting is missing");
+            return;
+        };
+        let tip = synthesize_computed_tip(&ComputedGeometry {
+            hardness_pct: Some(100.0),
+            ..geom
+        })
+        .unwrap();
+        let ours = inked_width(tip.width, &alpha_of(&tip));
+        assert!(
+            ours == a || ours == b,
+            "Size {size}: ours {ours}, Photoshop {a} and {b}"
+        );
+    }
 }
