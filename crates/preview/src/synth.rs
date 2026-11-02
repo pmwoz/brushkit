@@ -558,6 +558,26 @@ mod tests {
     }
 
     #[test]
+    fn ink_grows_with_diameter_below_size_8() {
+        for h in [0.0, 50.0, 100.0] {
+            let mut previous = (1.0, 0.0);
+            for step in 0..=700 {
+                let d = 1.0 + f64::from(step) / 100.0;
+                let bmp = synthesize_computed_tip(&geom(Some(d), Some(h), Some(0.0), Some(100.0)))
+                    .unwrap();
+                let ink: f64 = bmp.data.iter().map(|&v| f64::from(v) / 255.0).sum();
+                assert!(
+                    ink >= previous.1,
+                    "Hrdn {h}: ink {ink:.3} at diameter {d:.2} is below {:.3} at {:.2}",
+                    previous.1,
+                    previous.0
+                );
+                previous = (d, ink);
+            }
+        }
+    }
+
+    #[test]
     fn nan_hardness_draws_like_missing_hardness() {
         let nan = synthesize_computed_tip(&geom(Some(40.0), Some(f64::NAN), None, None)).unwrap();
         let missing = synthesize_computed_tip(&geom(Some(40.0), None, None, None)).unwrap();
