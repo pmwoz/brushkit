@@ -15,7 +15,6 @@ pub fn synthesized_tip_side(geom: &brushkit_abr::ComputedGeometry) -> Option<u32
 }
 
 const HALF_LEVEL: f64 = 0.5 / 255.0;
-const ANTIALIAS_PX: f64 = 1.0;
 const SUBSAMPLED_BELOW_PX: f64 = 128.0;
 const SUBSAMPLES: u32 = 8;
 
@@ -190,24 +189,10 @@ fn monotone_cubic(h: f64, y: fn(&Knot) -> f64) -> f64 {
         + h11 * step(i) * slope(i + 1)
 }
 
-fn antialias_steepness(hardness_pct: f64) -> f64 {
-    const KNOTS: [(f64, f64); 2] = [(0.0, 2.29), (50.0, 1.14)];
-    let h = hardness_pct.clamp(KNOTS[0].0, KNOTS[KNOTS.len() - 1].0);
-    for w in KNOTS.windows(2) {
-        let (h0, k0) = w[0];
-        let (h1, k1) = w[1];
-        if h <= h1 {
-            return k0 + (h - h0) / (h1 - h0) * (k1 - k0);
-        }
-    }
-    KNOTS[KNOTS.len() - 1].1
-}
-
 struct Profile {
     diameter: f64,
     opaque_until: f64,
-    ramp: f64,
-    steepness: f64,
+    width: f64,
     clear_from: f64,
     side: u32,
 }
@@ -220,26 +205,18 @@ impl Profile {
             .filter(|h| !h.is_nan())
             .unwrap_or(100.0)
             .clamp(0.0, 100.0);
-        let radius = diameter / 2.0;
         let knot = at_diameter(diameter, falloff_at(hardness));
         let (knot, clear_level) = match capped_at_hard_edge(diameter, knot) {
             Some(hard) => (hard, HARD_EDGE_CLEAR_LEVEL),
             None => (knot, HALF_LEVEL),
         };
-        let antialias_only = radius <= ANTIALIAS_PX;
-        let (opaque_until, ramp, steepness, clear_from) = if antialias_only {
-            (0.0, 1.0, antialias_steepness(hardness), 1.0)
-        } else {
-            let clear_from = knot.opaque_until + knot.width * (-clear_level.ln()).sqrt();
-            (knot.opaque_until, knot.width, 1.0, clear_from)
-        };
+        let clear_from = knot.opaque_until + knot.width * (-clear_level.ln()).sqrt();
         // Photoshop centres a dab between pixels.
         let side = ((diameter * clear_from).ceil() as u32 + 2).next_multiple_of(2);
         Profile {
             diameter,
-            opaque_until,
-            ramp,
-            steepness,
+            opaque_until: knot.opaque_until,
+            width: knot.width,
             clear_from,
             side,
         }
@@ -251,8 +228,8 @@ impl Profile {
         } else if r >= self.clear_from {
             0.0
         } else {
-            let t = (r - self.opaque_until) / self.ramp;
-            (-self.steepness * t * t).exp()
+            let t = (r - self.opaque_until) / self.width;
+            (-t * t).exp()
         }
     }
 }
@@ -270,9 +247,9 @@ impl Profile {
 /// narrower core and a wider falloff, as in Photoshop, so even a 100% hardness
 /// tip falls off past its nominal edge at 8 px. No tip is harder than
 /// Photoshop's hard edge, a falloff about 1.4 px wide whose core ends 1.3 px
-/// inside the nominal edge below 64 px and 2.7 px inside from 384 px on. A tip
-/// whose radius is one pixel or less only antialiases its edge and ends at the
-/// nominal edge. The side is even. When the tip's minor axis is below 128 px,
+/// inside the nominal edge below 64 px and 2.7 px inside from 384 px on. Below
+/// 8 px, where no Photoshop render was measured, the same rules continue down
+/// to 1 px. The side is even. When the tip's minor axis is below 128 px,
 /// each pixel is the mean of 8×8 samples.
 pub fn synthesize_computed_tip(geom: &brushkit_abr::ComputedGeometry) -> Option<GrayscaleBitmap> {
     if !can_synthesize(geom) {
@@ -533,28 +510,6 @@ mod tests {
             (c + 133..bmp.width).all(|x| pixel_at(&bmp, x, y) == 0),
             "ink from r 1.33 on"
         );
-    }
-
-    #[test]
-    fn a_tip_of_radius_one_pixel_or_less_gets_no_tail() {
-        let tiny = synthesize_computed_tip(&geom(Some(1.0), Some(0.0), None, None)).unwrap();
-        assert_eq!(tiny.width, 4);
-        let inked: Vec<(usize, usize)> = (0..tiny.data.len())
-            .filter(|&i| tiny.data[i] > 0)
-            .map(|i| (i % 4, i / 4))
-            .collect();
-        assert_eq!(inked, [(1, 1), (2, 1), (1, 2), (2, 2)]);
-    }
-
-    #[test]
-    fn a_tip_of_radius_one_pixel_or_less_keeps_its_antialiased_ring() {
-        let row = |d: f64, h: f64, y: u32| {
-            let bmp =
-                synthesize_computed_tip(&geom(Some(d), Some(h), Some(0.0), Some(100.0))).unwrap();
-            bmp.data[(y * bmp.width) as usize..((y + 1) * bmp.width) as usize].to_vec()
-        };
-        assert_eq!(row(2.0, 0.0, 1), [0, 79, 79, 0]);
-        assert_eq!(row(1.4678140119077667, 100.0, 1), [0, 66, 66, 0]);
     }
 
     #[test]
