@@ -188,6 +188,7 @@ fn parse_brush_preset_objc(cursor: &mut Cursor<&[u8]>) -> io::Result<BrushDescIn
     let mut scatter_both_axes = None;
     let mut count_jitter = None;
     let mut minimum_diameter = None;
+    let mut tilt_scale = None;
     let mut roundness_jitter = None;
     let mut minimum_roundness = None;
     let mut flip_x = None;
@@ -302,6 +303,8 @@ fn parse_brush_preset_objc(cursor: &mut Cursor<&[u8]>) -> io::Result<BrushDescIn
             scatter_both_axes = Some(cursor.read_u8()? != 0);
         } else if key == "minimumDiameter" && type_tag == "UntF" {
             minimum_diameter = Some(read_unit_float(cursor)?);
+        } else if key == "tiltScale" && type_tag == "UntF" {
+            tilt_scale = Some(read_unit_float(cursor)?);
         } else if key == "roundnessDynamics" && type_tag == "Objc" {
             let b = parse_brvr(cursor)?;
             roundness_jitter = b.jitter_pct;
@@ -447,6 +450,7 @@ fn parse_brush_preset_objc(cursor: &mut Cursor<&[u8]>) -> io::Result<BrushDescIn
             } else {
                 None
             },
+            tilt_scale_pct: if use_tip_dynamics { tilt_scale } else { None },
             roundness_jitter_pct: if use_tip_dynamics {
                 roundness_jitter
             } else {
@@ -1437,7 +1441,7 @@ mod tests {
         buf.write_u16::<BigEndian>(0).unwrap();
         buf.write_u32::<BigEndian>(11).unwrap();
         buf.extend_from_slice(b"brushPreset");
-        buf.write_u32::<BigEndian>(9).unwrap();
+        buf.write_u32::<BigEndian>(10).unwrap();
 
         buf.write_u32::<BigEndian>(0).unwrap();
         buf.extend_from_slice(b"Nm  ");
@@ -1462,6 +1466,11 @@ mod tests {
         buf.extend_from_slice(b"UntF");
         buf.extend_from_slice(b"#Prc");
         buf.write_f64::<BigEndian>(40.0).unwrap();
+
+        write_key(&mut buf, b"tiltScale");
+        buf.extend_from_slice(b"UntF");
+        buf.extend_from_slice(b"#Prc");
+        buf.write_f64::<BigEndian>(59.0).unwrap();
 
         buf
     }
@@ -1704,6 +1713,7 @@ mod tests {
         assert_eq!(d.angle_control, Some(6));
         assert_eq!(d.angle_jitter_pct, Some(40.0));
         assert_eq!(d.minimum_diameter_pct, Some(40.0));
+        assert_eq!(d.tilt_scale_pct, Some(59.0));
     }
 
     #[test]
@@ -1717,6 +1727,7 @@ mod tests {
         assert!(d.angle_control.is_none());
         assert!(d.angle_jitter_pct.is_none());
         assert!(d.minimum_diameter_pct.is_none());
+        assert!(d.tilt_scale_pct.is_none());
     }
 
     #[test]
