@@ -463,3 +463,77 @@ fn corpus_sets_a_non_default_tilt_scale_on_size_on_pen_tilt() {
         "no corpus preset with Size on Pen Tilt reads a tilt_scale_pct other than 200 %"
     );
 }
+
+fn tool_options_items(
+    items: &[brushkit_abr::dump::DumpItem],
+) -> Option<&[brushkit_abr::dump::DumpItem]> {
+    items.iter().find_map(|item| match &item.value {
+        brushkit_abr::dump::DumpValue::Objc { items, .. } if item.key == "toolOptions" => {
+            Some(items.as_slice())
+        }
+        _ => None,
+    })
+}
+
+/// `toolOptions/MdSl/Opct` of a preset that stores its blend mode and opacity
+/// only in `MdSl`.
+fn mdsl_only_opacity(items: &[brushkit_abr::dump::DumpItem]) -> Option<i32> {
+    let options = tool_options_items(items)?;
+    if options.iter().any(|i| i.key == "Md  " || i.key == "Opct") {
+        return None;
+    }
+    options.iter().find_map(|item| match &item.value {
+        brushkit_abr::dump::DumpValue::Objc { items, .. } if item.key == "MdSl" => {
+            items.iter().find_map(|i| match i.value {
+                brushkit_abr::dump::DumpValue::Long(v) if i.key == "Opct" => Some(v),
+                _ => None,
+            })
+        }
+        _ => None,
+    })
+}
+
+#[test]
+fn every_corpus_mdsl_preset_reads_its_blend_mode_and_opacity() {
+    let Some((root, files)) = corpus() else {
+        println!("skip: BRUSHKIT_CORPUS_DIR unset");
+        return;
+    };
+    let mut checked = 0;
+    for path in &files {
+        let bytes = std::fs::read(path).expect("corpus file is readable");
+        let name = path.strip_prefix(&root).unwrap_or(path).display();
+        let pack = brushkit_abr::parse_abr(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let presets = pack
+            .raw_desc_block
+            .as_deref()
+            .map(|desc| brushkit_abr::dump::dump_descriptors(desc).presets)
+            .unwrap_or_default();
+        let descriptors = pack
+            .brushes
+            .iter()
+            .map(|b| (&b.descriptor, b.preset_index))
+            .chain(
+                pack.computed_presets
+                    .iter()
+                    .map(|p| (&p.descriptor, p.preset_index)),
+            );
+        for (d, preset_index) in descriptors {
+            let Some(opacity) = preset_index
+                .and_then(|pi| presets.get(pi))
+                .and_then(|p| mdsl_only_opacity(&p.items))
+            else {
+                continue;
+            };
+            let options = d.tool_options.as_ref().expect("toolOptions is parsed");
+            assert_eq!(options.opacity_pct, Some(opacity), "{name}");
+            assert!(options.blend_mode.is_some(), "{name}: no blend_mode");
+            checked += 1;
+        }
+    }
+    println!("{checked} preset(s) with MdSl only");
+    assert!(
+        checked > 0,
+        "no corpus preset stores its blend mode only in MdSl"
+    );
+}

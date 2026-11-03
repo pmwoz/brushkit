@@ -1337,6 +1337,56 @@ mod tests {
         buf
     }
 
+    fn build_mdsl_desc_block(layer_key: &[u8; 4], top_level: bool) -> Vec<u8> {
+        let mut buf = Vec::new();
+
+        buf.write_u32::<BigEndian>(16).unwrap();
+        buf.write_u32::<BigEndian>(1).unwrap();
+        buf.write_u16::<BigEndian>(0).unwrap();
+        buf.write_u32::<BigEndian>(0).unwrap();
+        buf.extend_from_slice(b"null");
+        buf.write_u32::<BigEndian>(1).unwrap();
+
+        buf.write_u32::<BigEndian>(0).unwrap();
+        buf.extend_from_slice(b"Brsh");
+        buf.extend_from_slice(b"VlLs");
+        buf.write_u32::<BigEndian>(1).unwrap();
+
+        buf.extend_from_slice(b"Objc");
+        buf.write_u32::<BigEndian>(1).unwrap();
+        buf.write_u16::<BigEndian>(0).unwrap();
+        buf.write_u32::<BigEndian>(11).unwrap();
+        buf.extend_from_slice(b"brushPreset");
+        buf.write_u32::<BigEndian>(2).unwrap();
+
+        write_key(&mut buf, b"toolOptions");
+        buf.extend_from_slice(b"Objc");
+        buf.write_u32::<BigEndian>(1).unwrap();
+        buf.write_u16::<BigEndian>(0).unwrap();
+        write_key(&mut buf, b"PbTl");
+        buf.write_u32::<BigEndian>(if top_level { 4 } else { 2 })
+            .unwrap();
+        write_long(&mut buf, b"flow", 50);
+        write_key(&mut buf, b"MdSl");
+        buf.extend_from_slice(b"Objc");
+        buf.write_u32::<BigEndian>(1).unwrap();
+        buf.write_u16::<BigEndian>(0).unwrap();
+        write_key(&mut buf, b"MdSC");
+        buf.write_u32::<BigEndian>(4).unwrap();
+        write_long(&mut buf, b"Sgnt", i32::from_be_bytes(*b"8BIM"));
+        write_long(&mut buf, b"Ky  ", i32::from_be_bytes(*layer_key));
+        write_long(&mut buf, b"Opct", 35);
+        write_bool(&mut buf, b"Clpp", false);
+        if top_level {
+            write_enum(&mut buf, b"Md  ", b"BlnM", b"Scrn");
+            write_long(&mut buf, b"Opct", 80);
+        }
+
+        write_text(&mut buf, b"Nm  ", "Oval Multiply");
+
+        buf
+    }
+
     fn mixer_tool_options() -> crate::ToolOptions {
         crate::ToolOptions {
             tool: "MixB".to_string(),
@@ -1902,6 +1952,34 @@ mod tests {
                 ..mixer_tool_options()
             })
         );
+    }
+
+    fn mdsl_tool_options(layer_key: &[u8; 4], top_level: bool) -> crate::ToolOptions {
+        let infos = extract_all_brush_info(&build_mdsl_desc_block(layer_key, top_level));
+        assert_eq!(infos.len(), 1);
+        infos[0].descriptor.tool_options.clone().unwrap()
+    }
+
+    #[test]
+    fn mdsl_supplies_blend_mode_and_opacity() {
+        let options = mdsl_tool_options(b"mul ", false);
+        assert_eq!(options.blend_mode.as_deref(), Some("Mltp"));
+        assert_eq!(options.opacity_pct, Some(35));
+        assert_eq!(options.flow_pct, Some(50));
+    }
+
+    #[test]
+    fn top_level_md_and_opct_win_over_mdsl() {
+        let options = mdsl_tool_options(b"mul ", true);
+        assert_eq!(options.blend_mode.as_deref(), Some("Scrn"));
+        assert_eq!(options.opacity_pct, Some(80));
+    }
+
+    #[test]
+    fn unknown_mdsl_layer_key_reads_raw() {
+        let options = mdsl_tool_options(b"zzz ", false);
+        assert_eq!(options.blend_mode.as_deref(), Some("zzz "));
+        assert_eq!(options.opacity_pct, Some(35));
     }
 
     #[test]
