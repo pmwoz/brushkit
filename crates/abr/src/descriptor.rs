@@ -809,6 +809,79 @@ fn parse_txtr(cursor: &mut Cursor<&[u8]>) -> io::Result<Txtr> {
     Ok(Txtr { name, id })
 }
 
+/// Layer blend keys (`MdSl/Ky  `) and the `BlnM` value id of the same mode.
+const LAYER_BLEND_MODES: [([u8; 4], &str); 27] = [
+    (*b"norm", "Nrml"),
+    (*b"diss", "Dslv"),
+    (*b"dark", "Drkn"),
+    (*b"mul ", "Mltp"),
+    (*b"idiv", "CBrn"),
+    (*b"lbrn", "linearBurn"),
+    (*b"dkCl", "darkerColor"),
+    (*b"lite", "Lghn"),
+    (*b"scrn", "Scrn"),
+    (*b"div ", "CDdg"),
+    (*b"lddg", "linearDodge"),
+    (*b"lgCl", "lighterColor"),
+    (*b"over", "Ovrl"),
+    (*b"sLit", "SftL"),
+    (*b"hLit", "HrdL"),
+    (*b"vLit", "vividLight"),
+    (*b"lLit", "linearLight"),
+    (*b"pLit", "pinLight"),
+    (*b"hMix", "hardMix"),
+    (*b"diff", "Dfrn"),
+    (*b"smud", "Xclu"),
+    (*b"fsub", "blendSubtraction"),
+    (*b"fdiv", "blendDivide"),
+    (*b"hue ", "H   "),
+    (*b"sat ", "Strt"),
+    (*b"colr", "Clr "),
+    (*b"lum ", "Lmns"),
+];
+
+/// Parsed contents of the `MdSl` object (class `MdSC`) inside `toolOptions`.
+struct MdSl {
+    blend_mode: Option<String>,
+    opacity_pct: Option<i32>,
+}
+
+fn parse_mdsl(cursor: &mut Cursor<&[u8]>) -> io::Result<MdSl> {
+    let _class_name = read_unicode_string(cursor)?;
+    let _class_id = read_id(cursor)?;
+    let item_count = cursor.read_u32::<BigEndian>()?;
+
+    let mut mdsl = MdSl {
+        blend_mode: None,
+        opacity_pct: None,
+    };
+    for _ in 0..item_count {
+        let key = read_id(cursor)?;
+        let type_tag = read_type_tag(cursor)?;
+        match (key.as_str(), type_tag.as_str()) {
+            ("Ky  ", "long") => {
+                let layer_key = cursor.read_i32::<BigEndian>()?.to_be_bytes();
+                mdsl.blend_mode = Some(
+                    LAYER_BLEND_MODES
+                        .iter()
+                        .find(|(k, _)| *k == layer_key)
+                        .map_or_else(
+                            || String::from_utf8_lossy(&layer_key).into_owned(),
+                            |(_, id)| id.to_string(),
+                        ),
+                );
+            }
+            ("Opct", "long") => mdsl.opacity_pct = Some(cursor.read_i32::<BigEndian>()?),
+            _ => {
+                if skip_descriptor_value(cursor, &type_tag, 0).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(mdsl)
+}
+
 fn parse_tool_options(cursor: &mut Cursor<&[u8]>) -> io::Result<crate::ToolOptions> {
     let _class_name = read_unicode_string(cursor)?;
     let mut options = crate::ToolOptions {
@@ -816,6 +889,7 @@ fn parse_tool_options(cursor: &mut Cursor<&[u8]>) -> io::Result<crate::ToolOptio
         ..Default::default()
     };
     let item_count = cursor.read_u32::<BigEndian>()?;
+    let mut mdsl = None;
 
     for _ in 0..item_count {
         let key = read_id(cursor)?;
@@ -834,12 +908,17 @@ fn parse_tool_options(cursor: &mut Cursor<&[u8]>) -> io::Result<crate::ToolOptio
             ("wetness", "doub") => options.wetness_pct = Some(cursor.read_f64::<BigEndian>()?),
             ("dryness", "doub") => options.dryness_pct = Some(cursor.read_f64::<BigEndian>()?),
             ("mix", "doub") => options.mix_pct = Some(cursor.read_f64::<BigEndian>()?),
+            ("MdSl", "Objc") => mdsl = Some(parse_mdsl(cursor)?),
             _ => {
                 if skip_descriptor_value(cursor, &type_tag, 0).is_err() {
                     break;
                 }
             }
         }
+    }
+    if let Some(mdsl) = mdsl {
+        options.blend_mode = options.blend_mode.or(mdsl.blend_mode);
+        options.opacity_pct = options.opacity_pct.or(mdsl.opacity_pct);
     }
     Ok(options)
 }
