@@ -486,12 +486,15 @@ pub struct ToolOptions {
     /// The object's class id, which names the tool the preset was saved for
     /// (e.g. "PbTl", "MixB").
     pub tool: String,
-    /// `toolOptions/Opct` (`long`) — opacity percent.
+    /// `toolOptions/Opct` (`long`) — opacity percent. Without it,
+    /// `toolOptions/MdSl/Opct` (`long`).
     pub opacity_pct: Option<i32>,
     /// `toolOptions/flow` (`long`) — flow percent.
     pub flow_pct: Option<i32>,
     /// `toolOptions/Md  ` (`enum` `BlnM`, key = "Md" + two spaces) — the raw
-    /// blend-mode value id (e.g. "Nrml").
+    /// blend-mode value id (e.g. "Nrml"). Without it, the `BlnM` value id of
+    /// the layer blend key in `toolOptions/MdSl/Ky  ` (`long`, e.g. `mul ` →
+    /// "Mltp"), or the raw four-byte key when it has no known `BlnM` id.
     pub blend_mode: Option<String>,
     /// `toolOptions/smoothing` (`bool`).
     pub smoothing: Option<bool>,
