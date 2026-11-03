@@ -428,3 +428,38 @@ fn corpus_sets_a_non_default_value_for_every_tool_setting_and_intr() {
         assert!(count > 0, "no corpus preset has {condition}");
     }
 }
+
+#[test]
+fn corpus_sets_a_non_default_tilt_scale_on_size_on_pen_tilt() {
+    let Some((root, files)) = corpus() else {
+        println!("skip: BRUSHKIT_CORPUS_DIR unset");
+        return;
+    };
+    let (mut read, mut non_default) = (0, 0);
+    for path in &files {
+        let bytes = std::fs::read(path).expect("corpus file is readable");
+        let name = path.strip_prefix(&root).unwrap_or(path).display();
+        let all = brushkit_abr::parse_abr_all_deferred_without_patterns(&bytes)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let descriptors = all
+            .pack
+            .brushes
+            .iter()
+            .map(|b| &b.descriptor)
+            .chain(all.pack.computed_presets.iter().map(|p| &p.descriptor));
+        for d in descriptors {
+            let Some(scale) = d.tilt_scale_pct else {
+                continue;
+            };
+            read += 1;
+            if d.pressure_size_control == Some(3) && scale != 200.0 {
+                non_default += 1;
+            }
+        }
+    }
+    println!("tilt_scale_pct: {read} preset(s), {non_default} with Size on Pen Tilt and not 200 %");
+    assert!(
+        non_default > 0,
+        "no corpus preset with Size on Pen Tilt reads a tilt_scale_pct other than 200 %"
+    );
+}

@@ -597,6 +597,10 @@ pub struct BrushDescriptor {
     /// pressure. Present only when `useTipDynamics` is true (the brVr `Mnm`
     /// sub-key is vestigial in PS 27.8).
     pub minimum_diameter_pct: Option<f64>,
+    /// Photoshop top-level `tiltScale` (`UntF` `#Prc`) — Shape Dynamics
+    /// "Tilt Scale", the size factor applied while Size Jitter's control is
+    /// Pen Tilt. Present only when `useTipDynamics` is true.
+    pub tilt_scale_pct: Option<f64>,
     /// Photoshop `roundnessDynamics:brVr/jitter` (`#Prc`) — Shape Dynamics
     /// Roundness Jitter. Present only when `useTipDynamics` is true.
     pub roundness_jitter_pct: Option<f64>,
