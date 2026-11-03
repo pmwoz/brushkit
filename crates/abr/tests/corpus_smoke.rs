@@ -475,22 +475,25 @@ fn tool_options_items(
     })
 }
 
-/// `toolOptions/MdSl/Opct` of a preset that stores its blend mode and opacity
-/// only in `MdSl`.
-fn mdsl_only_opacity(items: &[brushkit_abr::dump::DumpItem]) -> Option<i32> {
+fn mdsl_only_layer_key_and_opacity(
+    items: &[brushkit_abr::dump::DumpItem],
+) -> Option<(String, i32)> {
     let options = tool_options_items(items)?;
     if options.iter().any(|i| i.key == "Md  " || i.key == "Opct") {
         return None;
     }
-    options.iter().find_map(|item| match &item.value {
-        brushkit_abr::dump::DumpValue::Objc { items, .. } if item.key == "MdSl" => {
-            items.iter().find_map(|i| match i.value {
-                brushkit_abr::dump::DumpValue::Long(v) if i.key == "Opct" => Some(v),
-                _ => None,
-            })
-        }
+    let mdsl = options.iter().find_map(|item| match &item.value {
+        brushkit_abr::dump::DumpValue::Objc { items, .. } if item.key == "MdSl" => Some(items),
         _ => None,
-    })
+    })?;
+    let long = |key: &str| {
+        mdsl.iter().find_map(|i| match i.value {
+            brushkit_abr::dump::DumpValue::Long(v) if i.key == key => Some(v),
+            _ => None,
+        })
+    };
+    let layer_key = String::from_utf8_lossy(&long("Ky  ")?.to_be_bytes()).into_owned();
+    Some((layer_key, long("Opct")?))
 }
 
 #[test]
@@ -519,15 +522,22 @@ fn every_corpus_mdsl_preset_reads_its_blend_mode_and_opacity() {
                     .map(|p| (&p.descriptor, p.preset_index)),
             );
         for (d, preset_index) in descriptors {
-            let Some(opacity) = preset_index
+            let Some((layer_key, opacity)) = preset_index
                 .and_then(|pi| presets.get(pi))
-                .and_then(|p| mdsl_only_opacity(&p.items))
+                .and_then(|p| mdsl_only_layer_key_and_opacity(&p.items))
             else {
                 continue;
             };
             let options = d.tool_options.as_ref().expect("toolOptions is parsed");
             assert_eq!(options.opacity_pct, Some(opacity), "{name}");
-            assert!(options.blend_mode.is_some(), "{name}: no blend_mode");
+            let blend_mode = options.blend_mode.as_deref();
+            assert!(
+                blend_mode.is_some_and(|m| m != layer_key),
+                "{name}: layer key {layer_key:?} read as {blend_mode:?}, not a BlnM id"
+            );
+            if layer_key == "mul " {
+                assert_eq!(blend_mode, Some("Mltp"), "{name}");
+            }
             checked += 1;
         }
     }

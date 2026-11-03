@@ -809,8 +809,7 @@ fn parse_txtr(cursor: &mut Cursor<&[u8]>) -> io::Result<Txtr> {
     Ok(Txtr { name, id })
 }
 
-/// Layer blend keys (`MdSl/Ky  `) and the `BlnM` value id of the same mode.
-const LAYER_BLEND_MODES: [([u8; 4], &str); 27] = [
+const LAYER_KEY_TO_BLNM_ID: [([u8; 4], &str); 27] = [
     (*b"norm", "Nrml"),
     (*b"diss", "Dslv"),
     (*b"dark", "Drkn"),
@@ -840,7 +839,6 @@ const LAYER_BLEND_MODES: [([u8; 4], &str); 27] = [
     (*b"lum ", "Lmns"),
 ];
 
-/// Parsed contents of the `MdSl` object (class `MdSC`) inside `toolOptions`.
 struct MdSl {
     blend_mode: Option<String>,
     opacity_pct: Option<i32>,
@@ -862,7 +860,7 @@ fn parse_mdsl(cursor: &mut Cursor<&[u8]>) -> io::Result<MdSl> {
             ("Ky  ", "long") => {
                 let layer_key = cursor.read_i32::<BigEndian>()?.to_be_bytes();
                 mdsl.blend_mode = Some(
-                    LAYER_BLEND_MODES
+                    LAYER_KEY_TO_BLNM_ID
                         .iter()
                         .find(|(k, _)| *k == layer_key)
                         .map_or_else(
@@ -872,11 +870,7 @@ fn parse_mdsl(cursor: &mut Cursor<&[u8]>) -> io::Result<MdSl> {
                 );
             }
             ("Opct", "long") => mdsl.opacity_pct = Some(cursor.read_i32::<BigEndian>()?),
-            _ => {
-                if skip_descriptor_value(cursor, &type_tag, 0).is_err() {
-                    break;
-                }
-            }
+            _ => skip_descriptor_value(cursor, &type_tag, 0)?,
         }
     }
     Ok(mdsl)
@@ -908,7 +902,10 @@ fn parse_tool_options(cursor: &mut Cursor<&[u8]>) -> io::Result<crate::ToolOptio
             ("wetness", "doub") => options.wetness_pct = Some(cursor.read_f64::<BigEndian>()?),
             ("dryness", "doub") => options.dryness_pct = Some(cursor.read_f64::<BigEndian>()?),
             ("mix", "doub") => options.mix_pct = Some(cursor.read_f64::<BigEndian>()?),
-            ("MdSl", "Objc") => mdsl = Some(parse_mdsl(cursor)?),
+            ("MdSl", "Objc") => match parse_mdsl(cursor) {
+                Ok(parsed) => mdsl = Some(parsed),
+                Err(_) => break,
+            },
             _ => {
                 if skip_descriptor_value(cursor, &type_tag, 0).is_err() {
                     break;
@@ -1416,7 +1413,15 @@ mod tests {
         buf
     }
 
-    fn build_mdsl_desc_block(layer_key: &[u8; 4], top_level: bool) -> Vec<u8> {
+    #[derive(Clone, Copy)]
+    enum ToolItem {
+        Flow,
+        MdSl(&'static [u8; 4]),
+        MalformedMdSl,
+        TopLevelModeAndOpacity,
+    }
+
+    fn build_mdsl_desc_block(items: &[ToolItem]) -> Vec<u8> {
         let mut buf = Vec::new();
 
         buf.write_u32::<BigEndian>(16).unwrap();
@@ -1438,30 +1443,53 @@ mod tests {
         buf.extend_from_slice(b"brushPreset");
         buf.write_u32::<BigEndian>(2).unwrap();
 
+        write_text(&mut buf, b"Nm  ", "Oval Multiply");
+
         write_key(&mut buf, b"toolOptions");
         buf.extend_from_slice(b"Objc");
         buf.write_u32::<BigEndian>(1).unwrap();
         buf.write_u16::<BigEndian>(0).unwrap();
         write_key(&mut buf, b"PbTl");
-        buf.write_u32::<BigEndian>(if top_level { 4 } else { 2 })
-            .unwrap();
-        write_long(&mut buf, b"flow", 50);
-        write_key(&mut buf, b"MdSl");
-        buf.extend_from_slice(b"Objc");
-        buf.write_u32::<BigEndian>(1).unwrap();
-        buf.write_u16::<BigEndian>(0).unwrap();
-        write_key(&mut buf, b"MdSC");
-        buf.write_u32::<BigEndian>(4).unwrap();
-        write_long(&mut buf, b"Sgnt", i32::from_be_bytes(*b"8BIM"));
-        write_long(&mut buf, b"Ky  ", i32::from_be_bytes(*layer_key));
-        write_long(&mut buf, b"Opct", 35);
-        write_bool(&mut buf, b"Clpp", false);
-        if top_level {
-            write_enum(&mut buf, b"Md  ", b"BlnM", b"Scrn");
-            write_long(&mut buf, b"Opct", 80);
+        let count = items
+            .iter()
+            .map(|i| match i {
+                ToolItem::TopLevelModeAndOpacity => 2,
+                _ => 1,
+            })
+            .sum::<u32>();
+        buf.write_u32::<BigEndian>(count).unwrap();
+        for item in items {
+            match item {
+                ToolItem::Flow => write_long(&mut buf, b"flow", 50),
+                ToolItem::MdSl(layer_key) => {
+                    write_key(&mut buf, b"MdSl");
+                    buf.extend_from_slice(b"Objc");
+                    buf.write_u32::<BigEndian>(1).unwrap();
+                    buf.write_u16::<BigEndian>(0).unwrap();
+                    write_key(&mut buf, b"MdSC");
+                    buf.write_u32::<BigEndian>(4).unwrap();
+                    write_long(&mut buf, b"Sgnt", i32::from_be_bytes(*b"8BIM"));
+                    write_long(&mut buf, b"Ky  ", i32::from_be_bytes(**layer_key));
+                    write_long(&mut buf, b"Opct", 35);
+                    write_bool(&mut buf, b"Clpp", false);
+                }
+                ToolItem::MalformedMdSl => {
+                    write_key(&mut buf, b"MdSl");
+                    buf.extend_from_slice(b"Objc");
+                    buf.write_u32::<BigEndian>(1).unwrap();
+                    buf.write_u16::<BigEndian>(0).unwrap();
+                    write_key(&mut buf, b"MdSC");
+                    buf.write_u32::<BigEndian>(2).unwrap();
+                    write_long(&mut buf, b"Ky  ", i32::from_be_bytes(*b"mul "));
+                    write_key(&mut buf, b"Clpp");
+                    buf.extend_from_slice(b"zzzz");
+                }
+                ToolItem::TopLevelModeAndOpacity => {
+                    write_enum(&mut buf, b"Md  ", b"BlnM", b"Scrn");
+                    write_long(&mut buf, b"Opct", 80);
+                }
+            }
         }
-
-        write_text(&mut buf, b"Nm  ", "Oval Multiply");
 
         buf
     }
@@ -2033,32 +2061,43 @@ mod tests {
         );
     }
 
-    fn mdsl_tool_options(layer_key: &[u8; 4], top_level: bool) -> crate::ToolOptions {
-        let infos = extract_all_brush_info(&build_mdsl_desc_block(layer_key, top_level));
+    fn mdsl_tool_options(items: &[ToolItem]) -> crate::ToolOptions {
+        let infos = extract_all_brush_info(&build_mdsl_desc_block(items));
         assert_eq!(infos.len(), 1);
         infos[0].descriptor.tool_options.clone().unwrap()
     }
 
     #[test]
     fn mdsl_supplies_blend_mode_and_opacity() {
-        let options = mdsl_tool_options(b"mul ", false);
+        let options = mdsl_tool_options(&[ToolItem::Flow, ToolItem::MdSl(b"mul ")]);
         assert_eq!(options.blend_mode.as_deref(), Some("Mltp"));
         assert_eq!(options.opacity_pct, Some(35));
         assert_eq!(options.flow_pct, Some(50));
     }
 
     #[test]
-    fn top_level_md_and_opct_win_over_mdsl() {
-        let options = mdsl_tool_options(b"mul ", true);
-        assert_eq!(options.blend_mode.as_deref(), Some("Scrn"));
-        assert_eq!(options.opacity_pct, Some(80));
+    fn top_level_md_and_opct_win_over_mdsl_in_either_order() {
+        let mdsl = ToolItem::MdSl(b"mul ");
+        let top = ToolItem::TopLevelModeAndOpacity;
+        for items in [[mdsl, top], [top, mdsl]] {
+            let options = mdsl_tool_options(&items);
+            assert_eq!(options.blend_mode.as_deref(), Some("Scrn"));
+            assert_eq!(options.opacity_pct, Some(80));
+        }
     }
 
     #[test]
     fn unknown_mdsl_layer_key_reads_raw() {
-        let options = mdsl_tool_options(b"zzz ", false);
+        let options = mdsl_tool_options(&[ToolItem::MdSl(b"zzz ")]);
         assert_eq!(options.blend_mode.as_deref(), Some("zzz "));
         assert_eq!(options.opacity_pct, Some(35));
+    }
+
+    #[test]
+    fn malformed_mdsl_keeps_the_preset_and_earlier_tool_options() {
+        let options = mdsl_tool_options(&[ToolItem::Flow, ToolItem::MalformedMdSl]);
+        assert_eq!(options.flow_pct, Some(50));
+        assert_eq!(options.blend_mode, None);
     }
 
     #[test]
