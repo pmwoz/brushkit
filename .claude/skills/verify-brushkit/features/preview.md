@@ -10,7 +10,7 @@ file order.
 ## Sub-features
 
 - `preview-abr` returns one entry per sampled, computed or unsupported preset of an `.abr` pack.
-- `preview-computed` draws a computed preset as a square of side `synthesized_tip_side`, with `source_dimensions` null.
+- `preview-computed` draws a computed preset as a square of side `synthesized_tip_side`, with `source_dimensions` null. The side is wider than the preset's diameter, because the soft falloff runs past the nominal edge. A computed preset without a diameter of at least 1 px is `UnsupportedTipKind("computed")`.
 - `preview-brushset` returns every member of a `.brushset`, in `brushset.plist` order, with the set name.
 - `preview-brushset-no-plist` falls back to zip order with no set name.
 - `preview-brush` returns the single tip of a `.brush`.
@@ -43,12 +43,12 @@ Preconditions:
   - `missing_shape`: `A` with `"NoShapePng"`.
   - `oversized_png`: `"TooLarge { width: 60000, height: 60000 }"` with `source_dimensions` 60000x60000.
   - `deep_archive`: named `Brush` with `"Corrupt(\"Brush.archive: plist nesting depth exceeds limit\")"` and `source_dimensions` 16x8, because the tip size comes from `Shape.png`.
-- **Mixed .abr rows.** Run `$H run seed-unavail preview fuzz/corpus/preview_abr/unavailable_tips --kind abr`. The names are `["B","A","Round","C"]`. `B` is `Corrupt("no bitmap header found")`, `A` is available at 4x4, `Round` is the computed preset available at 32x32 with `source_dimensions` null, and `C` is `MissingTip { uuid: "a1b2c3d4-e5f6-7890-abcd-ef1234567892" }`. A `parse` run of the same seed gives `.result.pack.computed_presets[0].synthesized_side` `32`.
+- **Mixed .abr rows.** Run `$H run seed-unavail preview fuzz/corpus/preview_abr/unavailable_tips --kind abr`. The names are `["B","A","Round","C"]`. `B` is `Corrupt("no bitmap header found")`, `A` is available at 4x4, `Round`, the computed preset with a 30 px diameter, is available at 36x36 with `source_dimensions` null, and `C` is `MissingTip { uuid: "a1b2c3d4-e5f6-7890-abcd-ef1234567892" }`. A `parse` run of the same seed gives `.result.pack.computed_presets[0].synthesized_side` `36`.
 - **Zero-area tip.** Run `$H run seed-zero preview fuzz/corpus/preview_abr/zero_area_tip --kind abr`. Entry 0 `brush_1` is `Corrupt("tip has zero area")` with `source_dimensions: null`. Entry 1 `brush_0` is available at 1x1.
 - **max_cell bound.** Run `$H run cell32 preview "$BRUSHKIT_CORPUS_DIR/<pack>.abr" --max-cell 32`. `jq '[.result.entries[].tip.available // empty | [.width,.height] | max] | max'` is at most `32`, and `source_dimensions` match the default run.
 - **Downsample keeps aspect.** Run `$H run seed-cell4 preview fuzz/corpus/preview_abr/sampled_tip --kind abr --max-cell 4`. The 16x8 source comes back 4x2 with `source_dimensions` still 16x8.
 - **Tip that fits.** Run `$H run seed-fits preview fuzz/corpus/preview_abr/small_tip --kind abr --max-cell 4`. The 4x4 source comes back 4x4.
-- **Budget.** Run `$H run budget preview "$BRUSHKIT_CORPUS_DIR/<large pack>.abr" --max-cell 16384` on a pack of 150 MB or more. Some entries are `"OverBudget"`, `[.result.entries[].tip.available // empty | .width*.height] | add` is at most `268435456`, and no entry after the first `OverBudget` one is available.
+- **Budget.** Run `$H run budget preview "$BRUSHKIT_CORPUS_DIR/<large pack>.abr" --max-cell 16384` on a pack whose tips hold more than 256 MiB of pixels. Some entries are `"OverBudget"`, `[.result.entries[].tip.available // empty | .width*.height] | add` is at most `268435456`, and no entry after the first `OverBudget` one is available.
 - **Whole-file failures.** Each exits `1` with `.result.error`:
   - `sampled_tip --kind abr --max-cell 0`: `"max_cell must be at least 1"`.
   - `fuzz/corpus/preview_brush/root_brush --kind abr`: `"invalid or truncated ABR file header"`.
@@ -58,9 +58,10 @@ Preconditions:
 
 ## Gotchas
 
-- The corpus holds no `.brush` files. `preview-brush` on a real file needs one from the user. The seeds cover the mechanics: `root_brush` and `filtered_shape` are available, the others are not.
-- The corpus has v6, v7 and v10 packs only. v2 exists only as synthetic seeds such as `zero_area_tip`. No seed or corpus file reaches v1 or v9.
-- The corpus has no computed or unsupported presets, so `UnsupportedTipKind` is not reached. `unavailable_tips` is the only computed row.
-- An unavailable tip is `Ok` with an unavailable entry. Only a whole-file failure is exit `1`: `max_cell` 0, a bad `.abr` header or block, a zip that does not open, a `brushset.plist` that does not parse, a `.brushset` with no brushes, or a `.brush` without `Brush.archive`.
+- The corpus holds `.brush` files, most with one available tip. Of the seeds, `root_brush` and `filtered_shape` are available and the others are not.
+- The corpus has v1, v2, v6, v7, v9 and v10 packs. v6 and v10 are most of it.
+- Many v6 and v10 corpus packs have computed presets, and some v9 and v10 packs have unsupported presets. Those rows are `UnsupportedTipKind` with the `TipShape` name, such as `"RoundPoint"` or `"ErodibleFlat"`. No seed has an unsupported preset.
+- No corpus pack holds more than 256 MiB of tip pixels. The largest holds about 115 MB, so a budget run on the corpus has no `OverBudget` entry. The mechanics are proven by `crates/preview/tests/budget.rs` and the budget unit tests in `crates/preview/src/lib.rs`.
+- An unavailable tip is `Ok` with an unavailable entry. Only a whole-file failure is exit `1`: `max_cell` 0, a bad `.abr` header or block, a zip that does not open, a `brushset.plist` that does not parse, a `.brushset` with neither a `brushset.plist` nor a brush directory, or a `.brush` without `Brush.archive`. A `brushset.plist` whose `brushes` array is empty is `Ok` with no entries.
 - A budget run holds up to 256 MiB of bitmaps and about 650 MB of memory.
 - `sheet.png` holds only available tips, so its cell count can be lower than `.result.counts.entries`.

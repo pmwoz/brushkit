@@ -62,5 +62,7 @@ consumer-visible behavior, then exactly four H2 sections in this order:
 - [Parse an .abr pack](./parse-abr.md) covers the four `parse_abr*` entry
   points, unavailable brushes, uuids, up-front decoding, patterns,
   diagnostics and malformed input.
+- [Brush descriptor](./brush-descriptor.md) covers the typed
+  `BrushDescriptor` of each sampled brush and computed preset.
 - [Descriptor dump](./descriptor-dump.md) covers `dump::dump_descriptors` with
   the `serde` feature.

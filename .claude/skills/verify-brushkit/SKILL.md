@@ -1,6 +1,6 @@
 ---
 name: verify-brushkit
-description: Drive the brushkit library the way a downstream Rust consumer does and capture proof. Builds a probe crate that calls the public `brushkit` facade (parse_abr*, preview_abr/brush/brushset, *_first_available, preview with keep_going, contact sheets, procreate::Zip, descriptor dump) on real or synthetic brush files and writes JSON summaries and PNGs. Use to prove a reader or renderer change works on real files, beyond `cargo test`.
+description: Drive the brushkit library the way a downstream Rust consumer does and capture proof. Builds a probe crate that calls the public `brushkit` facade (parse_abr*, preview_abr/brush/brushset, *_first_available, preview with keep_going, contact sheets, procreate::Zip, typed brush descriptors, descriptor dump) on real or synthetic brush files and writes JSON summaries and PNGs. Use to prove a reader or renderer change works on real files, beyond `cargo test`.
 ---
 
 # verify-brushkit
@@ -60,7 +60,7 @@ The helper appends `--out <evidence dir>` itself. Commands:
 
 | Command | Public API called | Flags |
 |---|---|---|
-| `parse` | `abr::parse_abr` or a deferred variant, then `DeferredPack::decode_tip` per brush and `up_front_decoded_len`, and `preview::synthesized_tip_side` per computed preset | `--mode eager\|deferred\|deferred-no-patterns\|all-deferred` (default `eager`) |
+| `parse` | `abr::parse_abr` or a deferred variant, then `DeferredPack::decode_tip` per brush and `up_front_decoded_len`, and `preview::synthesized_tip_side` per computed preset. Each brush and computed preset carries its `BrushDescriptor` as `Debug` text | `--mode eager\|deferred\|deferred-no-patterns\|all-deferred` (default `eager`) |
 | `preview` | `preview::preview_abr`, `preview_brush` or `preview_brushset`, or the `_first_available` twin with `--first`, or `preview::preview` with a counting `keep_going` with `--stop-after`, then `generate_preview_png` per tip and `generate_contact_sheet_png` | `--kind abr\|brush\|brushset` (default from the file extension, required for extensionless fuzz seeds), `--max-cell N` (default 128), `--first N`, `--stop-after N` |
 | `zip` | `preview::procreate::Zip::open`, `names`, `members_in_zip_order`, `conflicting_names`, and with `--read` `read_entry` or `read_entry_within` | `--read NAME`, `--limit N` |
 | `dump` | `abr::parse_abr`, then `abr::dump::dump_descriptors` on `raw_desc_block`, serialized by serde | none |
