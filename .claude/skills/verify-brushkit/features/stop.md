@@ -30,7 +30,7 @@ Preconditions:
 - **Not stopped.** The same seed with `--stop-after 4` has 4 entries, `not_reached` `0` and `keep_going_calls` `4`, because `keep_going` is not asked about an entry that does not exist.
 - **First available.** The same seed with `--first 1 --stop-after 100` returns `A` at index 1 with `not_reached` `0` and `keep_going_calls` `2`. With `--first 2 --stop-after 1` it returns no entries, `not_reached` `3`, because the unavailable `B` was built first.
 - **Set and brush.** Run `$H run stop-set preview fuzz/corpus/preview_brushset/ordered_set --kind brushset --stop-after 1`. One entry `B`, `set_name` `"Ordered"`, `not_reached` `1`. `fuzz/corpus/preview_brush/root_brush --kind brush --stop-after 0` has no entries and `not_reached` `1`.
-- **Real pack.** Run `$H run stop5 preview "$BRUSHKIT_CORPUS_DIR/<pack>.abr" --stop-after 5` and a full run of the same pack. `stop5` has 5 entries equal to the first 5 of the full run, and `not_reached` is `counts.entries` of the full run minus 5.
+- **Real pack.** Run `$H run stop5 preview "$BRUSHKIT_CORPUS_DIR/<pack>.abr" --stop-after 5` and a full run of the same pack, which has more than 5 entries. `stop5` has 5 entries equal to the first 5 of the full run, and `not_reached` is `counts.entries` of the full run minus 5.
 
 ## Gotchas
 

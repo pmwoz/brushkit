@@ -138,6 +138,8 @@ fn tip_json(tip: &abr::TipBitmap) -> Value {
     json!({ "width": tip.width, "height": tip.height, "depth": tip.depth, "data_len": tip.data.len() })
 }
 
+/// `descriptor` is the `Debug` text of a `BrushDescriptor`, which has no serde
+/// derive.
 fn pack_json(pack: &AbrPack, tip: impl Fn(usize) -> Value) -> Value {
     json!({
         "version": pack.version.to_string(),
@@ -149,6 +151,7 @@ fn pack_json(pack: &AbrPack, tip: impl Fn(usize) -> Value) -> Value {
             "name": b.name,
             "preset_index": b.preset_index,
             "tip": tip(i),
+            "descriptor": format!("{:?}", b.descriptor),
         })).collect::<Vec<_>>(),
         "sampled_brushes": pack.sampled_brushes.iter().map(|s| match s {
             SampledBrush::Readable(i) => json!({ "readable": i }),
@@ -173,6 +176,7 @@ fn pack_json(pack: &AbrPack, tip: impl Fn(usize) -> Value) -> Value {
                 "angle_deg": g.angle_deg,
                 "roundness_pct": g.roundness_pct,
                 "synthesized_side": preview::synthesized_tip_side(&g),
+                "descriptor": format!("{:?}", p.descriptor),
             })
         }).collect::<Vec<_>>(),
         "patterns": pack.patterns.iter().map(|p| json!({
